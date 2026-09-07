@@ -1,0 +1,57 @@
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13"]
+build-backend = "uv_build"
+
+[project]
+name = "codex-snapshot-runner"
+version = "1.4.0"
+description = "Prepare bounded Git snapshots for manual review"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.12.13,<3.13"
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/xuanheng-tech/snapshot-runner"
+Issues = "https://github.com/xuanheng-tech/snapshot-runner/issues"
+
+[project.scripts]
+codex-repo-status = "codex_snapshot_runner.cli:repo_status_main"
+codex-diff-audit = "codex_snapshot_runner.cli:diff_audit_main"
+codex-branch-review = "codex_snapshot_runner.cli:branch_review_main"
+codex-test-triage = "codex_snapshot_runner.cli:test_triage_main"
+
+[tool.uv]
+package = false
+
+[tool.uv.build-backend]
+module-name = "codex_snapshot_runner"
+module-root = ""
+source-include = [
+    "tool_cli_contract.json",
+    "CHANGELOG.md",
+    "justfile",
+    ".python-version",
+    "uv.lock",
+    "scripts/**",
+    "tests/**",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "ruff==0.16.1",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

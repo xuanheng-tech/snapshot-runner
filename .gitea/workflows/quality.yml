@@ -1,0 +1,46 @@
+name: quality
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.1"
+          enable-cache: false
+          github-token: ""
+
+      - name: Prepare non-root environment
+        run: |
+          install -d -o ubuntu -g ubuntu -m 0700 /home/ubuntu/.local /home/ubuntu/.local/state
+          chown -R ubuntu:ubuntu "$GITHUB_WORKSPACE"
+
+      - name: Install Python
+        # setup-uv runs as root; let uv resolve Python paths for the test user.
+        run: runuser -u ubuntu -- env -u UV_PYTHON_INSTALL_DIR UV_CACHE_DIR=/home/ubuntu/.cache/uv uv python install 3.12.13
+
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          just-version: "1.21.0"
+          github-token: ""
+
+      - name: Check
+        run: runuser -u ubuntu -- env -u UV_PYTHON_INSTALL_DIR UV_CACHE_DIR=/home/ubuntu/.cache/uv just check

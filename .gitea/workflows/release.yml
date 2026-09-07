@@ -1,0 +1,56 @@
+name: release
+
+# This job only closes records for an already-published GitHub/PyPI release.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing public vX.Y.Z tag
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-record-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5; Node 24
+        with:
+          fetch-depth: 0
+          # The built-in job actor is used only for an exact missing public tag.
+          token: ${{ github.token }}
+          persist-credentials: true
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1; Node 24
+        with:
+          version: "0.12.1"
+          enable-cache: false
+          github-token: ""
+      - name: Prepare non-root environment
+        run: |
+          install -d -o ubuntu -g ubuntu -m 0700 /home/ubuntu/.local /home/ubuntu/.local/state
+          chown -R ubuntu:ubuntu "$GITHUB_WORKSPACE"
+      - name: Install Python
+        run: runuser -u ubuntu -- env -u UV_PYTHON_INSTALL_DIR UV_CACHE_DIR=/home/ubuntu/.cache/uv uv python install 3.12.13
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4; composite
+        with:
+          just-version: "1.21.0"
+          github-token: ""
+      - name: Shared quality gate
+        run: runuser -u ubuntu -- env -u UV_PYTHON_INSTALL_DIR UV_CACHE_DIR=/home/ubuntu/.cache/uv just check
+      - name: Verify public identity and close Gitea records
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          RELEASE_TOKEN: ${{ github.token }}
+          RELEASE_API_URL: ${{ github.api_url }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          uv run --no-sync python scripts/release.py sync-gitea "$RELEASE_TAG" \
+            --api-url "$RELEASE_API_URL" --repository "$RELEASE_REPOSITORY"

@@ -1,0 +1,110 @@
+{
+  "commands": [
+    {
+      "flags": [
+        "--repo",
+        "--summary",
+        "--version",
+        "--help"
+      ],
+      "name": "codex-repo-status",
+      "operation_class": "read_only",
+      "preconditions": [
+        "exact_absolute_repository_root",
+        "private_owned_state_directory"
+      ],
+      "result_statuses": [
+        "complete",
+        "partial",
+        "workflow_failed"
+      ]
+    },
+    {
+      "flags": [
+        "--repo",
+        "--initial-publish-evidence",
+        "--generated-tree",
+        "--scope-path",
+        "--summary",
+        "--version",
+        "--help"
+      ],
+      "name": "codex-diff-audit",
+      "operation_class": "read_only",
+      "preconditions": [
+        "exact_absolute_repository_root",
+        "exact_scope_paths_when_requested",
+        "private_owned_state_directory"
+      ],
+      "result_statuses": [
+        "complete",
+        "partial",
+        "evidence_gap",
+        "truncated",
+        "workflow_failed"
+      ]
+    },
+    {
+      "flags": [
+        "--repo",
+        "--summary",
+        "--version",
+        "--help"
+      ],
+      "name": "codex-branch-review",
+      "operation_class": "read_only",
+      "preconditions": [
+        "exact_absolute_repository_root",
+        "explicit_unique_local_base_branch_or_tag",
+        "private_owned_state_directory"
+      ],
+      "result_statuses": [
+        "complete",
+        "partial",
+        "evidence_gap",
+        "truncated",
+        "workflow_failed"
+      ]
+    },
+    {
+      "flags": [
+        "--repo",
+        "--summary",
+        "--version",
+        "--help"
+      ],
+      "name": "codex-test-triage",
+      "operation_class": "read_only",
+      "preconditions": [
+        "exact_absolute_repository_root",
+        "bounded_repository_relative_utf8_log",
+        "private_owned_state_directory"
+      ],
+      "result_statuses": [
+        "complete",
+        "partial",
+        "evidence_gap",
+        "truncated",
+        "workflow_failed"
+      ]
+    }
+  ],
+  "contract_version": 1,
+  "flags": {
+    "canonical_artifact": "snapshot.json",
+    "summary": "bounded_json_derived_from_canonical_artifact"
+  },
+  "operation_classes": [
+    "read_only"
+  ],
+  "protected_operations": [
+    "target_repository_git_mutation",
+    "test_execution",
+    "model_invocation",
+    "commit",
+    "push"
+  ],
+  "schema_version": 1,
+  "tool_name": "snapshot-runner",
+  "tool_version": "1.4.0"
+}
