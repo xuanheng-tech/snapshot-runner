@@ -1,4 +1,4 @@
-"""Bounded, repository-local evidence collection for Codex analysis tasks."""
+"""Bounded, repository-local evidence collection for agents and automation."""
 
 from __future__ import annotations
 

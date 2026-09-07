@@ -1,3 +1,3 @@
-"""Codex Snapshot Runner runtime package."""
+"""Snapshot Runner runtime; the import name is retained for compatibility."""
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"

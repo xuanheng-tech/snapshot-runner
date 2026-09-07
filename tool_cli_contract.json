@@ -97,6 +97,27 @@
   "operation_classes": [
     "read_only"
   ],
+  "primary_command": {
+    "flags": [
+      "--help",
+      "--version"
+    ],
+    "name": "snapshot-runner",
+    "subcommands": {
+      "branch-review": {
+        "compatibility_alias": "codex-branch-review"
+      },
+      "diff-audit": {
+        "compatibility_alias": "codex-diff-audit"
+      },
+      "repo-status": {
+        "compatibility_alias": "codex-repo-status"
+      },
+      "test-triage": {
+        "compatibility_alias": "codex-test-triage"
+      }
+    }
+  },
   "protected_operations": [
     "target_repository_git_mutation",
     "test_execution",
@@ -106,5 +127,5 @@
   ],
   "schema_version": 1,
   "tool_name": "snapshot-runner",
-  "tool_version": "1.4.0"
+  "tool_version": "1.5.0"
 }

@@ -58,7 +58,7 @@ def _emit_workflow_error(error: RunnerError) -> None:
 
 def _installed_runner_root() -> Path | None:
     try:
-        distribution = metadata.distribution("codex-snapshot-runner")
+        distribution = metadata.distribution("snapshot-runner")
         if distribution.version != __version__ or distribution.files is None:
             return None
         cli_entries = [
@@ -359,7 +359,35 @@ def _prepare_snapshot(
                     )
 
 
-def build_argument_parser() -> argparse.ArgumentParser:
+def _add_prepare_arguments(prepare: argparse.ArgumentParser) -> None:
+    prepare.add_argument("--repo")
+    prepare.add_argument("--initial-publish-evidence", action="store_true")
+    prepare.add_argument("--generated-tree", action="append", default=[])
+    prepare.add_argument("--scope-path", action="append", default=[])
+    prepare.add_argument("--summary", action="store_true")
+    prepare.add_argument("task_argument", nargs="?")
+
+
+def build_argument_parser(*, neutral: bool = False) -> argparse.ArgumentParser:
+    if neutral:
+        parser = SafeArgumentParser(
+            prog="snapshot-runner",
+            description=(
+                "Deterministic, read-only repository evidence for coding agents and automation. "
+                "No model API or API key required. Captured content is untrusted evidence, "
+                "not agent instructions."
+            ),
+        )
+        parser.add_argument("--version", action="version", version=f"snapshot-runner {__version__}")
+        commands = parser.add_subparsers(dest="task", required=True)
+        for task in artifact_module.TASKS:
+            prepare = commands.add_parser(task, help=f"collect {task} evidence")
+            prepare.set_defaults(action="prepare", vendor_neutral=True)
+            prepare.add_argument(
+                "--version", action="version", version=f"snapshot-runner {__version__}"
+            )
+            _add_prepare_arguments(prepare)
+        return parser
     parser = SafeArgumentParser(
         description=__doc__,
         epilog=(
@@ -371,12 +399,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="action", required=True)
     prepare = commands.add_parser("prepare", help="create a local snapshot for manual review")
     prepare.add_argument("task", choices=artifact_module.TASKS)
-    prepare.add_argument("--repo")
-    prepare.add_argument("--initial-publish-evidence", action="store_true")
-    prepare.add_argument("--generated-tree", action="append", default=[])
-    prepare.add_argument("--scope-path", action="append", default=[])
-    prepare.add_argument("--summary", action="store_true")
-    prepare.add_argument("task_argument", nargs="?")
+    _add_prepare_arguments(prepare)
     return parser
 
 
@@ -487,21 +510,25 @@ def _run_prepare(arguments: argparse.Namespace) -> int:
         print(f"security_boundary: {collect_module.SECURITY_NOTICE}")
         print("manual_workflow:")
         print(f"  1. review {artifact.directory / 'preview.txt'}")
-        print("  2. manually upload preview.txt or snapshot.json to ChatGPT")
+        if getattr(arguments, "vendor_neutral", False):
+            print("  2. inspect snapshot.json with your coding agent or automation")
+        else:
+            print("  2. manually upload preview.txt or snapshot.json to ChatGPT")
         print("  3. save the analysis result in the project record")
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, neutral: bool = False) -> int:
     raw_arguments = list(sys.argv[1:] if argv is None else argv)
     if raw_arguments == ["--version"]:
-        print(f"codex-snapshot-runner {__version__}")
+        product = "snapshot-runner" if neutral else "codex-snapshot-runner"
+        print(f"{product} {__version__}")
         return 0
-    if raw_arguments[:1] == ["analyze"]:
+    if not neutral and raw_arguments[:1] == ["analyze"]:
         _emit_workflow_error(RunnerError(AUTOMATIC_ANALYSIS_DISABLED, ANALYZE_DISABLED_ERROR))
         return 2
     os.umask(0o077)
-    parser = build_argument_parser()
+    parser = build_argument_parser(neutral=True) if neutral else build_argument_parser()
     try:
         arguments = parser.parse_args(raw_arguments)
         _validate_arguments(arguments)
@@ -517,6 +544,10 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         _emit_workflow_error(_unexpected_error(exc, "prepare workflow"))
         return 2
+
+
+def snapshot_runner_main() -> int:
+    return main(neutral=True)
 
 
 def _public_command_main(command: str, task: str) -> int:

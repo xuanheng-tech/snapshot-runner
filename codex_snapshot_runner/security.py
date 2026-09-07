@@ -1,4 +1,4 @@
-"""Deterministic secret and path handling for Codex snapshot artifacts."""
+"""Deterministic secret and path handling for repository snapshot artifacts."""
 
 from __future__ import annotations
 

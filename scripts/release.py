@@ -31,7 +31,7 @@ except ModuleNotFoundError:
     from changelog import extract_tag
 
 PUBLIC_REPOSITORY = "xuanheng-tech/snapshot-runner"
-PACKAGE = "codex-snapshot-runner"
+PACKAGE = "snapshot-runner"
 ARCHIVE = PACKAGE.replace("-", "_")
 GITHUB_API = "https://api.github.com"
 TAG_RE = re.compile(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)")

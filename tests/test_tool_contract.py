@@ -34,5 +34,10 @@ def test_public_cli_contract_and_package_are_consistent() -> None:
         for name, command in commands.items()
         if name != "codex-diff-audit"
     )
-    assert set(project["scripts"]) == EXPECTED_COMMANDS
+    primary = contract["primary_command"]
+    assert primary["name"] == "snapshot-runner"
+    assert primary["subcommands"] == {
+        name.removeprefix("codex-"): {"compatibility_alias": name} for name in EXPECTED_COMMANDS
+    }
+    assert set(project["scripts"]) == EXPECTED_COMMANDS | {primary["name"]}
     assert "/home/" not in contract_path.read_text(encoding="utf-8")

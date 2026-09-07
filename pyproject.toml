@@ -3,9 +3,9 @@ requires = ["uv_build>=0.12.1,<0.13"]
 build-backend = "uv_build"
 
 [project]
-name = "codex-snapshot-runner"
-version = "1.4.0"
-description = "Prepare bounded Git snapshots for manual review"
+name = "snapshot-runner"
+version = "1.5.0"
+description = "Deterministic, read-only repository evidence for coding agents and automation"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -17,6 +17,7 @@ Repository = "https://github.com/xuanheng-tech/snapshot-runner"
 Issues = "https://github.com/xuanheng-tech/snapshot-runner/issues"
 
 [project.scripts]
+snapshot-runner = "codex_snapshot_runner.cli:snapshot_runner_main"
 codex-repo-status = "codex_snapshot_runner.cli:repo_status_main"
 codex-diff-audit = "codex_snapshot_runner.cli:diff_audit_main"
 codex-branch-review = "codex_snapshot_runner.cli:branch_review_main"
