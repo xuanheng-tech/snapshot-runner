@@ -1872,6 +1872,7 @@ def _initialize_shared_worktrees(
 def test_test_triage_target_repository_rejections_happen_before_collection(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    private_state: Path,
 ) -> None:
     valid_repo = tmp_path / "valid-repo"
     _initialize_isolation_repo(valid_repo, "target-valid", "TARGET_VALID_COMMIT")
