@@ -202,18 +202,31 @@ def test_existing_file_conflict_stops_before_upload_selection(tmp_path: Path, mo
     assert not (tmp_path / "pending").exists()
 
 
-def test_record_resume_after_post_succeeded_but_readback_failed(monkeypatch) -> None:
+@pytest.mark.parametrize("platform", ["github", "gitea"])
+def test_record_resume_after_post_succeeded_but_readback_failed(monkeypatch, platform) -> None:
     hashes = {"wheel": "hash"}
     record = None
     posts = 0
     fail_readback = True
     monkeypatch.setattr(r, "github_tag", lambda *_: SHA)
+    monkeypatch.setattr(r, "command", lambda *_: f"{RELEASE['tag_object']}\trefs/tags/{TAG}")
+    base = r.GITHUB_API if platform == "github" else "https://example.invalid/api/v1"
 
     def api(url, **kwargs):
         nonlocal record, posts, fail_readback
+        if url.endswith(f"/tags/{TAG}") and "/releases/" not in url:
+            return {"commit": {"sha": SHA}}
         if kwargs.get("method") == "POST":
+            if platform == "github":
+                # The job token cannot request a historical workflow target;
+                # the already-verified annotated tag supplies package identity.
+                assert "target_commitish" not in kwargs["data"]
+            else:
+                assert kwargs["data"]["target_commitish"] == SHA
             posts += 1
             record = {**kwargs["data"], "id": 17, "html_url": "https://example.invalid/release"}
+            if platform == "github":
+                record["target_commitish"] = "master"
             return record
         if record and fail_readback:
             fail_readback = False
@@ -225,8 +238,8 @@ def test_record_resume_after_post_succeeded_but_readback_failed(monkeypatch) -> 
         r.release_record(
             RELEASE,
             hashes,
-            "github",
-            r.GITHUB_API,
+            platform,
+            base,
             r.PUBLIC_REPOSITORY,
             apply=True,
             token="fixture",
@@ -235,8 +248,8 @@ def test_record_resume_after_post_succeeded_but_readback_failed(monkeypatch) -> 
         result = r.release_record(
             RELEASE,
             hashes,
-            "github",
-            r.GITHUB_API,
+            platform,
+            base,
             r.PUBLIC_REPOSITORY,
             apply=True,
             token="fixture",

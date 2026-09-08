@@ -431,20 +431,22 @@ def release_record(
             + json.dumps(expected, sort_keys=True)
             + " -->"
         )
+        payload = {
+            "tag_name": release["tag"],
+            "name": f"Snapshot Runner {release['tag']}" if platform == "github" else release["tag"],
+            "body": body,
+            "draft": False,
+            "prerelease": False,
+        }
+        # GitHub's existing tag is authoritative. Supplying its historical
+        # commit unnecessarily triggers the workflow-write permission check.
+        if platform != "github":
+            payload["target_commitish"] = release["commit"]
         record = api(
             f"{root}/releases",
             token=token,
             method="POST",
-            data={
-                "tag_name": release["tag"],
-                "target_commitish": release["commit"],
-                "name": f"Snapshot Runner {release['tag']}"
-                if platform == "github"
-                else release["tag"],
-                "body": body,
-                "draft": False,
-                "prerelease": False,
-            },
+            data=payload,
         )
         created = True
         record = api(endpoint, token=token)
