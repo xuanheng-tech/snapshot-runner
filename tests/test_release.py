@@ -408,6 +408,17 @@ def test_master_control_cannot_be_built_as_tag_source(repository: Path, monkeypa
         r.build(release)
 
 
+def test_shallow_source_is_rejected_before_quality_or_build(
+    repository: Path, tmp_path: Path, monkeypatch
+) -> None:
+    release = r.identity(TAG)
+    checkout = tmp_path / "shallow"
+    r.command("git", "clone", "--depth", "1", repository.as_uri(), str(checkout))
+    monkeypatch.chdir(checkout)
+    with pytest.raises(r.ReleaseError, match="complete Git history"):
+        r.build(release)
+
+
 def test_previous_artifact_blocks_a_second_build(repository: Path, monkeypatch) -> None:
     release = r.identity(TAG)
     original = r.command

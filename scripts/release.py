@@ -44,6 +44,9 @@ class ReleaseError(ValueError):
 
 def command(*args: str) -> str:
     result = subprocess.run(args, capture_output=True, text=True, check=False)
+    if args[0] in ("just", "uv"):
+        print(result.stdout, end="", flush=True)
+        print(result.stderr, end="", file=sys.stderr, flush=True)
     if result.returncode:
         raise ReleaseError(f"{args[0]} failed (exit {result.returncode})")
     return result.stdout.strip()
@@ -319,6 +322,8 @@ def pypi_files(release: dict, *, complete: bool = True) -> dict[str, str] | None
 
 def build(release: dict, dist: Path = Path("dist")) -> bool:
     identity(release["tag"], release["commit"], tag_object=release["tag_object"], checkout=True)
+    if command("git", "rev-parse", "--is-shallow-repository") != "false":
+        raise ReleaseError("source checkout must include complete Git history before quality/build")
     command("git", "diff", "--exit-code", "HEAD", "--")
     command("just", "check")
     command("git", "diff", "--exit-code", "HEAD", "--")
