@@ -206,10 +206,20 @@ identical public tag and Release without building or uploading a second package.
 `scripts/release.py` verifies tag, package, checksum, and PyPI provenance claims before
 closing Release records. Identity conflicts fail closed. To recover a missing GitHub
 Release after successful PyPI publication, dispatch `release-record` with the existing
-tag; to close Gitea records, dispatch its `release` workflow with that tag. These routes
+tag and original `publish-pypi` run ID; to close Gitea records, dispatch its `release`
+workflow with that tag. These routes
 do not rebuild or upload packages. If an upload was interrupted, rerun the original
 failed publish job so it reuses the original Actions artifact and selects only missing
 files. Never move a published tag or upload replacement files.
+
+When release-control code needs repair before a first upload, dispatch `publish-pypi`
+from `master` with the existing tag, exact annotated tag object, and exact source commit.
+Control and source use separate checkouts. Remote identity and the fetched raw tag object
+are authoritative even if a checkout action changes its local tag ref. The publication
+artifact and Release receipt separately record the package-source commit, release-control
+commit/ref, original build run, and file hashes. PyPI's publisher attestation identifies
+the release-control workflow; the source-bound build receipt identifies package source.
+An existing build artifact blocks a second build: resume its original publish job.
 
 ## License
 

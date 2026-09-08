@@ -24,6 +24,9 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5; Node 24
         with:
+          # Recovery executes current release control; package identity comes
+          # exclusively from the original GitHub build receipt and raw tag.
+          ref: master
           fetch-depth: 0
           # The built-in job actor is used only for an exact missing public tag.
           token: ${{ github.token }}

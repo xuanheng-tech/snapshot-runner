@@ -9,9 +9,13 @@ on:
       tag:
         description: Existing published vX.Y.Z tag
         required: true
+      build_run_id:
+        description: Original publish-pypi run containing the source-bound publication artifact
+        required: true
 
 permissions:
   contents: write
+  actions: read
 
 concurrency:
   group: release-record-${{ inputs.tag || github.event.workflow_run.head_branch }}
@@ -25,15 +29,22 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5; Node 24
         with:
-          fetch-depth: 0
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.12.1"
       - run: uv python install 3.12.13
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7; Node 24
+        with:
+          pattern: publication-*
+          merge-multiple: true
+          path: publication/
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.build_run_id || github.event.workflow_run.id }}
       - name: Verify package provenance and close GitHub Release
         env:
-          RELEASE_TAG: ${{ inputs.tag || github.event.workflow_run.head_branch }}
+          RELEASE_TAG: ${{ inputs.tag }}
           RELEASE_TOKEN: ${{ github.token }}
           PUBLIC_GITHUB_TOKEN: ${{ github.token }}
-        run: uv run --no-sync python scripts/release.py record "$RELEASE_TAG"
+        run: python3 scripts/release.py record ${RELEASE_TAG:+"$RELEASE_TAG"} --receipt publication/receipt.json

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
 import os
 import subprocess
-import sys
 import tarfile
 import zipfile
 from pathlib import Path
@@ -23,6 +23,9 @@ RELEASE = {
     "version": "1.2.3",
     "commit": SHA,
     "notes": "- Release notes",
+    "control_commit": "b" * 40,
+    "control_ref": "refs/heads/master",
+    "build_run_id": "123",
 }
 
 
@@ -129,7 +132,7 @@ def test_gitea_tag_object_conflict_blocks_record_creation(monkeypatch) -> None:
 
 
 def test_real_quality_failure_stops_before_network_or_build(
-    repository: Path, tmp_path: Path
+    repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tools = tmp_path / "bin"
     tools.mkdir()
@@ -137,17 +140,9 @@ def test_real_quality_failure_stops_before_network_or_build(
     (tools / "just").chmod(0o755)
     (tools / "uv").write_text("#!/bin/sh\ntouch unexpected-build\nexit 0\n")
     (tools / "uv").chmod(0o755)
-    env = {**os.environ, "PATH": f"{tools}:{os.defpath}"}
-    result = subprocess.run(
-        [sys.executable, str(ROOT / "scripts/release.py"), "build", TAG],
-        cwd=repository,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 1
-    assert "just failed (exit 19)" in result.stderr
+    monkeypatch.setenv("PATH", f"{tools}:{os.defpath}")
+    with pytest.raises(r.ReleaseError, match="just failed \\(exit 19\\)"):
+        r.build(r.identity(TAG))
     assert not (repository / "unexpected-build").exists()
     assert not (repository / "dist").exists()
 
@@ -301,10 +296,12 @@ def test_gitea_backfill_preserves_tag_object_and_does_not_build(
     monkeypatch.setenv("GITEA_ACTIONS", "true")
     monkeypatch.setenv("RELEASE_TOKEN", "private-fixture")
     monkeypatch.setattr(r, "github_tag", lambda *_: SHA)
-    monkeypatch.setattr(r, "identity", lambda *_: RELEASE)
+    monkeypatch.setattr(r, "receipt_identity", lambda *_: RELEASE)
     monkeypatch.setattr(r, "pypi_files", lambda _: {"wheel": "hash"})
 
     def api(url, **kwargs):
+        if r.GITHUB_API in url:
+            return {"body": r.MARKER + json.dumps(r.record_identity(RELEASE, {})) + " -->"}
         if url.endswith("/org/repo"):
             return {}
         if "/releases/tags/" in url and conflicting_record:
@@ -340,5 +337,186 @@ def test_gitea_backfill_preserves_tag_object_and_does_not_build(
     assert result["tag_object"] == "c" * 40
     assert all(action[0] == "git" for action in actions)
     assert [a for a in actions if a[1] == "push"] == [
-        ("git", "push", "--no-follow-tags", "origin", f"refs/tags/{TAG}:refs/tags/{TAG}")
+        ("git", "push", "--no-follow-tags", "origin", f"{RELEASE['tag_object']}:refs/tags/{TAG}")
     ]
+
+
+@pytest.mark.parametrize("local_ref", ["annotated", "peeled", "missing"])
+def test_remote_raw_tag_survives_detached_checkout_and_local_ref_changes(
+    repository: Path, tmp_path: Path, monkeypatch, local_ref: str
+) -> None:
+    approved = r.identity(TAG)
+    client = tmp_path / "checkout"
+    subprocess.run(["git", "clone", "-q", str(repository), str(client)], check=True)
+    monkeypatch.chdir(client)
+    r.command("git", "checkout", "--detach", approved["commit"])
+    if local_ref == "peeled":
+        r.command("git", "update-ref", f"refs/tags/{TAG}", approved["commit"])
+    elif local_ref == "missing":
+        r.command("git", "update-ref", "-d", f"refs/tags/{TAG}")
+    before = r.command("git", "for-each-ref", "--format=%(objectname)", f"refs/tags/{TAG}")
+    original = r.command
+
+    def command(*args):
+        if args[:2] == ("git", "fetch"):
+            assert args[2:] == (
+                "--no-tags",
+                f"https://github.com/{r.PUBLIC_REPOSITORY}.git",
+                approved["tag_object"],
+            )
+            return original("git", "fetch", "--no-tags", str(repository), approved["tag_object"])
+        return original(*args)
+
+    monkeypatch.setattr(r, "command", command)
+    monkeypatch.setattr(
+        r, "github_identity", lambda *_: (approved["tag_object"], approved["commit"])
+    )
+    actual = r.public_identity(TAG, approved["commit"], approved["tag_object"])
+    assert actual == approved
+    assert (
+        r.identity(TAG, approved["commit"], tag_object=approved["tag_object"], checkout=True)
+        == approved
+    )
+    assert before == r.command("git", "for-each-ref", "--format=%(objectname)", f"refs/tags/{TAG}")
+    assert r.command("git", "rev-parse", "HEAD") == approved["commit"]
+
+
+def test_remote_target_conflict_blocks_before_fetch(monkeypatch) -> None:
+    monkeypatch.setattr(r, "github_identity", lambda *_: (RELEASE["tag_object"], "d" * 40))
+    monkeypatch.setattr(r, "command", lambda *_: pytest.fail("must not fetch conflicting identity"))
+    with pytest.raises(r.ReleaseError, match="expected commit mismatch"):
+        r.public_identity(TAG, SHA, RELEASE["tag_object"])
+
+
+def test_master_control_cannot_be_built_as_tag_source(repository: Path, monkeypatch) -> None:
+    release = r.identity(TAG)
+    (repository / "control.txt").write_text("new control revision\n")
+    r.command("git", "add", "control.txt")
+    r.command(
+        "git",
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-qm",
+        "control only",
+    )
+    with pytest.raises(r.ReleaseError, match="exact release commit"):
+        r.build(release)
+
+
+def test_previous_artifact_blocks_a_second_build(repository: Path, monkeypatch) -> None:
+    release = r.identity(TAG)
+    original = r.command
+    calls = []
+
+    def command(*args):
+        if args[0] == "git":
+            return original(*args)
+        calls.append(args)
+        return ""
+
+    monkeypatch.setattr(r, "command", command)
+    monkeypatch.setattr(r, "github_tag", lambda *_: release["commit"])
+    monkeypatch.setattr(r, "pypi_files", lambda *_: None)
+    monkeypatch.setattr(r, "api", lambda *_, **__: {"total_count": 1})
+    with pytest.raises(r.ReleaseError, match="resume its publish job"):
+        r.build(release)
+    assert calls == [("just", "check")]
+
+
+@pytest.mark.parametrize("conflict", [None, "control", "source", "workflow", "ref", "unknown"])
+def test_receipt_separates_control_and_source_provenance(monkeypatch, conflict) -> None:
+    hashes = dict.fromkeys(r.filenames("1.2.3"), "e" * 64)
+    receipt = r.record_identity(RELEASE, hashes)
+    run = {
+        "head_sha": RELEASE["control_commit"],
+        "head_branch": "master",
+        "path": ".github/workflows/publish-pypi.yml",
+        "head_repository": {"full_name": r.PUBLIC_REPOSITORY},
+        "event": "workflow_dispatch",
+    }
+
+    def public(tag, source, obj):
+        assert (tag, obj) == (TAG, RELEASE["tag_object"])
+        if source != SHA:
+            raise r.ReleaseError("source conflict")
+        return dict(RELEASE)
+
+    monkeypatch.setattr(r, "public_identity", public)
+    monkeypatch.setattr(r, "api", lambda *_, **__: run)
+    if conflict == "control":
+        receipt["release_control_commit"] = SHA
+    if conflict == "source":
+        receipt["package_source_commit"] = RELEASE["control_commit"]
+    if conflict == "workflow":
+        run["path"] = ".github/workflows/ci.yml"
+    if conflict == "ref":
+        run["head_branch"] = "other"
+    if conflict == "unknown":
+        receipt["unexpected"] = True
+    if conflict:
+        with pytest.raises(r.ReleaseError):
+            r.receipt_identity(receipt)
+    else:
+        actual = r.receipt_identity(receipt)
+        assert actual["control_commit"] != actual["commit"] == SHA
+        assert actual["files"] == hashes
+
+
+def test_receipt_file_mutation_blocks_before_upload(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "dist"
+    hashes = artifacts(source)
+    release = {**RELEASE, "files": dict.fromkeys(hashes, "0" * 64)}
+    monkeypatch.setattr(r, "pypi_files", lambda *_: pytest.fail("must reject artifacts first"))
+    with pytest.raises(r.ReleaseError, match="source-bound build receipt"):
+        r.pending_dist(release, source, tmp_path / "pending")
+
+
+@pytest.mark.parametrize("conflict", [None, "source-as-control", "ref", "file"])
+def test_pypi_attestation_binds_control_not_package_source(monkeypatch, conflict) -> None:
+    name = f"{r.ARCHIVE}-1.2.3-py3-none-any.whl"
+    digest = "e" * 64
+    statement = {"subject": [{"name": name, "digest": {"sha256": digest}}]}
+    if conflict == "file":
+        statement["subject"][0]["digest"]["sha256"] = "f" * 64
+    provenance = {
+        "attestation_bundles": [
+            {
+                "publisher": {
+                    "kind": "GitHub",
+                    "repository": r.PUBLIC_REPOSITORY,
+                    "workflow": "publish-pypi.yml",
+                    "environment": "pypi",
+                },
+                "attestations": [
+                    {
+                        "envelope": {
+                            "statement": base64.b64encode(json.dumps(statement).encode()).decode()
+                        },
+                        "verification_material": {
+                            "certificate": base64.b64encode(b"synthetic certificate").decode()
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+    commit = SHA if conflict == "source-as-control" else RELEASE["control_commit"]
+    ref = f"refs/tags/{TAG}" if conflict == "ref" else RELEASE["control_ref"]
+    certificate_text = f"1.3.6.1.4.1.57264.1.3:\n    {commit}\nURI:https://github.com/{r.PUBLIC_REPOSITORY}/.github/workflows/publish-pypi.yml@{ref}\n"
+    monkeypatch.setattr(r, "api", lambda *_: provenance)
+    monkeypatch.setattr(
+        r.subprocess,
+        "run",
+        lambda *_, **__: subprocess.CompletedProcess([], 0, certificate_text.encode(), b""),
+    )
+    item = {"filename": name, "digests": {"sha256": digest}}
+    if conflict:
+        with pytest.raises(r.ReleaseError, match="provenance conflict"):
+            r.check_provenance(item, RELEASE)
+    else:
+        r.check_provenance(item, RELEASE)

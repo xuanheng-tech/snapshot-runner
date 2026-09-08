@@ -4,12 +4,27 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing annotated vX.Y.Z tag (never moved)
+        required: true
+      source_commit:
+        description: Exact package-source commit (40 hex characters)
+        required: true
+      tag_object:
+        description: Exact annotated tag object (40 hex characters)
+        required: true
+      notes:
+        description: Release notes (defaults to the source changelog)
+        required: false
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  group: pypi-${{ github.ref }}
+  group: pypi-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -21,21 +36,41 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5; Node 24
         with:
-          fetch-depth: 0
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5; Node 24
+        with:
+          ref: ${{ inputs.source_commit || github.sha }}
+          path: source
           persist-credentials: false
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.12.1"
       - run: uv python install 3.12.13
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
-      - name: Verify tag, run just check, and build only an unpublished version
+      - name: Check release-control regression tests
+        working-directory: control
+        run: uv run --frozen pytest -q tests/test_release.py
+      - name: Verify raw tag identity, check original source, and build once
         id: build
-        run: uv run --no-sync python scripts/release.py build "$GITHUB_REF_NAME" --expected-sha "$GITHUB_SHA"
+        working-directory: source
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          SOURCE_COMMIT: ${{ inputs.source_commit || github.sha }}
+          TAG_OBJECT: ${{ inputs.tag_object }}
+          RELEASE_NOTES: ${{ inputs.notes }}
+          PUBLIC_GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 ../control/scripts/release.py build "$RELEASE_TAG" \
+            --expected-sha "$SOURCE_COMMIT" --expected-tag-object "${TAG_OBJECT:-}" \
+            --dist ../publication/dist --receipt ../publication/receipt.json
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6; Node 24
         if: steps.build.outputs.built == 'true'
         with:
-          name: dist
-          path: dist/
+          name: publication-${{ inputs.tag || github.ref_name }}
+          path: publication/
+          if-no-files-found: error
 
   publish:
     needs: build
@@ -45,11 +80,12 @@ jobs:
     environment: pypi
     permissions:
       contents: read
+      actions: read
       id-token: write
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5; Node 24
         with:
-          fetch-depth: 0
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
@@ -57,11 +93,13 @@ jobs:
       - run: uv python install 3.12.13
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7; Node 24
         with:
-          name: dist
-          path: dist/
+          name: publication-${{ inputs.tag || github.ref_name }}
+          path: publication/
       - name: Compare existing files and select only missing original artifacts
         id: pending
-        run: uv run --no-sync python scripts/release.py pending-dist "$GITHUB_REF_NAME" --expected-sha "$GITHUB_SHA"
+        env:
+          PUBLIC_GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/release.py pending-dist --receipt publication/receipt.json --dist publication/dist
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         if: steps.pending.outputs.pending == 'true'
         with:
