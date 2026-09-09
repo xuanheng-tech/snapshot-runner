@@ -312,7 +312,7 @@ def test_prepare_resolves_only_git_and_prints_manual_workflow(
     assert resolved == ["git"]
     assert "preview:" in output
     assert "manual_workflow:" in output
-    assert "manually upload preview.txt or snapshot.json to ChatGPT" in output
+    assert "inspect snapshot.json with your coding agent or automation" in output
     assert "just codex-analyze-snapshot" not in output
     assert "Human review of preview.txt is required" in output
 
@@ -539,7 +539,7 @@ def test_cli_help_describes_prepare_only_fail_closed_analyze() -> None:
     assert "prepare-only mode does not support automatic analyze" in help_text
     assert "fixed fail-closed sentinel" in help_text
     assert "review preview.txt" in help_text
-    assert "manually upload preview.txt or snapshot.json" in help_text
+    assert "inspect preview.txt or snapshot.json" in help_text
     for stale_description in (
         "approve and analyze",
         "explicitly approve",
@@ -2008,7 +2008,7 @@ def test_prepare_only_public_entry_completes_all_four_prepare_workflows(
     assert preflight_calls == expected_capability_calls
     assert conversion_policy_calls == expected_capability_calls
     assert "manual_workflow:" in output
-    assert "manually upload preview.txt or snapshot.json to ChatGPT" in output
+    assert "inspect snapshot.json with your coding agent or automation" in output
     assert "just codex-analyze-snapshot" not in output
 
     snapshot_root = state / "codex-exec" / "snapshots"

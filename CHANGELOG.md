@@ -5,6 +5,29 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 1.6.0
+
+- Fixed: Exact-path (`--scope-path`) diff audits now reproduce the source index as well as
+  the source worktree, so `staged`, `unstaged`, `status_short`, and the staged/unstaged
+  diffs match the real repository state. Previously every scoped change was reported as an
+  unstaged worktree modification, and a staged change whose worktree matched HEAD was
+  refused as unchanged.
+- Fixed: Unified-diff header path classification no longer grows quadratically with the
+  number of `" b/"` sequences in a path name. Candidate expansion now has a hard bound
+  (`MAX_DIFF_PATH_CANDIDATES`, 128) and fails closed above it, and sensitive-component
+  detection no longer constructs a path object per component. Collection of a hostile
+  1441-occurrence path header went from 36.0 s to 0.16 s.
+- Changed: Scoped audits accept the staged-deletion-plus-untracked state, which Git
+  reports as two porcelain entries for one path; every other multi-entry shape stays
+  refused as ambiguous.
+- Changed: Scoped audits fail closed on unmerged (conflicted) index entries and on index
+  entries that are not regular non-symlink blobs.
+- Changed: The `codex-*` aliases and the legacy Python module command now print the same
+  vendor-neutral guidance as `snapshot-runner`. Exit codes, JSON summaries, canonical
+  artifacts, and the public CLI contract are unchanged.
+- Preserved: Snapshot schema 2, summary schema 1, security epoch 4, YAML fail-closed
+  handling, path/symlink/secret protections, and read-only guarantees.
+
 ## 1.5.0
 
 - Changed: Vendor-neutral product and distribution identity: Snapshot Runner / `snapshot-runner`.

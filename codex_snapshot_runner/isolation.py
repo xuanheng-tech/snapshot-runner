@@ -30,6 +30,19 @@ class _FileEvidence:
     executable: bool
 
 
+@dataclass(frozen=True, slots=True)
+class _IndexEvidence:
+    mode: str
+    oid: str
+    content: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class _ScopeEvidence:
+    index: _IndexEvidence | None
+    worktree: _FileEvidence | None
+
+
 def _fail(message: str) -> RunnerError:
     return RunnerError(SNAPSHOT_COLLECTION_FAILED, message)
 
@@ -285,7 +298,13 @@ def _destination_parent_descriptor(
         raise
 
 
-def _write_destination_file(repo_root: Path, relative: str, evidence: _FileEvidence) -> None:
+def _materialize_destination_file(
+    repo_root: Path,
+    relative: str,
+    content: bytes,
+    *,
+    executable: bool,
+) -> None:
     directory_descriptor = _destination_parent_descriptor(repo_root, relative, create=True)
     assert directory_descriptor is not None
     name = PurePosixPath(relative).name
@@ -307,7 +326,7 @@ def _write_destination_file(repo_root: Path, relative: str, evidence: _FileEvide
             | getattr(os, "O_NOFOLLOW", 0)
             | (os.O_TRUNC if before is not None else os.O_CREAT | os.O_EXCL)
         )
-        mode = 0o755 if evidence.executable else 0o644
+        mode = 0o755 if executable else 0o644
         try:
             descriptor = os.open(name, flags, mode, dir_fd=directory_descriptor)
             opened = os.fstat(descriptor)
@@ -320,8 +339,8 @@ def _write_destination_file(repo_root: Path, relative: str, evidence: _FileEvide
             raise _fail("temporary clone scope file changed during safe open")
         try:
             offset = 0
-            while offset < evidence.byte_size:
-                written = os.write(descriptor, evidence.content[offset:])
+            while offset < len(content):
+                written = os.write(descriptor, content[offset:])
                 if written <= 0:
                     raise _fail("temporary clone scope file could not be completely written")
                 offset += written
@@ -386,9 +405,19 @@ def _require_exact_change(repo: Path, relative: str, git_executable: str) -> Non
     entries = [entry for entry in result.stdout.split(b"\0") if entry]
     try:
         observed = [entry[3:].decode("utf-8", errors="strict") for entry in entries]
+        codes = [entry[:2].decode("utf-8", errors="strict") for entry in entries]
     except UnicodeDecodeError as exc:
         raise _fail("temporary clone scope status is not valid UTF-8") from exc
-    if len(entries) != 1 or len(entries[0]) < 4 or observed != [relative]:
+    # A staged deletion whose path is re-created outside the index legitimately reports one
+    # tracked entry plus one untracked entry for the same path; every other shape is ambiguous.
+    if (
+        not entries
+        or len(entries) > 2
+        or any(len(entry) < 4 for entry in entries)
+        or observed != [relative] * len(entries)
+        or len(set(codes)) != len(codes)
+        or (len(entries) == 2 and "??" not in codes)
+    ):
         raise _fail("isolated diff-audit scope path is unchanged or ambiguous")
 
 
@@ -415,23 +444,117 @@ def _clone_repository(
         raise _fail("temporary review clone HEAD does not match the source")
 
 
+def _read_source_index_entry(
+    repo: Path,
+    relative: str,
+    git_executable: str,
+) -> _IndexEvidence | None:
+    """Read the exact stage-0 index entry for one scope path, or None when unstaged."""
+
+    runner = GitRunner(repo, git_executable)
+    listing = runner.run(
+        ("ls-files", "--stage", "-z", "--", f":(top,literal){relative}"),
+        maximum=4096,
+    )
+    if listing.returncode != 0 or listing.truncated or listing.stderr:
+        raise _fail("source scope index entry could not be read")
+    records = [record for record in listing.stdout.split(b"\0") if record]
+    if not records:
+        return None
+    if len(records) != 1:
+        raise _fail("source scope path has an unmerged or ambiguous index entry")
+    try:
+        header, path = records[0].decode("utf-8", errors="strict").split("\t", 1)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise _fail("source scope index entry is not valid UTF-8") from exc
+    fields = header.split(" ")
+    if len(fields) != 3 or path != relative:
+        raise _fail("source scope index entry is malformed")
+    mode, oid, stage = fields
+    if stage != "0":
+        raise _fail("source scope path has an unmerged index entry")
+    if mode not in {"100644", "100755"}:
+        raise _fail("source scope index entry is not a regular non-symlink blob")
+    if GIT_OID_RE.fullmatch(oid) is None:
+        raise _fail("source scope index entry has an invalid object name")
+    size_result = runner.run(("cat-file", "-s", oid), maximum=4096)
+    size_text = size_result.stdout.decode("ascii", errors="replace").strip()
+    if (
+        size_result.returncode != 0
+        or size_result.truncated
+        or size_result.stderr
+        or not size_text.isdigit()
+    ):
+        raise _fail("source scope index blob size could not be read")
+    byte_size = int(size_text)
+    if byte_size > MAX_SCOPE_FILE_BYTES:
+        raise _fail("source scope index blob exceeds its hard copy limit")
+    blob = runner.run(("cat-file", "blob", oid), maximum=MAX_SCOPE_FILE_BYTES + 1)
+    if blob.returncode != 0 or blob.truncated or blob.stderr or len(blob.stdout) != byte_size:
+        raise _fail("source scope index blob could not be read")
+    return _IndexEvidence(mode, oid, blob.stdout)
+
+
+def _apply_index_state(
+    destination: Path,
+    relative: str,
+    entry: _IndexEvidence | None,
+    git_executable: str,
+) -> None:
+    """Reproduce the source index state for one scope path inside the clone."""
+
+    runner = GitRunner(destination, git_executable)
+    if entry is None:
+        removal = runner.run(("update-index", "--force-remove", "--", relative))
+        if removal.returncode != 0 or removal.truncated or removal.stderr:
+            raise _fail("temporary clone scope index entry could not be removed")
+        return
+    _materialize_destination_file(
+        destination, relative, entry.content, executable=entry.mode == "100755"
+    )
+    staged = runner.run(("update-index", "--add", "--", relative))
+    if staged.returncode != 0 or staged.truncated or staged.stderr:
+        raise _fail("temporary clone scope index entry could not be staged")
+    observed = _read_source_index_entry(destination, relative, git_executable)
+    if observed is None or (observed.mode, observed.oid) != (entry.mode, entry.oid):
+        raise _fail("temporary clone scope index entry does not match the source index")
+
+
+def _apply_worktree_state(
+    destination: Path,
+    relative: str,
+    evidence: _FileEvidence | None,
+) -> None:
+    if evidence is None:
+        _delete_destination_file(destination, relative)
+        return
+    _materialize_destination_file(
+        destination, relative, evidence.content, executable=evidence.executable
+    )
+
+
 def _overlay_scope(
     source: Path,
     destination: Path,
     paths: tuple[str, ...],
     git_executable: str,
 ) -> None:
-    evidence: dict[str, _FileEvidence | None] = {}
+    evidence: dict[str, _ScopeEvidence] = {}
     for relative in paths:
-        source_evidence = _read_source_file(source, relative)
+        source_evidence = _ScopeEvidence(
+            _read_source_index_entry(source, relative, git_executable),
+            _read_source_file(source, relative),
+        )
         evidence[relative] = source_evidence
-        if source_evidence is None:
-            _delete_destination_file(destination, relative)
-        else:
-            _write_destination_file(destination, relative, source_evidence)
+        _apply_index_state(destination, relative, source_evidence.index, git_executable)
+        _apply_worktree_state(destination, relative, source_evidence.worktree)
         _require_exact_change(destination, relative, git_executable)
     for relative, expected in evidence.items():
-        if _read_source_file(source, relative) != expected:
+        observed = _ScopeEvidence(
+            _read_source_index_entry(source, relative, git_executable),
+            _read_source_file(source, relative),
+        )
+        if observed != expected:
             raise _fail("source scope changed while the temporary review clone was prepared")
 
 

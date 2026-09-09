@@ -151,7 +151,7 @@ def test_default_output_is_exact_and_summary_preserves_artifact(
         f"security_boundary: {collect.SECURITY_NOTICE}\n"
         "manual_workflow:\n"
         f"  1. review {directory / 'preview.txt'}\n"
-        "  2. manually upload preview.txt or snapshot.json to ChatGPT\n"
+        "  2. inspect snapshot.json with your coding agent or automation\n"
         "  3. save the analysis result in the project record\n"
     )
     assert captured.err == ""
@@ -244,7 +244,7 @@ def test_summary_public_entry_emits_bounded_json_for_all_four_commands(
     summary = json.loads(captured.out)
     assert list(summary) == SUMMARY_KEYS
     assert summary["summary_schema_version"] == artifact_module.SUMMARY_SCHEMA_VERSION == 1
-    assert summary["runner_version"] == runner_namespace.__version__ == "1.5.0"
+    assert summary["runner_version"] == runner_namespace.__version__ == "1.6.0"
     assert summary["command"] == task
     assert summary["repository"] == repo.name
     assert summary["status"] == "complete"

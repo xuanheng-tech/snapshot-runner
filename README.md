@@ -26,11 +26,11 @@ a separate virtual environment:
 ```bash
 python3.12 -m venv /absolute/path/to/runner-venv
 uv build
-/absolute/path/to/runner-venv/bin/python -m pip install dist/snapshot_runner-1.5.0-py3-none-any.whl
+/absolute/path/to/runner-venv/bin/python -m pip install dist/snapshot_runner-1.6.0-py3-none-any.whl
 export PATH="/absolute/path/to/runner-venv/bin:$PATH"
 ```
 
-After publication, the package will be installable as `snapshot-runner==1.5.0`.
+After publication, the package will be installable as `snapshot-runner==1.6.0`.
 You can also install reviewed source with `pip install .` in that virtual environment.
 Installing a wheel does not need `uv` or `just`.
 
@@ -120,9 +120,8 @@ The four installed `codex-*` aliases remain supported without deprecation:
 
 Both routes use the same validation and collectors, exit codes, JSON summaries, and
 canonical artifacts. Alias version queries report the alias name and current version.
-The aliases and legacy Python module command retain their historical human-readable
-ChatGPT guidance; it is advice text, not an account or API dependency. The primary
-command uses vendor-neutral guidance.
+All routes, including the aliases and the legacy Python module command, print the same
+vendor-neutral guidance. No route names or requires a specific model vendor.
 
 The Python import name `codex_snapshot_runner`, the state namespace
 `codex-exec/snapshots`, and the scoped-audit temporary namespace
@@ -133,7 +132,7 @@ redaction-category label in evidence, not an environment variable read by the to
 
 The public contract keeps its existing alias descriptors and adds `primary_command`
 metadata. Snapshot schema 2, summary schema 1, and security epoch 4 are unchanged.
-Version 1.5.0 identifies the new distribution and primary CLI. Existing installations
+Version 1.6.0 keeps the 1.5.0 distribution and primary CLI identity. Existing installations
 of `codex-snapshot-runner` are not automatically replaced. Do not install both
 distributions into the same environment: they share imports and legacy entry points.
 

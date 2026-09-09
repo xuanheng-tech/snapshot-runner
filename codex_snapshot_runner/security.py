@@ -43,6 +43,7 @@ GIT_COMMAND_FAILED = "GIT_COMMAND_FAILED"
 
 MAX_SANITIZE_DEPTH = 32
 MAX_SANITIZE_ELEMENTS = 10_000
+MAX_DIFF_PATH_CANDIDATES = 128
 MAX_EXTENSIONLESS_TEXT_BYTES = 64 * 1024
 SCAN_CLASSIFIER_VERSION = 2
 YAML_CONTENT_REFUSED = "yaml_content_refused"
@@ -294,12 +295,25 @@ def _redact_credentials(text: str, counts: Counter[str]) -> str:
     return redacted
 
 
+def _component_suffix(component: str) -> str:
+    """Return ``PurePosixPath(component).suffix`` without building a path object.
+
+    This is a hot path: diff header classification calls it once per path component
+    per candidate, so constructing a ``PurePosixPath`` here dominated large-path runs.
+    """
+    name = "" if component == "." else component
+    index = name.rfind(".")
+    if 0 < index < len(name) - 1:
+        return name[index:]
+    return ""
+
+
 def _is_sensitive_path_component(component: str) -> bool:
     lowered = component.lower()
     return (
         lowered in SENSITIVE_EXACT_FILE_NAMES
         or lowered.startswith(".env.")
-        or PurePosixPath(lowered).suffix in SENSITIVE_FILE_SUFFIXES
+        or _component_suffix(lowered) in SENSITIVE_FILE_SUFFIXES
     )
 
 
@@ -623,6 +637,8 @@ def _diff_git_path_candidates(
                 boundary = raw.find(marker, start)
                 if boundary < 0:
                     break
+                if len(raw_pairs) >= MAX_DIFF_PATH_CANDIDATES:
+                    raise SecurityError("unified diff file boundary has too many candidate paths")
                 raw_pairs.append((raw[:boundary], raw[boundary + 1 :]))
                 start = boundary + 1
     candidates: list[tuple[str, str]] = []

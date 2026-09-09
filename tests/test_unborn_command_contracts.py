@@ -328,19 +328,19 @@ def test_release_version_and_console_script_metadata_are_consistent(
         for command, (function, _task) in PUBLIC_SCRIPTS.items()
     }
 
-    assert codex_snapshot_runner.__version__ == "1.5.0"
+    assert codex_snapshot_runner.__version__ == "1.6.0"
     assert metadata["project"]["version"] == codex_snapshot_runner.__version__
     assert metadata["project"]["scripts"] == scripts | {
         "snapshot-runner": "codex_snapshot_runner.cli:snapshot_runner_main"
     }
     assert metadata["build-system"]["build-backend"] == "uv_build"
     assert runner.main(["--version"]) == 0
-    assert capsys.readouterr().out == "codex-snapshot-runner 1.5.0\n"
+    assert capsys.readouterr().out == "codex-snapshot-runner 1.6.0\n"
 
     for command, (function, _task) in PUBLIC_SCRIPTS.items():
         monkeypatch.setattr(sys, "argv", [command, "--version"])
         assert getattr(runner, function)() == 0
-        assert capsys.readouterr().out == f"{command} 1.5.0\n"
+        assert capsys.readouterr().out == f"{command} 1.6.0\n"
 
 
 @pytest.mark.parametrize("command", sorted(PUBLIC_SCRIPTS))

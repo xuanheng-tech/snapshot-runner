@@ -25,7 +25,7 @@ AUTOMATIC_ANALYSIS_DISABLED = "AUTOMATIC_ANALYSIS_DISABLED"
 CLI_ARGUMENT_ERROR = "invalid command-line arguments"
 ANALYZE_DISABLED_ERROR = (
     "prepare-only mode does not support automatic model calls; review preview.txt and "
-    "manually upload preview.txt or snapshot.json to ChatGPT"
+    "inspect preview.txt or snapshot.json with your coding agent or automation"
 )
 TARGET_REPOSITORY_REQUIRED_ERROR = "explicit --repo is required for prepare"
 BRANCH_REVIEW_UNBORN_ERROR = "branch-review requires a target branch with at least one commit"
@@ -382,7 +382,7 @@ def build_argument_parser(*, neutral: bool = False) -> argparse.ArgumentParser:
         commands = parser.add_subparsers(dest="task", required=True)
         for task in artifact_module.TASKS:
             prepare = commands.add_parser(task, help=f"collect {task} evidence")
-            prepare.set_defaults(action="prepare", vendor_neutral=True)
+            prepare.set_defaults(action="prepare")
             prepare.add_argument(
                 "--version", action="version", version=f"snapshot-runner {__version__}"
             )
@@ -392,7 +392,7 @@ def build_argument_parser(*, neutral: bool = False) -> argparse.ArgumentParser:
         description=__doc__,
         epilog=(
             "prepare-only mode does not support automatic analyze; codex-analyze-snapshot "
-            "is a fixed fail-closed sentinel. Review preview.txt and manually upload "
+            "is a fixed fail-closed sentinel. Review preview.txt and inspect "
             "preview.txt or snapshot.json"
         ),
     )
@@ -510,10 +510,7 @@ def _run_prepare(arguments: argparse.Namespace) -> int:
         print(f"security_boundary: {collect_module.SECURITY_NOTICE}")
         print("manual_workflow:")
         print(f"  1. review {artifact.directory / 'preview.txt'}")
-        if getattr(arguments, "vendor_neutral", False):
-            print("  2. inspect snapshot.json with your coding agent or automation")
-        else:
-            print("  2. manually upload preview.txt or snapshot.json to ChatGPT")
+        print("  2. inspect snapshot.json with your coding agent or automation")
         print("  3. save the analysis result in the project record")
     return 0
 

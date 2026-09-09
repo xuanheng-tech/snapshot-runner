@@ -137,11 +137,11 @@ def test_neutral_help_version_and_legacy_human_guidance(workspace) -> None:
     assert "untrusted evidence" in help_result.stdout
     assert "Codex" not in help_result.stdout
     version = invoke("snapshot_runner_main", ["--version"], env)
-    assert version.returncode == 0 and version.stdout == "snapshot-runner 1.5.0\n"
+    assert version.returncode == 0 and version.stdout == "snapshot-runner 1.6.0\n"
     args = ["--repo", str(repo)]
     neutral = invoke("snapshot_runner_main", ["repo-status", *args], env)
     alias = invoke("repo_status_main", args, env)
     assert neutral.returncode == alias.returncode == 0
     assert neutral.stdout.split("manual_workflow:")[0] == alias.stdout.split("manual_workflow:")[0]
     assert "coding agent or automation" in neutral.stdout and "ChatGPT" not in neutral.stdout
-    assert "manually upload preview.txt or snapshot.json to ChatGPT" in alias.stdout
+    assert "coding agent or automation" in alias.stdout and "ChatGPT" not in alias.stdout
