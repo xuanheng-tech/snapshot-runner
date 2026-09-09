@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 import tomllib
 import urllib.error
 import urllib.parse
@@ -36,6 +37,10 @@ ARCHIVE = PACKAGE.replace("-", "_")
 GITHUB_API = "https://api.github.com"
 TAG_RE = re.compile(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)")
 MARKER = "<!-- snapshot-runner-release "
+# PyPI needs a short, bounded moment to expose a just-published version. Release-record
+# closure runs seconds after upload, so it waits; build and pending-upload paths must not.
+PROPAGATION_ATTEMPTS = 12
+PROPAGATION_DELAY_SECONDS = 15
 
 
 class ReleaseError(ValueError):
@@ -118,6 +123,21 @@ def request(url: str, *, token: str = "", method: str = "GET", data: dict | None
 def api(url: str, **kwargs):
     raw = request(url, **kwargs)
     return None if raw is None else json.loads(raw)
+
+
+def poll(load):
+    """Repeat one bounded PyPI read while the published version is still propagating.
+
+    Only a missing document (``None``) is retried. Any other failure, including a
+    conflicting identity or a non-404 HTTP status, propagates immediately so a real
+    provenance error is never masked by a retry.
+    """
+    for remaining in range(PROPAGATION_ATTEMPTS - 1, -1, -1):
+        value = load()
+        if value is not None or not remaining:
+            return value
+        time.sleep(PROPAGATION_DELAY_SECONDS)
+    return None
 
 
 def github_tag(tag: str, expected_object: str | None = None) -> str | None:
@@ -250,9 +270,10 @@ def check_artifact(name: str, raw: bytes, version: str) -> None:
         raise ReleaseError("package artifact identity mismatch")
 
 
-def check_provenance(item: dict, release: dict) -> None:
+def check_provenance(item: dict, release: dict, *, wait: bool = False) -> None:
     name = item["filename"]
-    provenance = api(f"https://pypi.org/integrity/{PACKAGE}/{release['version']}/{name}/provenance")
+    url = f"https://pypi.org/integrity/{PACKAGE}/{release['version']}/{name}/provenance"
+    provenance = poll(lambda: api(url)) if wait else api(url)
     if provenance is None:
         raise ReleaseError("PyPI provenance missing; do not rebuild or upload")
     for bundle in provenance["attestation_bundles"]:
@@ -292,8 +313,11 @@ def check_provenance(item: dict, release: dict) -> None:
     raise ReleaseError("PyPI publisher/commit/file provenance conflict")
 
 
-def pypi_files(release: dict, *, complete: bool = True) -> dict[str, str] | None:
-    doc = api(f"https://pypi.org/pypi/{PACKAGE}/{release['version']}/json")
+def pypi_files(
+    release: dict, *, complete: bool = True, wait: bool = False
+) -> dict[str, str] | None:
+    url = f"https://pypi.org/pypi/{PACKAGE}/{release['version']}/json"
+    doc = poll(lambda: api(url)) if wait else api(url)
     if doc is None:
         return None
     if doc["info"]["name"] != PACKAGE or doc["info"]["version"] != release["version"]:
@@ -313,7 +337,7 @@ def pypi_files(release: dict, *, complete: bool = True) -> dict[str, str] | None
         if digest != item["digests"]["sha256"] or len(raw) != item["size"]:
             raise ReleaseError("PyPI downloaded file digest/size conflict")
         check_artifact(item["filename"], raw, release["version"])
-        check_provenance(item, release)
+        check_provenance(item, release, wait=wait)
         hashes[item["filename"]] = digest
         if "files" in release and release["files"].get(item["filename"]) != digest:
             raise ReleaseError("PyPI file differs from the source-bound build receipt")
@@ -481,7 +505,7 @@ def sync_gitea(tag: str, base: str, repository: str) -> dict:
     release = receipt_identity(receipt)
     if release["tag"] != tag or release["commit"] != public_commit:
         raise ReleaseError("GitHub Release source identity conflict")
-    hashes = pypi_files(release)
+    hashes = pypi_files(release, wait=True)
     if hashes is None:
         return {
             "status": "SKIP",
@@ -595,7 +619,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command != "gate":
             if github_tag(release["tag"], release["tag_object"]) != release["commit"]:
                 raise ReleaseError("GitHub tag identity conflict")
-            hashes = pypi_files(release)
+            hashes = pypi_files(release, wait=args.command in ("record", "verify"))
             result["package_verification"] = "MISSING" if hashes is None else "PASS"
             result["files"] = hashes
             if args.command in ("record", "verify"):

@@ -160,7 +160,7 @@ def test_published_package_skips_build(repository: Path, monkeypatch: pytest.Mon
         return ""
 
     monkeypatch.setattr(r, "command", command)
-    monkeypatch.setattr(r, "pypi_files", lambda _: {"existing": "hash"})
+    monkeypatch.setattr(r, "pypi_files", lambda *_, **__: {"existing": "hash"})
     assert r.build(identity) is False
     assert actions == [("just", "check")]
 
@@ -310,7 +310,7 @@ def test_gitea_backfill_preserves_tag_object_and_does_not_build(
     monkeypatch.setenv("RELEASE_TOKEN", "private-fixture")
     monkeypatch.setattr(r, "github_tag", lambda *_: SHA)
     monkeypatch.setattr(r, "receipt_identity", lambda *_: RELEASE)
-    monkeypatch.setattr(r, "pypi_files", lambda _: {"wheel": "hash"})
+    monkeypatch.setattr(r, "pypi_files", lambda *_, **__: {"wheel": "hash"})
 
     def api(url, **kwargs):
         if r.GITHUB_API in url:
@@ -445,7 +445,7 @@ def test_previous_artifact_blocks_a_second_build(repository: Path, monkeypatch) 
 
     monkeypatch.setattr(r, "command", command)
     monkeypatch.setattr(r, "github_tag", lambda *_: release["commit"])
-    monkeypatch.setattr(r, "pypi_files", lambda *_: None)
+    monkeypatch.setattr(r, "pypi_files", lambda *_, **__: None)
     monkeypatch.setattr(r, "api", lambda *_, **__: {"total_count": 1})
     with pytest.raises(r.ReleaseError, match="resume its publish job"):
         r.build(release)
@@ -495,7 +495,9 @@ def test_receipt_file_mutation_blocks_before_upload(tmp_path: Path, monkeypatch)
     source = tmp_path / "dist"
     hashes = artifacts(source)
     release = {**RELEASE, "files": dict.fromkeys(hashes, "0" * 64)}
-    monkeypatch.setattr(r, "pypi_files", lambda *_: pytest.fail("must reject artifacts first"))
+    monkeypatch.setattr(
+        r, "pypi_files", lambda *_, **__: pytest.fail("must reject artifacts first")
+    )
     with pytest.raises(r.ReleaseError, match="source-bound build receipt"):
         r.pending_dist(release, source, tmp_path / "pending")
 
@@ -544,3 +546,84 @@ def test_pypi_attestation_binds_control_not_package_source(monkeypatch, conflict
             r.check_provenance(item, RELEASE)
     else:
         r.check_provenance(item, RELEASE)
+
+
+def test_release_closure_waits_out_pypi_propagation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A version that appears after a short delay must still close successfully."""
+    slept: list[float] = []
+    monkeypatch.setattr(r.time, "sleep", lambda seconds: slept.append(seconds))
+    calls = 0
+
+    def load() -> str | None:
+        nonlocal calls
+        calls += 1
+        return None if calls < 3 else "published"
+
+    assert r.poll(load) == "published"
+    assert calls == 3
+    assert slept == [r.PROPAGATION_DELAY_SECONDS, r.PROPAGATION_DELAY_SECONDS]
+
+
+def test_release_closure_gives_up_after_bounded_propagation_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry is bounded: exhaustion returns None so the caller fails closed."""
+    slept: list[float] = []
+    monkeypatch.setattr(r.time, "sleep", lambda seconds: slept.append(seconds))
+    calls = 0
+
+    def load() -> None:
+        nonlocal calls
+        calls += 1
+        return None
+
+    assert r.poll(load) is None
+    assert calls == r.PROPAGATION_ATTEMPTS
+    assert len(slept) == r.PROPAGATION_ATTEMPTS - 1
+
+
+def test_propagation_polling_does_not_retry_api_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a missing document is retried; a real failure surfaces immediately."""
+    slept: list[float] = []
+    monkeypatch.setattr(r.time, "sleep", lambda seconds: slept.append(seconds))
+    calls = 0
+
+    def load() -> None:
+        nonlocal calls
+        calls += 1
+        raise r.ReleaseError("PyPI project/version conflict")
+
+    with pytest.raises(r.ReleaseError, match="conflict"):
+        r.poll(load)
+    assert calls == 1
+    assert slept == []
+
+
+def test_record_closure_waits_but_build_and_pending_do_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closure paths poll; build and pending-upload paths read once and move on."""
+    observed: list[bool] = []
+    monkeypatch.setattr(r.time, "sleep", lambda seconds: None)
+
+    def fake_api(url: str, **kwargs):
+        return None
+
+    monkeypatch.setattr(r, "api", fake_api)
+
+    monkeypatch.setattr(
+        r,
+        "poll",
+        lambda load: (observed.append(True), load())[1],
+    )
+    # Build path: a single read, no polling.
+    assert r.pypi_files(RELEASE) is None
+    assert observed == []
+    # Pending-upload path: a single read, no polling.
+    assert r.pypi_files(RELEASE, complete=False) is None
+    assert observed == []
+    # Closure path: polls.
+    assert r.pypi_files(RELEASE, wait=True) is None
+    assert observed == [True]

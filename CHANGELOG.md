@@ -5,6 +5,12 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+- Changed: Release-record closure (`record`, `verify`, and the Gitea closure route) now
+  waits out normal PyPI propagation with a bounded retry (12 attempts, 15 s apart) instead
+  of failing the moment a just-published version is not yet visible. Build and
+  pending-upload paths still read PyPI once. Only a missing document is retried; identity
+  conflicts and other API errors still fail closed immediately.
+
 ## 1.6.0
 
 - Fixed: Exact-path (`--scope-path`) diff audits now reproduce the source index as well as
