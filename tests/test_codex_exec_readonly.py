@@ -3467,6 +3467,100 @@ def test_external_attributes_file_is_ignored_without_executing_filter(
     assert "external_attributes_file" in safety["disabled_config_types"]
 
 
+def test_absent_worktree_config_is_inert(tmp_path: Path) -> None:
+    assert git._worktree_config_is_inert(tmp_path / "config.worktree") is True
+
+
+def test_empty_regular_worktree_config_is_inert(tmp_path: Path) -> None:
+    """Git leaves this exact shape behind after a --worktree key is set and unset."""
+    worktree_config = tmp_path / "config.worktree"
+    worktree_config.write_bytes(b"")
+    assert worktree_config.stat().st_size == 0
+    assert git._worktree_config_is_inert(worktree_config) is True
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b"\n", b"[core]\n\tbare = true\n", b"# comment only\n", b"\x00"],
+)
+def test_populated_worktree_config_is_never_inert(tmp_path: Path, body: bytes) -> None:
+    """Content would become live the moment the extension is enabled."""
+    worktree_config = tmp_path / "config.worktree"
+    worktree_config.write_bytes(body)
+    assert git._worktree_config_is_inert(worktree_config) is False
+
+
+def test_symlink_worktree_config_is_never_inert(tmp_path: Path) -> None:
+    target = tmp_path / "outside"
+    target.write_bytes(b"")
+    worktree_config = tmp_path / "config.worktree"
+    worktree_config.symlink_to(target)
+    assert worktree_config.is_symlink()
+    assert git._worktree_config_is_inert(worktree_config) is False
+
+
+def test_directory_worktree_config_is_never_inert(tmp_path: Path) -> None:
+    worktree_config = tmp_path / "config.worktree"
+    worktree_config.mkdir()
+    assert git._worktree_config_is_inert(worktree_config) is False
+
+
+def test_uninspectable_worktree_config_is_never_inert(tmp_path: Path) -> None:
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    (blocked / "config.worktree").write_bytes(b"")
+    blocked.chmod(0o000)
+    try:
+        assert git._worktree_config_is_inert(blocked / "config.worktree") is False
+    finally:
+        blocked.chmod(0o700)
+
+
+def test_empty_worktree_config_no_longer_blocks_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The residue Git leaves behind must not block read-only evidence collection."""
+    repo = tmp_path / "repo"
+    _initialize_git_capability_repo(repo)
+    (repo / ".git" / "config.worktree").write_bytes(b"")
+    assert "worktreeConfig" not in (repo / ".git" / "config").read_text(encoding="utf-8")
+
+    _artifact, payload = _prepare_conversion_snapshot(
+        monkeypatch,
+        repo,
+        tmp_path / "state",
+        task="repo-status",
+    )
+    assert payload["data"]["status_short"] is not None  # type: ignore[index]
+
+
+@pytest.mark.parametrize("kind", ["populated", "symlink", "directory"])
+def test_non_inert_worktree_config_still_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    repo = tmp_path / "repo"
+    _initialize_git_capability_repo(repo)
+    worktree_config = repo / ".git" / "config.worktree"
+    if kind == "populated":
+        worktree_config.write_text("[core]\n\tbare = true\n", encoding="utf-8")
+    elif kind == "symlink":
+        outside = tmp_path / "outside-worktree-config"
+        outside.write_text("[core]\n\tbare = true\n", encoding="utf-8")
+        worktree_config.symlink_to(outside)
+    else:
+        worktree_config.mkdir()
+
+    _assert_capability_prepare_rejected_before_content(
+        monkeypatch,
+        repo,
+        tmp_path / "state",
+        tmp_path / "MUST_NOT_EXIST",
+    )
+
+
 @pytest.mark.parametrize("source", ["info-attributes", "worktree-config"])
 def test_repo_status_disables_indirect_content_filters(
     monkeypatch: pytest.MonkeyPatch,

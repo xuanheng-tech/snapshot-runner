@@ -5,6 +5,16 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+- Fixed: A `config.worktree` file that cannot carry any setting no longer blocks Git
+  capability preflight. Git reads that file only when `extensions.worktreeConfig` is
+  enabled, and an absent or zero-byte ordinary file carries nothing under either state,
+  so only that positively provable shape is treated as inert. Any content, a symlink, a
+  directory, a special file, or a path that cannot be inspected still fails closed,
+  because content would become live the moment the extension were enabled. Git itself
+  leaves the empty form behind: setting a `--worktree` key and unsetting it truncates
+  the file rather than removing it, and disabling the extension afterwards leaves it in
+  place, so ordinary repositories accumulate inert residue that previously refused all
+  read-only evidence collection.
 - Changed: Release-record closure (`record`, `verify`, and the Gitea closure route) now
   waits out normal PyPI propagation with a bounded retry (12 attempts, 15 s apart) instead
   of failing the moment a just-published version is not yet visible. Build and

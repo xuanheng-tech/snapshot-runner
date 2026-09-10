@@ -884,6 +884,30 @@ def _conversion_policy(config_names: tuple[str, ...]) -> GitConversionPolicy:
     )
 
 
+def _worktree_config_is_inert(worktree_config: Path) -> bool:
+    """True only for a config.worktree that cannot carry a setting under any extension.
+
+    Git reads this file solely when ``extensions.worktreeConfig`` is enabled, so with
+    the extension off nothing in it takes effect today. That alone is not enough to
+    accept: a populated file would become live the moment the extension is turned on,
+    and its content is repository-controlled. An absent file, or a zero-byte ordinary
+    file, carries no setting under either state, which is the only positively provable
+    inert shape. Everything else - any content, a symlink, a directory, a special
+    file, or a path that cannot be inspected - stays refused.
+
+    Git itself leaves the empty form behind: enabling the extension, setting a
+    ``--worktree`` key and unsetting it again truncates the file rather than removing
+    it, and disabling the extension afterwards leaves the empty file in place.
+    """
+    try:
+        stated = worktree_config.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return stat.S_ISREG(stated.st_mode) and stated.st_size == 0
+
+
 def preflight_git_capabilities(
     repo_root: Path,
     git_dir: Path,
@@ -909,14 +933,7 @@ def preflight_git_capabilities(
     _refuse_replace_refs(git)
     local_names = _config_names(git, "--local")
     worktree_enabled = _worktree_config_enabled(git)
-    worktree_config = git_dir / "config.worktree"
-    try:
-        worktree_config_exists = bool(worktree_config.lstat())
-    except FileNotFoundError:
-        worktree_config_exists = False
-    except OSError as exc:
-        raise RunnerError(GIT_PREFLIGHT_FAILED, GIT_CAPABILITY_REFUSED_ERROR) from exc
-    if worktree_config_exists and not worktree_enabled:
+    if not worktree_enabled and not _worktree_config_is_inert(git_dir / "config.worktree"):
         _git_capability_refused()
     worktree_names = _config_names(git, "--worktree") if worktree_enabled else set()
     names = tuple(sorted(set((*local_names, *worktree_names))))
