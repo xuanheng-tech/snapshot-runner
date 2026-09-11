@@ -5,6 +5,8 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 1.6.1
+
 - Fixed: A `config.worktree` file that cannot carry any setting no longer blocks Git
   capability preflight. Git reads that file only when `extensions.worktreeConfig` is
   enabled, and an absent or zero-byte ordinary file carries nothing under either state,

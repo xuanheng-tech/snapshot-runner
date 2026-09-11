@@ -137,7 +137,7 @@ def test_neutral_help_version_and_legacy_human_guidance(workspace) -> None:
     assert "untrusted evidence" in help_result.stdout
     assert "Codex" not in help_result.stdout
     version = invoke("snapshot_runner_main", ["--version"], env)
-    assert version.returncode == 0 and version.stdout == "snapshot-runner 1.6.0\n"
+    assert version.returncode == 0 and version.stdout == "snapshot-runner 1.6.1\n"
     args = ["--repo", str(repo)]
     neutral = invoke("snapshot_runner_main", ["repo-status", *args], env)
     alias = invoke("repo_status_main", args, env)
