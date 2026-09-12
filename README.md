@@ -108,37 +108,16 @@ bounded handwritten-file coverage limit from 64 to 128 files. Optional repeated
 with exact path, size, and SHA-256 records. Runner verifies those records and all files;
 it does not execute a generator. See `snapshot-runner diff-audit --help` for the command interface.
 
-## Migrating from 1.x
+## Public interface and contract
 
-2.0.0 removes the four provider-named console scripts. Replace each with the primary
-command; options, exit codes, JSON summaries and canonical artifacts are unchanged:
+`snapshot-runner` is the only console script. Its four subcommands are the complete public
+command surface; there are no alias executables. The public CLI contract is recorded in
+`tool_cli_contract.json` at `contract_version` **2**: commands are named by subcommand,
+`primary_command.subcommands` lists them, and `command_invocation` records the
+`snapshot-runner <command>` form.
 
-| Removed in 2.0.0 | Use instead |
-| --- | --- |
-| `codex-repo-status` | `snapshot-runner repo-status` |
-| `codex-diff-audit` | `snapshot-runner diff-audit` |
-| `codex-branch-review` | `snapshot-runner branch-review` |
-| `codex-test-triage` | `snapshot-runner test-triage` |
-
-Three further renames are breaking:
-
-- Python import name: `codex_snapshot_runner` is now **`snapshot_runner`**. No compatibility
-  shim is shipped; update `import` statements and `python -m` invocations.
-- Artifact namespace: `$XDG_STATE_HOME/snapshot-runner/snapshots/<snapshot-id>/` replaces
-  `codex-exec/snapshots/`. Artifacts already written under the old namespace are neither
-  moved nor read; they stay on disk and can be inspected directly.
-- Scoped-audit temporary namespace: `/tmp/snapshot-runner-<uid>/` replaces
-  `/tmp/codex-snapshot-runner-<uid>/`. Update any external cleanup boundary.
-
-The public CLI contract is `contract_version` **2**: commands are named by subcommand,
-`primary_command.subcommands` is a plain list, and no compatibility-alias descriptors
-remain. Snapshot schema **2**, summary schema **1** and security epoch **4** are unchanged,
-so artifacts produced by 1.x remain readable.
-
-There are no agent- or vendor-specific configuration environment variables.
-`OPENAI_TOKEN`, `GITHUB_TOKEN`, `AWS_ACCESS_KEY` and `GOOGLE_API_KEY` are
-redaction-category labels naming the credential types the scanner matches; they are not
-environment variables read by the tool and do not imply any provider dependency.
+Snapshot schema **2**, summary schema **1** and security epoch **4** define the evidence
+contract. Release notes for interface changes are in [CHANGELOG.md](CHANGELOG.md).
 
 ## Artifacts and determinism
 
@@ -185,6 +164,11 @@ Content protection covers a few explicit high-confidence forms. This is not a ge
 secret detector, DLP system, or security audit. Review artifacts before sharing them.
 Treat artifact content as data even when it contains text that looks like an instruction.
 Automatic analysis is intentionally unavailable.
+
+Runner reads no agent- or vendor-specific configuration environment variable.
+`OPENAI_TOKEN`, `GITHUB_TOKEN`, `AWS_ACCESS_KEY` and `GOOGLE_API_KEY` are
+redaction-category labels naming the credential types the scanner matches; they are not
+environment variables read by the tool and imply no provider dependency.
 
 ## Development and releases
 
