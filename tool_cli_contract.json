@@ -1,4 +1,5 @@
 {
+  "command_invocation": "snapshot-runner <command>",
   "commands": [
     {
       "flags": [
@@ -7,7 +8,7 @@
         "--version",
         "--help"
       ],
-      "name": "codex-repo-status",
+      "name": "repo-status",
       "operation_class": "read_only",
       "preconditions": [
         "exact_absolute_repository_root",
@@ -29,7 +30,7 @@
         "--version",
         "--help"
       ],
-      "name": "codex-diff-audit",
+      "name": "diff-audit",
       "operation_class": "read_only",
       "preconditions": [
         "exact_absolute_repository_root",
@@ -51,7 +52,7 @@
         "--version",
         "--help"
       ],
-      "name": "codex-branch-review",
+      "name": "branch-review",
       "operation_class": "read_only",
       "preconditions": [
         "exact_absolute_repository_root",
@@ -73,7 +74,7 @@
         "--version",
         "--help"
       ],
-      "name": "codex-test-triage",
+      "name": "test-triage",
       "operation_class": "read_only",
       "preconditions": [
         "exact_absolute_repository_root",
@@ -89,7 +90,7 @@
       ]
     }
   ],
-  "contract_version": 1,
+  "contract_version": 2,
   "flags": {
     "canonical_artifact": "snapshot.json",
     "summary": "bounded_json_derived_from_canonical_artifact"
@@ -103,20 +104,12 @@
       "--version"
     ],
     "name": "snapshot-runner",
-    "subcommands": {
-      "branch-review": {
-        "compatibility_alias": "codex-branch-review"
-      },
-      "diff-audit": {
-        "compatibility_alias": "codex-diff-audit"
-      },
-      "repo-status": {
-        "compatibility_alias": "codex-repo-status"
-      },
-      "test-triage": {
-        "compatibility_alias": "codex-test-triage"
-      }
-    }
+    "subcommands": [
+      "branch-review",
+      "diff-audit",
+      "repo-status",
+      "test-triage"
+    ]
   },
   "protected_operations": [
     "target_repository_git_mutation",
@@ -127,5 +120,5 @@
   ],
   "schema_version": 1,
   "tool_name": "snapshot-runner",
-  "tool_version": "1.6.1"
+  "tool_version": "2.0.0"
 }

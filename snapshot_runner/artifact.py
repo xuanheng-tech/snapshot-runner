@@ -130,7 +130,7 @@ def _state_home(target_repo: Path | None = None) -> Path:
 
 
 def snapshot_output_root(target_repo: Path | None = None) -> Path:
-    return _state_home(target_repo) / "codex-exec" / "snapshots"
+    return _state_home(target_repo) / "snapshot-runner" / "snapshots"
 
 
 def _snapshot_sanitization_paths(extra_paths: tuple[Path, ...] = ()) -> tuple[Path, ...]:
@@ -188,14 +188,14 @@ def _ensure_private_state_directory(
 ) -> None:
     state_home = _state_home(target_repo)
     _validate_owned_private_directory(state_home, "state home")
-    controlled_root = state_home / "codex-exec"
+    controlled_root = state_home / "snapshot-runner"
     try:
         controlled_root.mkdir(mode=0o700, exist_ok=True)
     except OSError as exc:
         raise RunnerError(
-            ARTIFACT_PUBLISH_FAILED, "unable to initialize private Codex state"
+            ARTIFACT_PUBLISH_FAILED, "unable to initialize private Runner state"
         ) from exc
-    _validate_owned_private_directory(controlled_root, "private Codex state")
+    _validate_owned_private_directory(controlled_root, "private Runner state")
     try:
         relative_parts = path.relative_to(controlled_root).parts
     except ValueError as exc:

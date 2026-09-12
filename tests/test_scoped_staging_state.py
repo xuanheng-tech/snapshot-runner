@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from codex_snapshot_runner import cli, isolation
+from snapshot_runner import cli, isolation
 
 
 def _git(repo: Path, *arguments: str) -> str:

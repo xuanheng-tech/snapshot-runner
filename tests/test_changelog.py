@@ -27,7 +27,7 @@ def test_current_source_version_has_one_nonempty_changelog_section() -> None:
     ]["version"]
     package_match = re.search(
         r'^__version__ = "([0-9]+\.[0-9]+\.[0-9]+)"$',
-        (ROOT / "codex_snapshot_runner/__init__.py").read_text(encoding="utf-8"),
+        (ROOT / "snapshot_runner/__init__.py").read_text(encoding="utf-8"),
         re.MULTILINE,
     )
     assert package_match is not None

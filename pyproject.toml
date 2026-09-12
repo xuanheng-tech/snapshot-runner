@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "snapshot-runner"
-version = "1.6.1"
+version = "2.0.0"
 description = "Deterministic, read-only repository evidence for coding agents and automation"
 readme = "README.md"
 license = "Apache-2.0"
@@ -17,17 +17,13 @@ Repository = "https://github.com/xuanheng-tech/snapshot-runner"
 Issues = "https://github.com/xuanheng-tech/snapshot-runner/issues"
 
 [project.scripts]
-snapshot-runner = "codex_snapshot_runner.cli:snapshot_runner_main"
-codex-repo-status = "codex_snapshot_runner.cli:repo_status_main"
-codex-diff-audit = "codex_snapshot_runner.cli:diff_audit_main"
-codex-branch-review = "codex_snapshot_runner.cli:branch_review_main"
-codex-test-triage = "codex_snapshot_runner.cli:test_triage_main"
+snapshot-runner = "snapshot_runner.cli:snapshot_runner_main"
 
 [tool.uv]
 package = false
 
 [tool.uv.build-backend]
-module-name = "codex_snapshot_runner"
+module-name = "snapshot_runner"
 module-root = ""
 source-include = [
     "tool_cli_contract.json",

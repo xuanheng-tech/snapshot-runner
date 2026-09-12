@@ -62,9 +62,7 @@ def _installed_runner_root() -> Path | None:
         if distribution.version != __version__ or distribution.files is None:
             return None
         cli_entries = [
-            entry
-            for entry in distribution.files
-            if entry.as_posix() == "codex_snapshot_runner/cli.py"
+            entry for entry in distribution.files if entry.as_posix() == "snapshot_runner/cli.py"
         ]
         if len(cli_entries) != 1:
             return None
@@ -391,8 +389,8 @@ def build_argument_parser(*, neutral: bool = False) -> argparse.ArgumentParser:
     parser = SafeArgumentParser(
         description=__doc__,
         epilog=(
-            "prepare-only mode does not support automatic analyze; codex-analyze-snapshot "
-            "is a fixed fail-closed sentinel. Review preview.txt and inspect "
+            "prepare-only mode does not support automatic analyze; the analyze action is a "
+            "fixed fail-closed sentinel. Review preview.txt and inspect "
             "preview.txt or snapshot.json"
         ),
     )
@@ -518,8 +516,7 @@ def _run_prepare(arguments: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None, *, neutral: bool = False) -> int:
     raw_arguments = list(sys.argv[1:] if argv is None else argv)
     if raw_arguments == ["--version"]:
-        product = "snapshot-runner" if neutral else "codex-snapshot-runner"
-        print(f"{product} {__version__}")
+        print(f"snapshot-runner {__version__}")
         return 0
     if not neutral and raw_arguments[:1] == ["analyze"]:
         _emit_workflow_error(RunnerError(AUTOMATIC_ANALYSIS_DISABLED, ANALYZE_DISABLED_ERROR))
@@ -545,30 +542,6 @@ def main(argv: list[str] | None = None, *, neutral: bool = False) -> int:
 
 def snapshot_runner_main() -> int:
     return main(neutral=True)
-
-
-def _public_command_main(command: str, task: str) -> int:
-    raw_arguments = list(sys.argv[1:])
-    if raw_arguments == ["--version"]:
-        print(f"{command} {__version__}")
-        return 0
-    return main(["prepare", task, *raw_arguments])
-
-
-def repo_status_main() -> int:
-    return _public_command_main("codex-repo-status", "repo-status")
-
-
-def diff_audit_main() -> int:
-    return _public_command_main("codex-diff-audit", "diff-audit")
-
-
-def branch_review_main() -> int:
-    return _public_command_main("codex-branch-review", "branch-review")
-
-
-def test_triage_main() -> int:
-    return _public_command_main("codex-test-triage", "test-triage")
 
 
 if __name__ == "__main__":

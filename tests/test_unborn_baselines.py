@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from codex_snapshot_runner import artifact, collect, git, security
-from codex_snapshot_runner import cli as runner
+from snapshot_runner import artifact, collect, git, security
+from snapshot_runner import cli as runner
 
 GIT = "/usr/bin/git"
 
@@ -67,9 +67,9 @@ def _commit(repo: Path, message: str = "baseline") -> str:
         "-c",
         "core.hooksPath=/dev/null",
         "-c",
-        "user.name=Codex Test",
+        "user.name=Runner Test",
         "-c",
-        "user.email=codex-test@example.invalid",
+        "user.email=runner-test@example.invalid",
         "-c",
         "commit.gpgsign=false",
         "commit",
@@ -522,7 +522,7 @@ def test_branch_review_rejects_unborn_before_collection(
     ):
         runner._prepare_snapshot("branch-review", "main", target, GIT)
     assert collected is False
-    assert not (state / "codex-exec").exists()
+    assert not (state / "snapshot-runner").exists()
 
 
 def test_attached_and_detached_artifact_structures_remain_legacy_compatible(

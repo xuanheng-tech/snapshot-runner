@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from codex_snapshot_runner import artifact, collect, git, security
-from codex_snapshot_runner import cli as runner
+from snapshot_runner import artifact, collect, git, security
+from snapshot_runner import cli as runner
 
 GIT = "/usr/bin/git"
 

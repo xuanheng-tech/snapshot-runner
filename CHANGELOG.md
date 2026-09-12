@@ -5,6 +5,34 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.0.0
+
+Provider-neutral naming. This release removes public interfaces; read the migration notes.
+
+- **Removed (breaking):** the four provider-named console scripts `codex-repo-status`,
+  `codex-diff-audit`, `codex-branch-review` and `codex-test-triage`, and their
+  `codex_snapshot_runner.cli` entrypoint functions. Use `snapshot-runner <command>`:
+  `repo-status`, `diff-audit`, `branch-review`, `test-triage`. The primary command, its
+  options, exit codes, JSON summaries and canonical artifacts are unchanged.
+- **Changed (breaking):** the Python import name is now `snapshot_runner`. The previous
+  `codex_snapshot_runner` module is gone; no compatibility shim is shipped.
+- **Changed (breaking):** artifacts are published under
+  `$XDG_STATE_HOME/snapshot-runner/snapshots/<snapshot-id>/` instead of
+  `codex-exec/snapshots/`. Artifacts already written under the old namespace are not moved
+  or read; they remain on disk and can be inspected directly.
+- **Changed (breaking):** the scoped-audit temporary namespace is now
+  `/tmp/snapshot-runner-<uid>/` instead of `/tmp/codex-snapshot-runner-<uid>/`.
+- Changed: the public CLI contract is `contract_version` 2. Commands are named by
+  subcommand, `primary_command.subcommands` is a plain list, and `command_invocation`
+  records `snapshot-runner <command>`. No compatibility-alias descriptors remain.
+- Changed: help text, the analyze fail-closed sentinel description, the `just` recipe names
+  and the documentation no longer name any specific coding agent or vendor.
+- Preserved: snapshot schema **2**, summary schema **1**, security epoch **4**, determinism,
+  read-only guarantees, YAML fail-closed handling, path/symlink/secret protections, bounded
+  limits and every refusal semantic. `OPENAI_TOKEN`, `GITHUB_TOKEN`, `AWS_ACCESS_KEY` and
+  `GOOGLE_API_KEY` remain redaction-category labels naming the credential types they match.
+
+
 ## 1.6.1
 
 - Fixed: A `config.worktree` file that cannot carry any setting no longer blocks Git

@@ -11,18 +11,21 @@ from pathlib import Path
 
 import pytest
 
-import codex_snapshot_runner
-from codex_snapshot_runner import artifact, collect, git, security
-from codex_snapshot_runner import cli as runner
+import snapshot_runner
+from snapshot_runner import artifact, collect, git, security
+from snapshot_runner import cli as runner
 
 GIT = "/usr/bin/git"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_SCRIPTS = {
-    "codex-repo-status": ("repo_status_main", "repo-status"),
-    "codex-diff-audit": ("diff_audit_main", "diff-audit"),
-    "codex-branch-review": ("branch_review_main", "branch-review"),
-    "codex-test-triage": ("test_triage_main", "test-triage"),
-}
+PUBLIC_SUBCOMMANDS = ("repo-status", "diff-audit", "branch-review", "test-triage")
+# 2.0.0 removed the provider-named aliases and their entrypoint functions.
+REMOVED_ALIAS_ENTRYPOINTS = (
+    "repo_status_main",
+    "diff_audit_main",
+    "branch_review_main",
+    "test_triage_main",
+    "_public_command_main",
+)
 
 
 def _run_git(
@@ -127,7 +130,7 @@ def test_unborn_branch_review_uses_frozen_error_before_collection(
     assert captured.err == (
         f"workflow_failed: SNAPSHOT_COLLECTION_FAILED: {runner.BRANCH_REVIEW_UNBORN_ERROR}\n"
     )
-    assert not (state / "codex-exec").exists()
+    assert not (state / "snapshot-runner").exists()
     assert _readonly_state(repo) == before
 
 
@@ -276,7 +279,7 @@ def test_unborn_test_triage_preserves_log_refusals(
     with pytest.raises(security.RunnerError, match="test log refused"):
         _prepare(repo, "test-triage", argument)
 
-    assert not (state / "codex-exec").exists()
+    assert not (state / "snapshot-runner").exists()
     assert _readonly_state(repo) == before
 
 
@@ -315,49 +318,59 @@ def test_all_public_commands_reject_invalid_repository_kinds(
     assert captured.err == (
         "workflow_failed: REPOSITORY_VALIDATION_FAILED: target repository validation failed\n"
     )
-    assert not (state / "codex-exec").exists()
+    assert not (state / "snapshot-runner").exists()
 
 
 def test_release_version_and_console_script_metadata_are_consistent(
-    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     metadata = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    scripts = {
-        command: f"codex_snapshot_runner.cli:{function}"
-        for command, (function, _task) in PUBLIC_SCRIPTS.items()
-    }
 
-    assert codex_snapshot_runner.__version__ == "1.6.1"
-    assert metadata["project"]["version"] == codex_snapshot_runner.__version__
-    assert metadata["project"]["scripts"] == scripts | {
-        "snapshot-runner": "codex_snapshot_runner.cli:snapshot_runner_main"
+    assert snapshot_runner.__version__ == "2.0.0"
+    assert metadata["project"]["version"] == snapshot_runner.__version__
+    # The single public console script is the provider-neutral primary command.
+    assert metadata["project"]["scripts"] == {
+        "snapshot-runner": "snapshot_runner.cli:snapshot_runner_main"
     }
+    assert metadata["tool"]["uv"]["build-backend"]["module-name"] == "snapshot_runner"
     assert metadata["build-system"]["build-backend"] == "uv_build"
     assert runner.main(["--version"]) == 0
-    assert capsys.readouterr().out == "codex-snapshot-runner 1.6.1\n"
+    assert capsys.readouterr().out == "snapshot-runner 2.0.0\n"
+    assert runner.main(["--version"], neutral=True) == 0
+    assert capsys.readouterr().out == "snapshot-runner 2.0.0\n"
 
-    for command, (function, _task) in PUBLIC_SCRIPTS.items():
-        monkeypatch.setattr(sys, "argv", [command, "--version"])
-        assert getattr(runner, function)() == 0
-        assert capsys.readouterr().out == f"{command} 1.6.1\n"
+    for task in PUBLIC_SUBCOMMANDS:
+        with pytest.raises(SystemExit) as exit_info:
+            runner.main([task, "--version"], neutral=True)
+        assert exit_info.value.code == 0
+        assert capsys.readouterr().out == "snapshot-runner 2.0.0\n"
 
 
-@pytest.mark.parametrize("command", sorted(PUBLIC_SCRIPTS))
-def test_console_scripts_delegate_to_the_shared_main(
+def test_provider_named_alias_entrypoints_are_gone() -> None:
+    """2.0.0 removed the four codex-* console scripts and their entrypoint functions."""
+    for name in REMOVED_ALIAS_ENTRYPOINTS:
+        assert not hasattr(runner, name), name
+    source = (PROJECT_ROOT / "snapshot_runner" / "cli.py").read_text(encoding="utf-8")
+    assert "codex" not in source.lower()
+
+
+@pytest.mark.parametrize("task", PUBLIC_SUBCOMMANDS)
+def test_primary_command_routes_each_subcommand(
     monkeypatch: pytest.MonkeyPatch,
-    command: str,
+    task: str,
 ) -> None:
-    function, task = PUBLIC_SCRIPTS[command]
     observed: list[str] | None = None
 
-    def shared_main(arguments: list[str] | None = None) -> int:
-        nonlocal observed
+    def shared_main(arguments: list[str] | None = None, *, neutral: bool = False) -> int:
+        nonlocal observed, captured_neutral
         observed = arguments
+        captured_neutral = neutral
         return 17
 
+    captured_neutral = False
     monkeypatch.setattr(runner, "main", shared_main)
-    monkeypatch.setattr(sys, "argv", [command, "--repo", "/synthetic/repo"])
+    monkeypatch.setattr(sys, "argv", ["snapshot-runner", task, "--repo", "/synthetic/repo"])
 
-    assert getattr(runner, function)() == 17
-    assert observed == ["prepare", task, "--repo", "/synthetic/repo"]
+    assert runner.snapshot_runner_main() == 17
+    assert observed is None
+    assert captured_neutral is True

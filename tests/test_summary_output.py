@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 
-import codex_snapshot_runner as runner_namespace
-from codex_snapshot_runner import artifact as artifact_module
-from codex_snapshot_runner import cli as runner
-from codex_snapshot_runner import collect, git
+import snapshot_runner as runner_namespace
+from snapshot_runner import artifact as artifact_module
+from snapshot_runner import cli as runner
+from snapshot_runner import collect, git
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SUMMARY_KEYS = [
@@ -55,9 +55,9 @@ def _initialize_repository(root: Path, branch: str = "target-main") -> Path:
     _git(
         repo,
         "-c",
-        "user.name=Codex Test",
+        "user.name=Runner Test",
         "-c",
-        "user.email=codex-test@example.invalid",
+        "user.email=runner-test@example.invalid",
         "-c",
         "commit.gpgsign=false",
         "commit",
@@ -140,7 +140,7 @@ def test_default_output_is_exact_and_summary_preserves_artifact(
 
     assert runner.main(["prepare", "repo-status", "--repo", os.fspath(repo)]) == 0
     captured = capsys.readouterr()
-    snapshot_root = state / "codex-exec" / "snapshots"
+    snapshot_root = state / "snapshot-runner" / "snapshots"
     directories = list(snapshot_root.iterdir())
     assert len(directories) == 1
     directory = directories[0]
@@ -244,7 +244,7 @@ def test_summary_public_entry_emits_bounded_json_for_all_four_commands(
     summary = json.loads(captured.out)
     assert list(summary) == SUMMARY_KEYS
     assert summary["summary_schema_version"] == artifact_module.SUMMARY_SCHEMA_VERSION == 1
-    assert summary["runner_version"] == runner_namespace.__version__ == "1.6.1"
+    assert summary["runner_version"] == runner_namespace.__version__ == "2.0.0"
     assert summary["command"] == task
     assert summary["repository"] == repo.name
     assert summary["status"] == "complete"

@@ -7,7 +7,7 @@ from pathlib import PurePosixPath
 
 import pytest
 
-from codex_snapshot_runner import security
+from snapshot_runner import security
 
 
 def _hostile_header(components: int) -> str:

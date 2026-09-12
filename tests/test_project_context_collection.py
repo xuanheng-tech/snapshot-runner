@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from codex_snapshot_runner import artifact, collect, security
+from snapshot_runner import artifact, collect, security
 
 
 def _diff_audit_builder(repo: Path, status: str) -> collect.SnapshotBuilder:
@@ -27,8 +27,8 @@ def _synthetic_context(size: int) -> str:
     return (line * (size // len(line) + 1))[:size]
 
 
-def test_collects_codex_project_context_without_evidence_gap(tmp_path: Path) -> None:
-    relative = "codex-project-context"
+def test_collects_extensionless_context_entry_without_evidence_gap(tmp_path: Path) -> None:
+    relative = "context-entry"
     content = "#!/usr/bin/env bash\nexec printf 'synthetic project context\\n'\n"
     context_path = tmp_path / relative
     context_path.write_text(content, encoding="utf-8")
@@ -131,7 +131,7 @@ def test_keeps_small_regular_file_context_behavior_unchanged(tmp_path: Path) -> 
     assert envelope["truncated"] is False
 
 
-@pytest.mark.parametrize("relative", ["codex-project-context.foo", "artifact.dat"])
+@pytest.mark.parametrize("relative", ["context-entry.foo", "artifact.dat"])
 def test_keeps_unknown_extension_context_refused(tmp_path: Path, relative: str) -> None:
     (tmp_path / relative).write_text("synthetic context\n", encoding="utf-8")
     builder = _diff_audit_builder(tmp_path, f"?? {relative}\n")

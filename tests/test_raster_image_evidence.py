@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from codex_snapshot_runner import cli as runner
-from codex_snapshot_runner import collect
+from snapshot_runner import cli as runner
+from snapshot_runner import collect
 
 GIT = "/usr/bin/git"
 
@@ -42,9 +42,9 @@ def _commit(repo: Path, message: str) -> None:
         "-c",
         "core.hooksPath=/dev/null",
         "-c",
-        "user.name=Codex Test",
+        "user.name=Runner Test",
         "-c",
-        "user.email=codex-test@example.invalid",
+        "user.email=runner-test@example.invalid",
         "-c",
         "commit.gpgsign=false",
         "commit",

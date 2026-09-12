@@ -37,13 +37,11 @@ def repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     subprocess.run(["git", "init", "-q", "-b", "main"], check=True)
-    (repo / "codex_snapshot_runner").mkdir()
+    (repo / "snapshot_runner").mkdir()
     (repo / "pyproject.toml").write_text(f'[project]\nname = "{r.PACKAGE}"\nversion = "1.2.3"\n')
-    (repo / "codex_snapshot_runner/__init__.py").write_text('__version__ = "1.2.3"\n')
+    (repo / "snapshot_runner/__init__.py").write_text('__version__ = "1.2.3"\n')
     (repo / "CHANGELOG.md").write_text("# Changelog\n\n## Unreleased\n\n## 1.2.3\n\n- Notes\n")
-    subprocess.run(
-        ["git", "add", "pyproject.toml", "codex_snapshot_runner", "CHANGELOG.md"], check=True
-    )
+    subprocess.run(["git", "add", "pyproject.toml", "snapshot_runner", "CHANGELOG.md"], check=True)
     subprocess.run(
         [
             "git",

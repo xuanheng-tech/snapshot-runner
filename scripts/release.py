@@ -82,7 +82,7 @@ def identity(
     if checkout and command("git", "rev-parse", "HEAD") != commit:
         raise ReleaseError("build checkout is not the exact release commit")
     project = tomllib.loads(command("git", "show", f"{commit}:pyproject.toml"))["project"]
-    package = command("git", "show", f"{commit}:codex_snapshot_runner/__init__.py")
+    package = command("git", "show", f"{commit}:snapshot_runner/__init__.py")
     version = tag[1:]
     if project["name"] != PACKAGE or project["version"] != version:
         raise ReleaseError("tag/project version mismatch")

@@ -20,14 +20,14 @@ RESOLVED_TEST_PATHS = tuple(Path(raw or ".").resolve() for raw in sys.path)
 
 import pytest  # noqa: E402 - isolation assertions must precede non-stdlib imports.
 
-import codex_snapshot_runner as runner_namespace  # noqa: E402
-from codex_snapshot_runner import (  # noqa: E402
+import snapshot_runner as runner_namespace  # noqa: E402
+from snapshot_runner import (  # noqa: E402
     artifact as artifact_module,
 )
-from codex_snapshot_runner import (  # noqa: E402
+from snapshot_runner import (  # noqa: E402
     cli as runner,
 )
-from codex_snapshot_runner import (  # noqa: E402
+from snapshot_runner import (  # noqa: E402
     collect,
     git,
     security,
@@ -209,9 +209,9 @@ def target_repository(private_state: Path) -> git.ValidatedTargetRepository:
         ("add", "safe.py"),
         (
             "-c",
-            "user.name=Codex Test",
+            "user.name=Runner Test",
             "-c",
-            "user.email=codex-test@example.invalid",
+            "user.email=runner-test@example.invalid",
             "-c",
             "commit.gpgsign=false",
             "commit",
@@ -256,15 +256,15 @@ def test_python_environment_and_project_modules_are_isolated() -> None:
 def test_public_just_interfaces_expose_all_prepares_and_disabled_analyze() -> None:
     justfile = (PROJECT_ROOT / "justfile").read_text(encoding="utf-8")
     mappings = {
-        "codex-repo-status": "prepare repo-status",
-        "codex-diff-audit": "prepare diff-audit",
-        "codex-branch-review": "prepare branch-review",
-        "codex-test-triage": "prepare test-triage",
+        "repo-status": "prepare repo-status",
+        "diff-audit": "prepare diff-audit",
+        "branch-review": "prepare branch-review",
+        "test-triage": "prepare test-triage",
     }
     for recipe, invocation in mappings.items():
         assert f"{recipe} *args:" in justfile
         assert invocation in justfile
-    assert "codex-analyze-snapshot *args:" in justfile
+    assert "analyze-snapshot *args:" in justfile
     assert 'analyze "$@"' in justfile
     assert "{{snapshot_id}}" not in justfile
 
@@ -313,7 +313,7 @@ def test_prepare_resolves_only_git_and_prints_manual_workflow(
     assert "preview:" in output
     assert "manual_workflow:" in output
     assert "inspect snapshot.json with your coding agent or automation" in output
-    assert "just codex-analyze-snapshot" not in output
+    assert "just analyze-snapshot" not in output
     assert "Human review of preview.txt is required" in output
 
 
@@ -373,7 +373,7 @@ def test_prepare_only_analyze_refuses_before_prepare_boundaries(
 
 
 def test_automatic_analysis_production_implementation_is_absent() -> None:
-    source = (PROJECT_ROOT / "codex_snapshot_runner/cli.py").read_text(encoding="utf-8")
+    source = (PROJECT_ROOT / "snapshot_runner/cli.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     definitions = {
         node.name
@@ -435,7 +435,7 @@ def test_snapshot_directory_must_be_inside_validated_store_before_meta_read(
     tmp_path: Path,
     private_state: Path,
 ) -> None:
-    controlled = private_state / "codex-exec"
+    controlled = private_state / "snapshot-runner"
     store = controlled / "snapshots"
     for path in (controlled, store):
         path.mkdir(mode=0o700, exist_ok=True)
@@ -465,7 +465,7 @@ def test_current_meta_epoch_does_not_bypass_noncurrent_snapshot_envelope(
         preview,
     )
     meta_bytes = artifact_module._serialize_snapshot_meta(meta)
-    controlled = private_state / "codex-exec"
+    controlled = private_state / "snapshot-runner"
     store = controlled / "snapshots"
     directory = store / snapshot_id
     for path in (controlled, store, directory):
@@ -524,7 +524,7 @@ def test_cli_argument_errors_are_fixed_and_never_echo_input(
 
 def test_cli_help_describes_prepare_only_fail_closed_analyze() -> None:
     result = subprocess.run(
-        [sys.executable, "-m", "codex_snapshot_runner.cli", "--help"],
+        [sys.executable, "-m", "snapshot_runner.cli", "--help"],
         cwd=PROJECT_ROOT,
         text=True,
         capture_output=True,
@@ -1094,7 +1094,7 @@ def test_state_home_requires_an_absolute_existing_real_directory(
 
 def test_every_subprocess_is_shell_free() -> None:
     source = "\n".join(
-        (PROJECT_ROOT / "codex_snapshot_runner" / name).read_text(encoding="utf-8")
+        (PROJECT_ROOT / "snapshot_runner" / name).read_text(encoding="utf-8")
         for name in ("artifact.py", "cli.py", "collect.py", "git.py", "security.py")
     )
     assert "shell=True" not in source
@@ -1105,7 +1105,7 @@ def test_every_subprocess_is_shell_free() -> None:
 def test_just_prepare_recipe_selects_prepare_without_executing_runner(tmp_path: Path) -> None:
     captured = _capture_just_argv(
         tmp_path,
-        "codex-repo-status",
+        "repo-status",
         ["--repo", "/absolute/target/repo"],
     )
     assert captured[-4:] == [
@@ -1125,7 +1125,7 @@ def _capture_just_argv(tmp_path: Path, recipe: str, arguments: list[str]) -> lis
     fake_uv.write_text(
         "#!/usr/bin/python3\n"
         "import json, os, sys\n"
-        "with open(os.environ['CODEX_EXEC_ARGV_CAPTURE'], 'w', encoding='utf-8') as stream:\n"
+        "with open(os.environ['RUNNER_ARGV_CAPTURE'], 'w', encoding='utf-8') as stream:\n"
         "    json.dump(sys.argv[1:], stream, ensure_ascii=False)\n",
         encoding="utf-8",
     )
@@ -1134,7 +1134,7 @@ def _capture_just_argv(tmp_path: Path, recipe: str, arguments: list[str]) -> lis
     assert just is not None
     environment = os.environ.copy()
     environment["PATH"] = f"{fake_bin}:/usr/bin:/bin"
-    environment["CODEX_EXEC_ARGV_CAPTURE"] = os.fspath(capture)
+    environment["RUNNER_ARGV_CAPTURE"] = os.fspath(capture)
     result = subprocess.run(
         [just, recipe, *arguments],
         cwd=PROJECT_ROOT,
@@ -1152,22 +1152,22 @@ def _capture_just_argv(tmp_path: Path, recipe: str, arguments: list[str]) -> lis
     ("recipe", "arguments", "action"),
     [
         (
-            "codex-repo-status",
+            "repo-status",
             ["--repo", "/absolute/target/repo"],
             ["prepare", "repo-status", "--repo", "/absolute/target/repo"],
         ),
         (
-            "codex-diff-audit",
+            "diff-audit",
             ["--repo", "/absolute/target/repo"],
             ["prepare", "diff-audit", "--repo", "/absolute/target/repo"],
         ),
         (
-            "codex-branch-review",
+            "branch-review",
             ["--repo", "/absolute/target/repo", "main"],
             ["prepare", "branch-review", "--repo", "/absolute/target/repo", "main"],
         ),
         (
-            "codex-test-triage",
+            "test-triage",
             ["--repo", "/absolute/target/repo", "safe log.txt"],
             [
                 "prepare",
@@ -1177,7 +1177,7 @@ def _capture_just_argv(tmp_path: Path, recipe: str, arguments: list[str]) -> lis
                 "safe log.txt",
             ],
         ),
-        ("codex-analyze-snapshot", ["a" * 64], ["analyze", "a" * 64]),
+        ("analyze-snapshot", ["a" * 64], ["analyze", "a" * 64]),
     ],
 )
 def test_all_just_recipes_forward_only_positional_argv(
@@ -1194,7 +1194,7 @@ def test_all_just_recipes_forward_only_positional_argv(
         "--no-sync",
         "python",
         "-m",
-        "codex_snapshot_runner.cli",
+        "snapshot_runner.cli",
         *action,
     ]
 
@@ -1215,7 +1215,7 @@ def test_analyze_sentinel_recipe_treats_hostile_arguments_only_as_argv_data(
     tmp_path: Path,
     snapshot_argument: str,
 ) -> None:
-    captured = _capture_just_argv(tmp_path, "codex-analyze-snapshot", [snapshot_argument])
+    captured = _capture_just_argv(tmp_path, "analyze-snapshot", [snapshot_argument])
     assert captured[-2:] == ["analyze", snapshot_argument]
     assert not (PROJECT_ROOT / "SHOULD_NOT_EXIST").exists()
 
@@ -1223,10 +1223,10 @@ def test_analyze_sentinel_recipe_treats_hostile_arguments_only_as_argv_data(
 def test_analyze_sentinel_recipe_missing_and_extra_arguments_remain_argv_data(
     tmp_path: Path,
 ) -> None:
-    missing = _capture_just_argv(tmp_path / "missing", "codex-analyze-snapshot", [])
+    missing = _capture_just_argv(tmp_path / "missing", "analyze-snapshot", [])
     extra = _capture_just_argv(
         tmp_path / "extra",
-        "codex-analyze-snapshot",
+        "analyze-snapshot",
         ["a" * 64, "unexpected"],
     )
     assert missing[-1:] == ["analyze"]
@@ -1237,11 +1237,11 @@ def test_all_just_recipes_have_safe_dry_run_scripts() -> None:
     just = shutil.which("just")
     assert just is not None
     recipes = {
-        "codex-repo-status": ["--repo", "/absolute/target/repo"],
-        "codex-diff-audit": ["--repo", "/absolute/target/repo"],
-        "codex-branch-review": ["--repo", "/absolute/target/repo", "main"],
-        "codex-test-triage": ["--repo", "/absolute/target/repo", "safe.log"],
-        "codex-analyze-snapshot": ["a" * 64],
+        "repo-status": ["--repo", "/absolute/target/repo"],
+        "diff-audit": ["--repo", "/absolute/target/repo"],
+        "branch-review": ["--repo", "/absolute/target/repo", "main"],
+        "test-triage": ["--repo", "/absolute/target/repo", "safe.log"],
+        "analyze-snapshot": ["a" * 64],
     }
     for recipe, arguments in recipes.items():
         result = subprocess.run(
@@ -1473,7 +1473,7 @@ def test_yaml_subset_entrypoint_is_removed_for_every_structure(raw: str) -> None
 
 
 def test_yaml_recognizer_and_compatibility_path_are_not_production_boundaries() -> None:
-    source = (PROJECT_ROOT / "codex_snapshot_runner/security.py").read_text(encoding="utf-8")
+    source = (PROJECT_ROOT / "snapshot_runner/security.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     function_names = {
         node.name
@@ -1714,7 +1714,7 @@ def test_mixed_yaml_and_source_diff_rejects_the_entire_snapshot(
     )
     with pytest.raises(runner.RunnerError, match=f"^{security.YAML_CONTENT_REFUSED}$"):
         runner._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
-    assert not (private_state / "codex-exec").exists()
+    assert not (private_state / "snapshot-runner").exists()
 
 
 @pytest.mark.parametrize(
@@ -1759,7 +1759,7 @@ def test_unified_diff_rejects_every_yaml_file_section_before_hunk_scanning(
     )
     with pytest.raises(runner.RunnerError, match=f"^{security.YAML_CONTENT_REFUSED}$"):
         runner._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
-    assert not (private_state / "codex-exec").exists()
+    assert not (private_state / "snapshot-runner").exists()
 
 
 def _run_test_git(repo: Path, *arguments: str) -> None:
@@ -1803,9 +1803,9 @@ def _initialize_isolation_repo(repo: Path, branch: str, committed_marker: str) -
     _run_test_git(
         repo,
         "-c",
-        "user.name=Codex Test",
+        "user.name=Runner Test",
         "-c",
-        "user.email=codex-test@example.invalid",
+        "user.email=runner-test@example.invalid",
         "-c",
         "commit.gpgsign=false",
         "commit",
@@ -1822,9 +1822,9 @@ def _commit_worktree_marker(repo: Path, name: str, marker: str) -> str:
     _run_test_git(
         repo,
         "-c",
-        "user.name=Codex Test",
+        "user.name=Runner Test",
         "-c",
-        "user.email=codex-test@example.invalid",
+        "user.email=runner-test@example.invalid",
         "-c",
         "commit.gpgsign=false",
         "commit",
@@ -2009,9 +2009,9 @@ def test_prepare_only_public_entry_completes_all_four_prepare_workflows(
     assert conversion_policy_calls == expected_capability_calls
     assert "manual_workflow:" in output
     assert "inspect snapshot.json with your coding agent or automation" in output
-    assert "just codex-analyze-snapshot" not in output
+    assert "just analyze-snapshot" not in output
 
-    snapshot_root = state / "codex-exec" / "snapshots"
+    snapshot_root = state / "snapshot-runner" / "snapshots"
     directories = list(snapshot_root.iterdir())
     assert len(directories) == 1
     directory = directories[0]
@@ -2036,8 +2036,8 @@ def test_prepare_only_public_entry_completes_all_four_prepare_workflows(
     preview = preview_bytes.decode("utf-8")
     assert f"snapshot_id: {directory.name}\ntask: {task}\n" in preview
     assert "completeness: evidence_gaps=" in preview
-    assert not (state / "codex-exec" / "runs").exists()
-    assert not (state / "codex-exec" / "codex-home").exists()
+    assert not (state / "snapshot-runner" / "runs").exists()
+    assert not (state / "snapshot-runner" / "codex-home").exists()
 
 
 def test_git_runner_uses_validated_repo_only_as_dash_c_argv(
@@ -2135,7 +2135,7 @@ def test_host_git_shallow_file_cannot_affect_prepare_evidence_or_artifacts(
     )
     assert os.fspath(marker).encode() not in combined
     assert marker_body.encode() not in combined
-    assert not (private_state / "codex-exec" / "runs").exists()
+    assert not (private_state / "snapshot-runner" / "runs").exists()
 
 
 def test_target_and_runner_worktrees_must_not_contain_each_other(
@@ -2216,7 +2216,7 @@ def test_path_level_state_failure_runs_zero_git_commands_and_creates_no_artifact
 
     assert git_calls == []
     assert resolved_executables == []
-    assert not (state / "codex-exec").exists()
+    assert not (state / "snapshot-runner").exists()
     assert not list(tmp_path.rglob("snapshot.json"))
 
 
@@ -2294,7 +2294,7 @@ def test_state_git_admin_overlap_stops_after_only_fixed_path_validation(
         runner._run_prepare(arguments)
 
     assert observed == [(target_repo, path_validation), (runner_repo, path_validation)]
-    assert not (state / "codex-exec").exists()
+    assert not (state / "snapshot-runner").exists()
     assert not list(tmp_path.rglob("snapshot.json"))
 
 
@@ -2333,7 +2333,7 @@ def test_repo_status_snapshot_is_isolated_from_runner_repository(
 
     assert runner.main(["prepare", "repo-status", "--repo", os.fspath(target_repo)]) == 0
     assert "manual_workflow:" in capsys.readouterr().out
-    directories = list((state / "codex-exec" / "snapshots").iterdir())
+    directories = list((state / "snapshot-runner" / "snapshots").iterdir())
     assert len(directories) == 1
     directory = directories[0]
     snapshot_payload = json.loads((directory / "snapshot.json").read_bytes())
@@ -2395,7 +2395,7 @@ def test_shared_common_dir_repo_status_contains_only_target_worktree_evidence(
 
     assert runner.main(["prepare", "repo-status", "--repo", os.fspath(target_repo)]) == 0
     assert "manual_workflow:" in capsys.readouterr().out
-    directories = list((state / "codex-exec" / "snapshots").iterdir())
+    directories = list((state / "snapshot-runner" / "snapshots").iterdir())
     assert len(directories) == 1
     directory = directories[0]
     snapshot_payload = json.loads((directory / "snapshot.json").read_bytes())
@@ -2455,7 +2455,7 @@ def test_shared_common_dir_branch_review_rejects_runner_current_ref(
     assert captured.out == ""
     assert "base ref belongs to the Runner worktree" in captured.err
     assert "runner-only-branch" not in captured.err
-    assert not (state / "codex-exec").exists()
+    assert not (state / "snapshot-runner").exists()
 
 
 def test_extra_git_like_arguments_are_rejected_before_collection(
@@ -2495,9 +2495,9 @@ def _initialize_branch_review_test_repo(repo: Path) -> tuple[str, str]:
     _run_test_git(
         repo,
         "-c",
-        "user.name=Codex Test",
+        "user.name=Runner Test",
         "-c",
-        "user.email=codex-test@example.invalid",
+        "user.email=runner-test@example.invalid",
         "-c",
         "commit.gpgsign=false",
         "commit",
@@ -2514,9 +2514,9 @@ def _initialize_branch_review_test_repo(repo: Path) -> tuple[str, str]:
     _run_test_git(
         repo,
         "-c",
-        "user.name=Codex Test",
+        "user.name=Runner Test",
         "-c",
-        "user.email=codex-test@example.invalid",
+        "user.email=runner-test@example.invalid",
         "-c",
         "commit.gpgsign=false",
         "commit",
@@ -2591,9 +2591,9 @@ def _commit_test_changes(repo: Path, message: str) -> str:
     _run_test_git(
         repo,
         "-c",
-        "user.name=Codex Test",
+        "user.name=Runner Test",
         "-c",
-        "user.email=codex-test@example.invalid",
+        "user.email=runner-test@example.invalid",
         "-c",
         "commit.gpgsign=false",
         "commit",
@@ -2776,7 +2776,7 @@ def test_branch_review_ref_change_during_collection_fails_without_artifact(
             target,
             "/usr/bin/git",
         )
-    assert not (state / "codex-exec").exists()
+    assert not (state / "snapshot-runner").exists()
 
 
 @pytest.mark.parametrize("changed_path", ["worktree_root", "git_dir", "git_common_dir"])
@@ -2811,7 +2811,7 @@ def test_branch_review_git_identity_change_during_collection_fails_closed(
             target,
             "/usr/bin/git",
         )
-    assert not (state / "codex-exec").exists()
+    assert not (state / "snapshot-runner").exists()
 
 
 def test_branch_review_state_change_after_staging_leaves_no_final_artifact(
@@ -2839,7 +2839,7 @@ def test_branch_review_state_change_after_staging_leaves_no_final_artifact(
             target,
             "/usr/bin/git",
         )
-    snapshot_root = state / "codex-exec" / "snapshots"
+    snapshot_root = state / "snapshot-runner" / "snapshots"
     assert snapshot_root.is_dir()
     assert list(snapshot_root.iterdir()) == []
 
@@ -2855,7 +2855,7 @@ def _replacement_blob(repo: Path, tmp_path: Path) -> tuple[str, str, str]:
 
 
 def _assert_state_has_no_marker_or_final_snapshot(state: Path, marker: str) -> None:
-    snapshot_root = state / "codex-exec" / "snapshots"
+    snapshot_root = state / "snapshot-runner" / "snapshots"
     if snapshot_root.exists():
         assert list(snapshot_root.iterdir()) == []
     for path in state.rglob("*"):
@@ -2994,7 +2994,7 @@ def test_legal_local_shallow_clone_fails_before_object_identity_or_collection(
     assert not list((tmp_path / "state").rglob("preview.txt"))
     assert not list((tmp_path / "state").rglob("meta.json"))
     assert not list((tmp_path / "state").rglob(".staging-*"))
-    assert not (tmp_path / "state" / "codex-exec" / "runs").exists()
+    assert not (tmp_path / "state" / "snapshot-runner" / "runs").exists()
 
 
 @pytest.mark.parametrize("location", ["git-dir", "common-dir", "actual"])
@@ -3175,7 +3175,7 @@ def test_nonshallow_complete_history_capability_control_passes(
         candidate.state == "absent"
         for candidate in target.capability_fingerprint.shallow.candidate_paths
     )
-    assert not (state / "codex-exec").exists()
+    assert not (state / "snapshot-runner").exists()
 
 
 def _write_external_canary(tmp_path: Path) -> tuple[Path, Path]:
@@ -3234,7 +3234,7 @@ def _assert_capability_prepare_rejected_before_content(
         runner._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
     assert content_calls == []
     assert not marker.exists()
-    assert not (state / "codex-exec").exists()
+    assert not (state / "snapshot-runner").exists()
     config_checked = any(
         arguments[:2] == ("config", "--local") and "--no-includes" in arguments
         for arguments in observed
@@ -3263,7 +3263,7 @@ def test_shallow_created_inside_collector_is_detected_without_publication(
         runner._prepare_snapshot("branch-review", "feature/example", target, "/usr/bin/git")
     _assert_state_has_no_marker_or_final_snapshot(state, base_commit)
     assert not list(state.rglob(".staging-*"))
-    assert not (state / "codex-exec" / "runs").exists()
+    assert not (state / "snapshot-runner" / "runs").exists()
 
 
 def test_shallow_created_after_collector_is_detected_without_artifact(
@@ -3287,7 +3287,7 @@ def test_shallow_created_after_collector_is_detected_without_artifact(
         runner._prepare_snapshot("repo-status", None, target_repository, "/usr/bin/git")
     _assert_state_has_no_marker_or_final_snapshot(private_state, marker)
     assert not list(private_state.rglob(".staging-*"))
-    assert not (private_state / "codex-exec" / "runs").exists()
+    assert not (private_state / "snapshot-runner" / "runs").exists()
 
 
 def test_shallow_created_after_staging_validation_is_detected_before_rename(
@@ -3316,7 +3316,7 @@ def test_shallow_created_after_staging_validation_is_detected_before_rename(
         runner._prepare_snapshot("repo-status", None, target_repository, "/usr/bin/git")
     _assert_state_has_no_marker_or_final_snapshot(private_state, marker)
     assert not list(private_state.rglob(".staging-*"))
-    assert not (private_state / "codex-exec" / "runs").exists()
+    assert not (private_state / "snapshot-runner" / "runs").exists()
 
 
 def _prepare_conversion_snapshot(
@@ -3767,7 +3767,7 @@ def test_test_triage_skips_object_capabilities_without_running_converter(
     triage_output = capsys.readouterr()
     assert triage_output.err == ""
     assert converter_marker.exists() is False
-    directories = list((state / "codex-exec" / "snapshots").iterdir())
+    directories = list((state / "snapshot-runner" / "snapshots").iterdir())
     assert len(directories) == 1
     artifact_bytes = (directories[0] / "snapshot.json").read_bytes()
     assert b"FAILED synthetic test" in artifact_bytes
@@ -3778,7 +3778,7 @@ def test_test_triage_skips_object_capabilities_without_running_converter(
     assert refusal.out == ""
     assert git.GIT_REPLACEMENT_REFUSED_ERROR in refusal.err
     assert converter_marker.exists() is False
-    assert list((state / "codex-exec" / "snapshots").iterdir()) == directories
+    assert list((state / "snapshot-runner" / "snapshots").iterdir()) == directories
 
 
 @pytest.mark.parametrize("object_type", ["commit", "tree", "blob"])
@@ -3824,7 +3824,7 @@ def test_replace_refs_are_disabled_and_refused_before_collection(
     ) as raised:
         _validated_test_repository(repo)
     assert replacement_marker not in str(raised.value)
-    assert not (state / "codex-exec").exists()
+    assert not (state / "snapshot-runner").exists()
     replace_queries = [arguments for arguments in observed if arguments[0] == "for-each-ref"]
     assert replace_queries
     assert all(arguments[-1] == "refs/replace/" for arguments in replace_queries)
@@ -3923,7 +3923,7 @@ def test_host_object_database_injection_cannot_supply_missing_external_objects(
     monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", external_objects)
     with pytest.raises(runner.RunnerError, match=f"^{git.TARGET_REPOSITORY_INVALID_ERROR}$"):
         _validated_test_repository(repo)
-    assert not (state / "codex-exec").exists()
+    assert not (state / "snapshot-runner").exists()
 
 
 def _configure_promisor_canaries(
@@ -3982,7 +3982,7 @@ def test_promisor_repositories_with_missing_objects_fail_before_object_access(
     )
     assert _object_store_manifest(repo) == before
     assert sum(marker.exists() for marker in markers) == 0
-    assert not (tmp_path / "state" / "codex-exec" / "runs").exists()
+    assert not (tmp_path / "state" / "snapshot-runner" / "runs").exists()
 
 
 def test_git_no_lazy_fetch_is_independent_of_promisor_preflight(
@@ -4035,9 +4035,9 @@ def _initialize_yaml_test_repo(repo: Path) -> None:
     _run_test_git(
         repo,
         "-c",
-        "user.name=Codex Test",
+        "user.name=Runner Test",
         "-c",
-        "user.email=codex-test@example.invalid",
+        "user.email=runner-test@example.invalid",
         "-c",
         "commit.gpgsign=false",
         "commit",
@@ -4089,7 +4089,7 @@ def test_prepare_refuses_yaml_workspace_changes_before_diff_or_file_content_read
     assert all(
         arguments[0] != "diff" or "--name-only" in arguments for arguments in observed_git_argv
     )
-    assert not (state / "codex-exec").exists()
+    assert not (state / "snapshot-runner").exists()
     assert marker.encode() not in b"".join(
         path.read_bytes() for path in state.rglob("*") if path.is_file()
     )
@@ -4373,7 +4373,7 @@ def test_diff_audit_rejects_unsafe_gitattributes_content(
     ):
         runner._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
 
-    assert not (state / "codex-exec").exists()
+    assert not (state / "snapshot-runner").exists()
 
 
 @pytest.mark.parametrize("staged", [False, True], ids=("unstaged", "staged"))
@@ -4442,7 +4442,7 @@ def test_csv_diff_private_key_fails_closed_without_snapshot_leakage(
     assert marker.encode() not in b"".join(
         path.read_bytes() for path in state.rglob("*") if path.is_file()
     )
-    assert not (state / "codex-exec").exists()
+    assert not (state / "snapshot-runner").exists()
 
 
 @pytest.mark.parametrize(
@@ -4465,7 +4465,7 @@ def test_diff_audit_rejects_unsafe_csv_content(
     with pytest.raises(security.RunnerError, match="sanitize unstaged-diff"):
         runner._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
 
-    assert not (state / "codex-exec").exists()
+    assert not (state / "snapshot-runner").exists()
 
 
 @pytest.mark.parametrize("relative_path", [".gitattributes", "audit.csv"])
@@ -4487,7 +4487,7 @@ def test_diff_audit_rejects_symlinks_for_new_bounded_text_paths(
     with pytest.raises(security.RunnerError, match=expected_error):
         runner._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
 
-    assert not (state / "codex-exec").exists()
+    assert not (state / "snapshot-runner").exists()
 
 
 def test_csv_diff_keeps_high_risk_path_refusal(
@@ -4508,7 +4508,7 @@ def test_csv_diff_keeps_high_risk_path_refusal(
     with pytest.raises(security.RunnerError, match="sanitize unstaged-diff"):
         runner._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
 
-    assert not (state / "codex-exec").exists()
+    assert not (state / "snapshot-runner").exists()
 
 
 def test_diff_audit_accepts_safe_extensionless_text_and_structured_signature(
@@ -4623,4 +4623,4 @@ def test_signature_private_key_fails_closed_without_artifact_leakage(
     assert marker.encode() not in b"".join(
         path.read_bytes() for path in state.rglob("*") if path.is_file()
     )
-    assert not (state / "codex-exec").exists()
+    assert not (state / "snapshot-runner").exists()

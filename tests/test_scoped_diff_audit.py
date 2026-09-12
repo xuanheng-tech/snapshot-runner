@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from codex_snapshot_runner import cli, isolation, security
+from snapshot_runner import cli, isolation, security
 
 
 def _git(repo: Path, *arguments: str) -> str:
@@ -85,7 +85,7 @@ def test_scoped_diff_audit_cleans_clone_and_keeps_only_exact_paths(
     _assert_no_task_directory(temp_root)
     assert _git(repo, "status", "--short", "--untracked-files=all") == status_before
     assert _git(repo, "worktree", "list", "--porcelain") == worktrees_before
-    snapshots = list((state / "codex-exec" / "snapshots").glob("*/snapshot.json"))
+    snapshots = list((state / "snapshot-runner" / "snapshots").glob("*/snapshot.json"))
     assert len(snapshots) == 1
     payload = json.loads(snapshots[0].read_text(encoding="utf-8"))
     data = payload["data"]

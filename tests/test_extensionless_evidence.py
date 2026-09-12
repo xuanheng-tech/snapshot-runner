@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from codex_snapshot_runner import artifact, collect, git
-from codex_snapshot_runner import cli as runner
+from snapshot_runner import artifact, collect, git
+from snapshot_runner import cli as runner
 
 GIT = "/usr/bin/git"
 
@@ -38,9 +38,9 @@ def _commit(repo: Path, message: str, *paths: str) -> str:
         "-c",
         "core.hooksPath=/dev/null",
         "-c",
-        "user.name=Codex Test",
+        "user.name=Runner Test",
         "-c",
-        "user.email=codex-test@example.invalid",
+        "user.email=runner-test@example.invalid",
         "-c",
         "commit.gpgsign=false",
         "commit",
@@ -126,11 +126,11 @@ def test_untracked_extensionless_text_shebang_modes_and_exact_limit(
         "python-entry": "#!/usr/bin/env python3\nprint('python')\n",
         "shell-entry": "#!/usr/bin/env sh\nprintf 'shell\\n'\n",
         "NOTES": "plain UTF-8 说明\n",
-        "codex-project-context": "#!/usr/bin/env python3\nprint('context')\n",
+        "context-entry": "#!/usr/bin/env python3\nprint('context')\n",
     }
     for name, content in files.items():
         (repo / name).write_text(content, encoding="utf-8")
-    for name in ("python-entry", "shell-entry", "codex-project-context"):
+    for name in ("python-entry", "shell-entry", "context-entry"):
         (repo / name).chmod(0o755)
     (repo / "EXACT").write_bytes(b"x\n" * (collect.MAX_EXTENSIONLESS_TEXT_BYTES // 2))
     (repo / "unknown.foo").write_text("must stay unsupported\n", encoding="utf-8")

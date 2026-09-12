@@ -10,12 +10,14 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-ENTRYPOINTS = {
-    "repo-status": "repo_status_main",
-    "diff-audit": "diff_audit_main",
-    "branch-review": "branch_review_main",
-    "test-triage": "test_triage_main",
-}
+TASKS = ("repo-status", "diff-audit", "branch-review", "test-triage")
+# 2.0.0 removed the provider-named alias entrypoints.
+REMOVED_ALIAS_ENTRYPOINTS = (
+    "repo_status_main",
+    "diff_audit_main",
+    "branch_review_main",
+    "test_triage_main",
+)
 
 
 @pytest.fixture
@@ -73,7 +75,7 @@ def invoke(entry: str, args: list[str], env: dict[str, str]) -> subprocess.Compl
         [
             sys.executable,
             "-c",
-            f"from codex_snapshot_runner.cli import {entry}; raise SystemExit({entry}())",
+            f"from snapshot_runner.cli import {entry}; raise SystemExit({entry}())",
             *args,
         ],
         cwd=ROOT,
@@ -93,8 +95,8 @@ def files(repo: Path) -> dict[str, str]:
     }
 
 
-@pytest.mark.parametrize("task", ENTRYPOINTS)
-def test_neutral_and_alias_share_evidence_and_preserve_target(workspace, task: str) -> None:
+@pytest.mark.parametrize("task", TASKS)
+def test_primary_cli_collects_evidence_and_preserves_target(workspace, task: str) -> None:
     repo, env = workspace
     args = ["--repo", str(repo), "--summary"]
     if task == "branch-review":
@@ -102,46 +104,52 @@ def test_neutral_and_alias_share_evidence_and_preserve_target(workspace, task: s
     elif task == "test-triage":
         args.append("failed.log")
     before = files(repo)
-    neutral = invoke("snapshot_runner_main", [task, *args], env)
-    alias = invoke(ENTRYPOINTS[task], args, env)
-    assert neutral.returncode == alias.returncode == 0
-    assert neutral.stderr == alias.stderr == ""
-    assert neutral.stdout == alias.stdout
-    summary = json.loads(neutral.stdout)
+    result = invoke("snapshot_runner_main", [task, *args], env)
+    assert result.returncode == 0
+    assert result.stderr == ""
+    summary = json.loads(result.stdout)
     artifact = Path(summary["artifact"])
-    assert artifact.parts[-4:-2] == ("codex-exec", "snapshots")
+    assert artifact.parts[-4:-2] == ("snapshot-runner", "snapshots")
     assert hashlib.sha256(artifact.read_bytes()).hexdigest() == summary["snapshot_id"]
     assert json.loads(artifact.read_bytes())["producer_security_epoch"] == 4
     assert files(repo) == before
+    # Determinism: an identical repeat reuses the same content-addressed artifact.
+    repeat = invoke("snapshot_runner_main", [task, *args], env)
+    assert repeat.returncode == 0
+    assert json.loads(repeat.stdout)["snapshot_id"] == summary["snapshot_id"]
     if task == "test-triage":
         assert summary["status"] == "complete"
         assert summary["next_action"] == "open_artifact"
 
 
 @pytest.mark.parametrize("args", [[], ["--repo", "relative"], ["--unexpected"]])
-def test_neutral_and_alias_keep_argument_error_contract(workspace, args: list[str]) -> None:
+def test_primary_cli_keeps_argument_error_contract(workspace, args: list[str]) -> None:
     _, env = workspace
-    neutral = invoke("snapshot_runner_main", ["repo-status", *args], env)
-    alias = invoke("repo_status_main", args, env)
-    assert neutral.returncode == alias.returncode == 2
-    assert neutral.stdout == alias.stdout == ""
-    assert neutral.stderr == alias.stderr
+    result = invoke("snapshot_runner_main", ["repo-status", *args], env)
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.stderr.startswith("workflow_failed:")
 
 
-def test_neutral_help_version_and_legacy_human_guidance(workspace) -> None:
+def test_provider_named_alias_entrypoints_no_longer_exist(workspace) -> None:
+    _, env = workspace
+    for entry in REMOVED_ALIAS_ENTRYPOINTS:
+        result = invoke(entry, [], env)
+        assert result.returncode != 0
+        assert "ImportError" in result.stderr or "cannot import name" in result.stderr
+
+
+def test_primary_help_version_and_neutral_guidance(workspace) -> None:
     repo, env = workspace
     help_result = invoke("snapshot_runner_main", ["--help"], env)
     assert help_result.returncode == 0
-    assert all(task in help_result.stdout for task in ENTRYPOINTS)
+    assert all(task in help_result.stdout for task in TASKS)
     assert "--version" in help_result.stdout
     assert "untrusted evidence" in help_result.stdout
     assert "Codex" not in help_result.stdout
     version = invoke("snapshot_runner_main", ["--version"], env)
-    assert version.returncode == 0 and version.stdout == "snapshot-runner 1.6.1\n"
-    args = ["--repo", str(repo)]
-    neutral = invoke("snapshot_runner_main", ["repo-status", *args], env)
-    alias = invoke("repo_status_main", args, env)
-    assert neutral.returncode == alias.returncode == 0
-    assert neutral.stdout.split("manual_workflow:")[0] == alias.stdout.split("manual_workflow:")[0]
-    assert "coding agent or automation" in neutral.stdout and "ChatGPT" not in neutral.stdout
-    assert "coding agent or automation" in alias.stdout and "ChatGPT" not in alias.stdout
+    assert version.returncode == 0 and version.stdout == "snapshot-runner 2.0.0\n"
+    prepared = invoke("snapshot_runner_main", ["repo-status", "--repo", str(repo)], env)
+    assert prepared.returncode == 0
+    assert "coding agent or automation" in prepared.stdout
+    assert "ChatGPT" not in prepared.stdout and "Codex" not in prepared.stdout
