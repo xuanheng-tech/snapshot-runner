@@ -132,7 +132,6 @@ RASTER_IMAGE_EVIDENCE_RE = re.compile(
     r"sha256: (?P<sha256>[0-9a-f]{64})\n"
 )
 REPOSITORY_NAME_RE = re.compile(r"[A-Za-z0-9._][A-Za-z0-9._-]{0,127}")
-_RUNNER_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 @dataclass(frozen=True, slots=True)
@@ -402,8 +401,6 @@ def _validate_bounded_diff_text(
             raise SecurityError("scan mode path is not an approved text path")
     elif is_sensitive_repository_path(relative_path):
         raise SecurityError("scan mode path is not an approved text path")
-    if repository_root == _RUNNER_REPOSITORY_ROOT:
-        return
     if repository_root is None:
         raise SecurityError("scan mode path is not an approved text path")
     directory_flags = (

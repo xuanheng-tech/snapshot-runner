@@ -4624,3 +4624,100 @@ def test_signature_private_key_fails_closed_without_artifact_leakage(
         path.read_bytes() for path in state.rglob("*") if path.is_file()
     )
     assert not (state / "snapshot-runner").exists()
+
+
+def test_runner_root_bounded_diff_text_is_not_bypassed() -> None:
+    """Runner repository root must not bypass bounded diff text validation."""
+    assert not hasattr(security, "_RUNNER_REPOSITORY_ROOT")
+    with pytest.raises(security.SecurityError, match="extensionless text file open failed"):
+        security._validate_bounded_diff_text("missing_audit.csv", PROJECT_ROOT)
+
+    diff_text = (
+        "diff --git a/missing_audit.csv b/missing_audit.csv\n"
+        "--- a/missing_audit.csv\n"
+        "+++ b/missing_audit.csv\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+    with pytest.raises(security.SecurityError, match="extensionless text file open failed"):
+        security.sanitize_text(
+            diff_text,
+            scan_mode=security.ScanMode.UNIFIED_DIFF,
+            repository_root=PROJECT_ROOT,
+        )
+
+
+@pytest.mark.parametrize(
+    ("anomaly", "expected_match"),
+    [
+        ("symlink", "extensionless text symlink refused"),
+        ("binary", "extensionless text binary content refused"),
+        ("oversized", "extensionless text exceeds the file size limit"),
+        ("non_utf8", "extensionless text is not valid UTF-8"),
+    ],
+)
+def test_runner_root_bounded_diff_text_anomalies_fail_closed(
+    anomaly: str,
+    expected_match: str,
+) -> None:
+    """Hostile, symlink, binary, oversized, and non-UTF8 files fail closed under runner root."""
+    test_file_name = f"_tmp_audit_{anomaly}.csv"
+    test_path = PROJECT_ROOT / test_file_name
+    try:
+        if anomaly == "symlink":
+            test_path.symlink_to(PROJECT_ROOT / "pyproject.toml")
+        elif anomaly == "binary":
+            test_path.write_bytes(b"a,b,c\n1,2,\x00\n")
+        elif anomaly == "oversized":
+            test_path.write_bytes(b"x" * (security.MAX_EXTENSIONLESS_TEXT_BYTES + 1))
+        elif anomaly == "non_utf8":
+            test_path.write_bytes(b"a,b,c\n\xff\xfe\n")
+
+        with pytest.raises(security.SecurityError, match=expected_match):
+            security._validate_bounded_diff_text(test_file_name, PROJECT_ROOT)
+
+        diff_text = (
+            f"diff --git a/{test_file_name} b/{test_file_name}\n"
+            f"--- a/{test_file_name}\n"
+            f"+++ b/{test_file_name}\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+new\n"
+        )
+        with pytest.raises(security.SecurityError, match=expected_match):
+            security.sanitize_text(
+                diff_text,
+                scan_mode=security.ScanMode.UNIFIED_DIFF,
+                repository_root=PROJECT_ROOT,
+            )
+    finally:
+        if test_path.is_symlink() or test_path.exists():
+            test_path.unlink()
+
+
+def test_runner_root_valid_bounded_diff_text_passes_validation() -> None:
+    """Valid bounded text files under runner root pass validation normally."""
+    test_file_name = "_tmp_valid_audit.csv"
+    test_path = PROJECT_ROOT / test_file_name
+    try:
+        test_path.write_text("header1,header2\nval1,val2\n", encoding="utf-8")
+        security._validate_bounded_diff_text(test_file_name, PROJECT_ROOT)
+
+        diff_text = (
+            f"diff --git a/{test_file_name} b/{test_file_name}\n"
+            f"--- a/{test_file_name}\n"
+            f"+++ b/{test_file_name}\n"
+            "@@ -1 +1 @@\n"
+            "-header1,header2\n"
+            "+val1,val2\n"
+        )
+        sanitized = security.sanitize_text(
+            diff_text,
+            scan_mode=security.ScanMode.UNIFIED_DIFF,
+            repository_root=PROJECT_ROOT,
+        )
+        assert sanitized.text == diff_text
+    finally:
+        if test_path.is_symlink() or test_path.exists():
+            test_path.unlink()

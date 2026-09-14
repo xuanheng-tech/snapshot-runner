@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import hashlib
 import json
 import os
@@ -62,6 +63,9 @@ MAX_META_BYTES = 64 * 1024
 MAX_PREVIEW_BYTES = 16 * 1024 * 1024
 MAX_SUMMARY_BYTES = 64 * 1024
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+_ACTIVE_REPOSITORY_ROOT: contextvars.ContextVar[Path | None] = contextvars.ContextVar(
+    "_ACTIVE_REPOSITORY_ROOT", default=None
+)
 TASKS = ("repo-status", "diff-audit", "branch-review", "test-triage")
 SNAPSHOT_ID_RE = re.compile(r"[0-9a-f]{64}")
 SNAPSHOT_GIT_OID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
@@ -1494,16 +1498,24 @@ def _validate_snapshot_envelope(value: object) -> dict[str, object]:
     return value
 
 
-def _load_snapshot(snapshot_id: str) -> SnapshotArtifact:
+def _load_snapshot(
+    snapshot_id: str,
+    target_repo: Path | None = None,
+    *,
+    repository_root: Path | None = None,
+) -> SnapshotArtifact:
     if SNAPSHOT_ID_RE.fullmatch(snapshot_id) is None:
         raise RunnerError(
             ARTIFACT_PUBLISH_FAILED,
             "snapshot id must be exactly 64 lowercase hexadecimal characters",
         )
-    root = snapshot_output_root()
+    effective_repo = repository_root if repository_root is not None else target_repo
+    if effective_repo is None:
+        effective_repo = _ACTIVE_REPOSITORY_ROOT.get()
+    root = snapshot_output_root(effective_repo)
     _validate_owned_private_directory(root, "snapshot store")
     directory = root / snapshot_id
-    return _load_snapshot_directory(snapshot_id, directory)
+    return _load_snapshot_directory(snapshot_id, directory, repository_root=effective_repo)
 
 
 def _validate_snapshot_directory_location(snapshot_id: str, directory: Path) -> None:
@@ -1519,7 +1531,12 @@ def _validate_snapshot_directory_location(snapshot_id: str, directory: Path) -> 
         )
 
 
-def _load_snapshot_directory(snapshot_id: str, directory: Path) -> SnapshotArtifact:
+def _load_snapshot_directory(
+    snapshot_id: str,
+    directory: Path,
+    *,
+    repository_root: Path | None = None,
+) -> SnapshotArtifact:
     _validate_snapshot_directory_location(snapshot_id, directory)
     _validate_owned_private_directory(directory, "snapshot directory")
     try:
@@ -1562,9 +1579,10 @@ def _load_snapshot_directory(snapshot_id: str, directory: Path) -> SnapshotArtif
         envelope_value = json.loads(snapshot_bytes)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise RunnerError(ARTIFACT_PUBLISH_FAILED, "snapshot JSON is not valid UTF-8 JSON") from exc
+    active_root = repository_root if repository_root is not None else _ACTIVE_REPOSITORY_ROOT.get()
     envelope = _sanitize_validate_snapshot(
         envelope_value,
-        REPOSITORY_ROOT,
+        active_root if active_root is not None else REPOSITORY_ROOT,
         extra_paths=(directory,),
     )
     if _serialize_snapshot(envelope) != snapshot_bytes:

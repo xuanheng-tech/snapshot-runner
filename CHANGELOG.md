@@ -5,6 +5,13 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.0.1
+
+- Fixed: `_validate_bounded_diff_text` no longer bypasses bounded diff file
+  validation when executed against the Snapshot Runner repository itself. Symlink,
+  size, safe-open, binary, and UTF-8 checks now apply uniformly across all
+  target repositories.
+
 ## 2.0.0
 
 Provider-neutral naming. This release removes public interfaces; read the migration notes.

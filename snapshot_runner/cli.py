@@ -154,6 +154,7 @@ def _prepare_snapshot(
     review_scope: tuple[str, ...] = (),
 ) -> artifact_module.SnapshotArtifact:
     identity = target.target_identity
+    token = artifact_module._ACTIVE_REPOSITORY_ROOT.set(target.path)
     try:
         if task == "test-triage":
             if task_argument is None:
@@ -349,6 +350,7 @@ def _prepare_snapshot(
             f"snapshot publication failed ({_safe_exception_type(exc)})",
         ) from None
     finally:
+        artifact_module._ACTIVE_REPOSITORY_ROOT.reset(token)
         if staging is not None:
             with contextlib.suppress(OSError, RunnerError):
                 if staging.exists():
