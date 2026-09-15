@@ -23,6 +23,7 @@ from .git import (
     GitResult,
     GitRunner,
     TargetGitEvidence,
+    detect_active_git_operation,
 )
 from .security import (
     GIT_COMMAND_FAILED,
@@ -2515,9 +2516,30 @@ def collect_repo_status(
     target_evidence: TargetGitEvidence,
     conversion_policy: GitConversionPolicy,
     git_executable: str = "/usr/bin/git",
+    git_dir: Path | None = None,
 ) -> Snapshot:
     builder = SnapshotBuilder("repo-status", repo_root.name, repo_root)
     git = GitRunner(repo_root, git_executable, conversion_policy=conversion_policy)
+    if git_dir is None:
+        rev_result = git.run(("rev-parse", "--path-format=absolute", "--git-dir"), maximum=4096)
+        if (
+            rev_result.returncode == 0
+            and not rev_result.truncated
+            and rev_result.stdout.endswith(b"\n")
+        ):
+            raw_git_dir = rev_result.stdout.removesuffix(b"\n").decode("utf-8", errors="strict")
+            git_dir = Path(raw_git_dir).resolve()
+        else:
+            git_dir = repo_root / ".git"
+
+    active_operation = detect_active_git_operation(git_dir)
+    if active_operation is not None:
+        builder.add_value(
+            "active_operation",
+            active_operation,
+            scan_mode=ScanMode.PLAIN_TEXT,
+        )
+
     staged_paths, unstaged_paths, untracked_paths = _workspace_changed_paths(git, builder)
     tracked_paths = _changed_paths(git, builder, ("ls-files", "--cached", "-z", "--"))
     conversion_paths = _workspace_conversion_paths(

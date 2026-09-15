@@ -148,7 +148,7 @@ def test_primary_help_version_and_neutral_guidance(workspace) -> None:
     assert "untrusted evidence" in help_result.stdout
     assert "Codex" not in help_result.stdout
     version = invoke("snapshot_runner_main", ["--version"], env)
-    assert version.returncode == 0 and version.stdout == "snapshot-runner 2.0.2\n"
+    assert version.returncode == 0 and version.stdout == "snapshot-runner 2.1.0\n"
     prepared = invoke("snapshot_runner_main", ["repo-status", "--repo", str(repo)], env)
     assert prepared.returncode == 0
     assert "coding agent or automation" in prepared.stdout

@@ -226,7 +226,11 @@ def _prepare_snapshot_guarded(
             conversion_policy = capability_fingerprint.conversion_policy
             if task == "repo-status":
                 snapshot = collect_module.collect_repo_status(
-                    target.path, target_evidence, conversion_policy, git
+                    target.path,
+                    target_evidence,
+                    conversion_policy,
+                    git,
+                    git_dir=identity.paths.git_dir,
                 )
             elif task == "diff-audit":
                 snapshot = collect_module.collect_diff_audit(

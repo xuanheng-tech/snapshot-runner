@@ -1341,3 +1341,522 @@ def _find_executable(name: str) -> str:
             f"trusted executable path is writable by the runner user: {name}",
         )
     return os.fspath(resolved)
+
+
+MAX_GIT_OPERATION_METADATA_BYTES = 64 * 1024
+
+
+def _read_git_metadata_file(
+    path: Path,
+    *,
+    max_bytes: int = MAX_GIT_OPERATION_METADATA_BYTES,
+    description: str = "metadata file",
+) -> str:
+    """Safely and boundedly read a repository metadata file without executing code."""
+    try:
+        st = path.lstat()
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            f"unable to inspect {description} in Git metadata directory",
+        ) from exc
+    if stat.S_ISLNK(st.st_mode):
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            f"unsafe active Git operation metadata: symlink {path.name} refused",
+        )
+    if not stat.S_ISREG(st.st_mode):
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            f"unsafe active Git operation metadata: {path.name} is not a regular file",
+        )
+    if st.st_size > max_bytes:
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            f"active Git operation metadata {path.name} exceeds size limit",
+        )
+    try:
+        with path.open("rb") as stream:
+            data = stream.read(max_bytes + 1)
+    except OSError as exc:
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            f"unable to read {description} in Git metadata directory",
+        ) from exc
+    if len(data) > max_bytes:
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            f"active Git operation metadata {path.name} exceeds size limit",
+        )
+    if b"\x00" in data:
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            f"malformed active Git operation metadata: null byte in {path.name}",
+        )
+    try:
+        text = data.decode("utf-8", errors="strict")
+    except UnicodeError as exc:
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            f"malformed active Git operation metadata: {path.name} is not valid UTF-8",
+        ) from exc
+    if "\r" in text:
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            f"malformed active Git operation metadata: carriage return in {path.name}",
+        )
+    return text
+
+
+def _check_git_metadata_dir(path: Path, description: str = "metadata directory") -> None:
+    try:
+        st = path.lstat()
+    except OSError as exc:
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            f"unable to inspect {description} in Git metadata directory",
+        ) from exc
+    if stat.S_ISLNK(st.st_mode):
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            f"unsafe active Git operation metadata: symlink {path.name} refused",
+        )
+    if not stat.S_ISDIR(st.st_mode):
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            f"unsafe active Git operation metadata: {path.name} is not a directory",
+        )
+
+
+def _parse_merge_operation(git_dir: Path) -> dict[str, object]:
+    text = _read_git_metadata_file(git_dir / "MERGE_HEAD", max_bytes=4096, description="MERGE_HEAD")
+    if not text.endswith("\n"):
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            "malformed active Git operation metadata: MERGE_HEAD missing trailing newline",
+        )
+    lines = text.removesuffix("\n").split("\n")
+    if not lines or any(not line for line in lines):
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            "malformed active Git operation metadata: MERGE_HEAD is empty or contains empty lines",
+        )
+    if len(lines) > 64:
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            "malformed active Git operation metadata: MERGE_HEAD exceeds head count limit",
+        )
+    for line in lines:
+        if GIT_OID_RE.fullmatch(line) is None:
+            raise RunnerError(
+                SNAPSHOT_COLLECTION_FAILED,
+                "malformed active Git operation metadata: invalid OID in MERGE_HEAD",
+            )
+    result: dict[str, object] = {"type": "merge", "heads": lines}
+    if os.path.lexists(git_dir / "MERGE_MSG"):
+        msg = _read_git_metadata_file(
+            git_dir / "MERGE_MSG", max_bytes=4096, description="MERGE_MSG"
+        )
+        result["message"] = msg[:2048]
+    if os.path.lexists(git_dir / "MERGE_MODE"):
+        mode = _read_git_metadata_file(
+            git_dir / "MERGE_MODE", max_bytes=256, description="MERGE_MODE"
+        ).strip()
+        if mode and re.fullmatch(r"[a-z0-9_-]+", mode) is not None:
+            result["mode"] = mode
+        else:
+            raise RunnerError(
+                SNAPSHOT_COLLECTION_FAILED,
+                "malformed active Git operation metadata: invalid MERGE_MODE",
+            )
+    return result
+
+
+def _parse_cherry_pick_operation(git_dir: Path) -> dict[str, object]:
+    text = _read_git_metadata_file(
+        git_dir / "CHERRY_PICK_HEAD", max_bytes=128, description="CHERRY_PICK_HEAD"
+    )
+    if not text.endswith("\n"):
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            "malformed active Git operation metadata: CHERRY_PICK_HEAD missing trailing newline",
+        )
+    oid = text.removesuffix("\n")
+    if GIT_OID_RE.fullmatch(oid) is None or "\n" in oid:
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            "malformed active Git operation metadata: invalid OID in CHERRY_PICK_HEAD",
+        )
+    if os.path.lexists(git_dir / "sequencer"):
+        _check_git_metadata_dir(git_dir / "sequencer", "sequencer directory")
+    return {"type": "cherry-pick", "head": oid}
+
+
+def _parse_revert_operation(git_dir: Path) -> dict[str, object]:
+    text = _read_git_metadata_file(
+        git_dir / "REVERT_HEAD", max_bytes=128, description="REVERT_HEAD"
+    )
+    if not text.endswith("\n"):
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            "malformed active Git operation metadata: REVERT_HEAD missing trailing newline",
+        )
+    oid = text.removesuffix("\n")
+    if GIT_OID_RE.fullmatch(oid) is None or "\n" in oid:
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            "malformed active Git operation metadata: invalid OID in REVERT_HEAD",
+        )
+    if os.path.lexists(git_dir / "sequencer"):
+        _check_git_metadata_dir(git_dir / "sequencer", "sequencer directory")
+    return {"type": "revert", "head": oid}
+
+
+def _parse_rebase_operation(git_dir: Path, *, is_merge_backend: bool) -> dict[str, object]:
+    if is_merge_backend:
+        rebase_dir = git_dir / "rebase-merge"
+        _check_git_metadata_dir(rebase_dir, "rebase-merge directory")
+        head_name_text = _read_git_metadata_file(
+            rebase_dir / "head-name", max_bytes=4096, description="rebase-merge/head-name"
+        )
+        if not head_name_text.endswith("\n"):
+            raise RunnerError(
+                SNAPSHOT_COLLECTION_FAILED,
+                "malformed active Git operation metadata: head-name missing trailing newline",
+            )
+        head_name = head_name_text.removesuffix("\n")
+        if not (
+            head_name.startswith("refs/heads/") or head_name in {"detached HEAD", "(detached)"}
+        ):
+            raise RunnerError(
+                SNAPSHOT_COLLECTION_FAILED,
+                "malformed active Git operation metadata: invalid branch in head-name",
+            )
+        onto_text = _read_git_metadata_file(
+            rebase_dir / "onto", max_bytes=128, description="rebase-merge/onto"
+        )
+        if not onto_text.endswith("\n"):
+            raise RunnerError(
+                SNAPSHOT_COLLECTION_FAILED,
+                "malformed active Git operation metadata: onto missing trailing newline",
+            )
+        onto = onto_text.removesuffix("\n")
+        if GIT_OID_RE.fullmatch(onto) is None:
+            raise RunnerError(
+                SNAPSHOT_COLLECTION_FAILED,
+                "malformed active Git operation metadata: invalid OID in onto",
+            )
+        orig_head_text = _read_git_metadata_file(
+            rebase_dir / "orig-head", max_bytes=128, description="rebase-merge/orig-head"
+        )
+        if not orig_head_text.endswith("\n"):
+            raise RunnerError(
+                SNAPSHOT_COLLECTION_FAILED,
+                "malformed active Git operation metadata: orig-head missing trailing newline",
+            )
+        orig_head = orig_head_text.removesuffix("\n")
+        if GIT_OID_RE.fullmatch(orig_head) is None:
+            raise RunnerError(
+                SNAPSHOT_COLLECTION_FAILED,
+                "malformed active Git operation metadata: invalid OID in orig-head",
+            )
+        stopped_sha: str | None = None
+        if os.path.lexists(rebase_dir / "stopped-sha"):
+            s_text = _read_git_metadata_file(
+                rebase_dir / "stopped-sha",
+                max_bytes=128,
+                description="rebase-merge/stopped-sha",
+            )
+            if not s_text.endswith("\n"):
+                raise RunnerError(
+                    SNAPSHOT_COLLECTION_FAILED,
+                    "malformed active Git operation metadata: stopped-sha missing trailing newline",
+                )
+            s_oid = s_text.removesuffix("\n")
+            if GIT_OID_RE.fullmatch(s_oid) is None:
+                raise RunnerError(
+                    SNAPSHOT_COLLECTION_FAILED,
+                    "malformed active Git operation metadata: invalid OID in stopped-sha",
+                )
+            stopped_sha = s_oid
+        interactive = False
+        if os.path.lexists(rebase_dir / "interactive"):
+            _read_git_metadata_file(
+                rebase_dir / "interactive",
+                max_bytes=1024,
+                description="rebase-merge/interactive",
+            )
+            interactive = True
+        step: int | None = None
+        total_steps: int | None = None
+        if os.path.lexists(rebase_dir / "msgnum") and os.path.lexists(rebase_dir / "end"):
+            m_text = _read_git_metadata_file(
+                rebase_dir / "msgnum", max_bytes=32, description="rebase-merge/msgnum"
+            ).strip()
+            e_text = _read_git_metadata_file(
+                rebase_dir / "end", max_bytes=32, description="rebase-merge/end"
+            ).strip()
+            if not (m_text.isdigit() and e_text.isdigit()):
+                raise RunnerError(
+                    SNAPSHOT_COLLECTION_FAILED,
+                    "malformed active Git operation metadata: non-numeric rebase steps",
+                )
+            step = int(m_text)
+            total_steps = int(e_text)
+            if step < 0 or total_steps < 0:
+                raise RunnerError(
+                    SNAPSHOT_COLLECTION_FAILED,
+                    "malformed active Git operation metadata: negative rebase steps",
+                )
+        if os.path.lexists(git_dir / "REBASE_HEAD"):
+            rb_head = _read_git_metadata_file(
+                git_dir / "REBASE_HEAD", max_bytes=128, description="REBASE_HEAD"
+            )
+            if (
+                not rb_head.endswith("\n")
+                or GIT_OID_RE.fullmatch(rb_head.removesuffix("\n")) is None
+            ):
+                raise RunnerError(
+                    SNAPSHOT_COLLECTION_FAILED,
+                    "malformed active Git operation metadata: invalid REBASE_HEAD",
+                )
+        res: dict[str, object] = {
+            "type": "rebase",
+            "head_name": head_name,
+            "onto": onto,
+            "orig_head": orig_head,
+            "interactive": interactive,
+        }
+        if stopped_sha is not None:
+            res["stopped_sha"] = stopped_sha
+        if step is not None:
+            res["step"] = step
+        if total_steps is not None:
+            res["total_steps"] = total_steps
+        return res
+    else:
+        rebase_dir = git_dir / "rebase-apply"
+        _check_git_metadata_dir(rebase_dir, "rebase-apply directory")
+        is_rebasing = os.path.lexists(rebase_dir / "rebasing")
+        is_applying = os.path.lexists(rebase_dir / "applying")
+        if not is_rebasing and not is_applying:
+            raise RunnerError(
+                SNAPSHOT_COLLECTION_FAILED,
+                "malformed active Git operation metadata: rebase-apply missing rebasing or applying marker",
+            )
+        if is_rebasing:
+            _read_git_metadata_file(
+                rebase_dir / "rebasing", max_bytes=32, description="rebase-apply/rebasing"
+            )
+            head_name_text = _read_git_metadata_file(
+                rebase_dir / "head-name", max_bytes=4096, description="rebase-apply/head-name"
+            )
+            if not head_name_text.endswith("\n"):
+                raise RunnerError(
+                    SNAPSHOT_COLLECTION_FAILED,
+                    "malformed active Git operation metadata: head-name missing trailing newline",
+                )
+            head_name = head_name_text.removesuffix("\n")
+            onto_text = _read_git_metadata_file(
+                rebase_dir / "onto", max_bytes=128, description="rebase-apply/onto"
+            )
+            if not onto_text.endswith("\n"):
+                raise RunnerError(
+                    SNAPSHOT_COLLECTION_FAILED,
+                    "malformed active Git operation metadata: onto missing trailing newline",
+                )
+            onto = onto_text.removesuffix("\n")
+            orig_head_text = _read_git_metadata_file(
+                rebase_dir / "orig-head", max_bytes=128, description="rebase-apply/orig-head"
+            )
+            if not orig_head_text.endswith("\n"):
+                raise RunnerError(
+                    SNAPSHOT_COLLECTION_FAILED,
+                    "malformed active Git operation metadata: orig-head missing trailing newline",
+                )
+            orig_head = orig_head_text.removesuffix("\n")
+            if GIT_OID_RE.fullmatch(onto) is None or GIT_OID_RE.fullmatch(orig_head) is None:
+                raise RunnerError(
+                    SNAPSHOT_COLLECTION_FAILED,
+                    "malformed active Git operation metadata: invalid OID in rebase-apply",
+                )
+            step = None
+            total_steps = None
+            if os.path.lexists(rebase_dir / "next") and os.path.lexists(rebase_dir / "last"):
+                n_text = _read_git_metadata_file(
+                    rebase_dir / "next", max_bytes=32, description="rebase-apply/next"
+                ).strip()
+                l_text = _read_git_metadata_file(
+                    rebase_dir / "last", max_bytes=32, description="rebase-apply/last"
+                ).strip()
+                if not (n_text.isdigit() and l_text.isdigit()):
+                    raise RunnerError(
+                        SNAPSHOT_COLLECTION_FAILED,
+                        "malformed active Git operation metadata: non-numeric rebase steps",
+                    )
+                step = int(n_text)
+                total_steps = int(l_text)
+            res = {
+                "type": "rebase",
+                "head_name": head_name,
+                "onto": onto,
+                "orig_head": orig_head,
+                "interactive": False,
+            }
+            if step is not None:
+                res["step"] = step
+            if total_steps is not None:
+                res["total_steps"] = total_steps
+            return res
+        else:
+            step = None
+            total_steps = None
+            if os.path.lexists(rebase_dir / "next") and os.path.lexists(rebase_dir / "last"):
+                n_text = _read_git_metadata_file(
+                    rebase_dir / "next", max_bytes=32, description="rebase-apply/next"
+                ).strip()
+                l_text = _read_git_metadata_file(
+                    rebase_dir / "last", max_bytes=32, description="rebase-apply/last"
+                ).strip()
+                if n_text.isdigit() and l_text.isdigit():
+                    step = int(n_text)
+                    total_steps = int(l_text)
+            res = {"type": "am"}
+            if step is not None:
+                res["step"] = step
+            if total_steps is not None:
+                res["total_steps"] = total_steps
+            return res
+
+
+def _parse_bisect_operation(git_dir: Path) -> dict[str, object]:
+    start_text = _read_git_metadata_file(
+        git_dir / "BISECT_START", max_bytes=4096, description="BISECT_START"
+    )
+    if not start_text.endswith("\n"):
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            "malformed active Git operation metadata: BISECT_START missing trailing newline",
+        )
+    start = start_text.removesuffix("\n")
+    if not start or "\n" in start:
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            "malformed active Git operation metadata: invalid BISECT_START",
+        )
+    return {"type": "bisect", "start": start}
+
+
+def detect_active_git_operation(git_dir: Path) -> dict[str, object] | None:
+    """Read-only structured detection for active Git operations from repository metadata.
+
+    Fails closed on ambiguous, malformed, or unsafe metadata.
+    """
+    _check_git_metadata_dir(git_dir, "Git directory")
+
+    has_merge = os.path.lexists(git_dir / "MERGE_HEAD")
+    has_cherry = os.path.lexists(git_dir / "CHERRY_PICK_HEAD")
+    has_revert = os.path.lexists(git_dir / "REVERT_HEAD")
+    has_rebase_merge = os.path.lexists(git_dir / "rebase-merge")
+    has_rebase_apply = os.path.lexists(git_dir / "rebase-apply")
+    has_bisect = os.path.lexists(git_dir / "BISECT_START")
+    has_rebase_head = os.path.lexists(git_dir / "REBASE_HEAD")
+    has_sequencer = os.path.lexists(git_dir / "sequencer")
+
+    # Ambiguity checks
+    if has_rebase_merge and has_rebase_apply:
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            "ambiguous active Git operation metadata: both rebase-merge and rebase-apply present",
+        )
+    has_rebase = has_rebase_merge or has_rebase_apply
+
+    active_count = sum([has_merge, has_cherry, has_revert, has_rebase, has_bisect])
+    if active_count > 1:
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            "ambiguous active Git operation metadata: multiple active Git operations detected",
+        )
+
+    if active_count == 0:
+        if has_rebase_head:
+            raise RunnerError(
+                SNAPSHOT_COLLECTION_FAILED,
+                "ambiguous active Git operation metadata: orphaned REBASE_HEAD present",
+            )
+        if has_sequencer:
+            _check_git_metadata_dir(git_dir / "sequencer", "sequencer directory")
+            todo_path = git_dir / "sequencer" / "todo"
+            if os.path.lexists(todo_path):
+                todo_text = _read_git_metadata_file(
+                    todo_path, max_bytes=4096, description="sequencer todo"
+                )
+                first_line = todo_text.splitlines()[0] if todo_text.splitlines() else ""
+                if first_line.startswith("revert "):
+                    head_path = git_dir / "sequencer" / "head"
+                    if os.path.lexists(head_path):
+                        head_text = _read_git_metadata_file(
+                            head_path, max_bytes=128, description="sequencer head"
+                        ).removesuffix("\n")
+                        if GIT_OID_RE.fullmatch(head_text) is not None:
+                            return {"type": "revert", "head": head_text}
+                    parts = first_line.split()
+                    if len(parts) >= 2 and GIT_OID_RE.fullmatch(parts[1]) is not None:
+                        return {"type": "revert", "head": parts[1]}
+                elif first_line.startswith("pick "):
+                    parts = first_line.split()
+                    if len(parts) >= 2 and GIT_OID_RE.fullmatch(parts[1]) is not None:
+                        return {"type": "cherry-pick", "head": parts[1]}
+                raise RunnerError(
+                    SNAPSHOT_COLLECTION_FAILED,
+                    "ambiguous active Git operation metadata: unknown sequencer operation",
+                )
+            else:
+                raise RunnerError(
+                    SNAPSHOT_COLLECTION_FAILED,
+                    "ambiguous active Git operation metadata: orphaned sequencer directory",
+                )
+        return None
+
+    # Exactly one active operation
+    if has_merge:
+        if has_rebase_head:
+            raise RunnerError(
+                SNAPSHOT_COLLECTION_FAILED,
+                "ambiguous active Git operation metadata: REBASE_HEAD present during merge",
+            )
+        return _parse_merge_operation(git_dir)
+
+    if has_cherry:
+        if has_rebase_head:
+            raise RunnerError(
+                SNAPSHOT_COLLECTION_FAILED,
+                "ambiguous active Git operation metadata: REBASE_HEAD present during cherry-pick",
+            )
+        return _parse_cherry_pick_operation(git_dir)
+
+    if has_revert:
+        if has_rebase_head:
+            raise RunnerError(
+                SNAPSHOT_COLLECTION_FAILED,
+                "ambiguous active Git operation metadata: REBASE_HEAD present during revert",
+            )
+        return _parse_revert_operation(git_dir)
+
+    if has_rebase_merge:
+        return _parse_rebase_operation(git_dir, is_merge_backend=True)
+
+    if has_rebase_apply:
+        return _parse_rebase_operation(git_dir, is_merge_backend=False)
+
+    if has_bisect:
+        if has_rebase_head:
+            raise RunnerError(
+                SNAPSHOT_COLLECTION_FAILED,
+                "ambiguous active Git operation metadata: REBASE_HEAD present during bisect",
+            )
+        return _parse_bisect_operation(git_dir)
+
+    return None

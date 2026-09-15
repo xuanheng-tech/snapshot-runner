@@ -436,12 +436,16 @@ def _build_preview_summary(snapshot_id: str, envelope: dict[str, object]) -> str
         head = "n/a"
     conversion = data.get("conversion_safety")
     review_scope = data.get("review_scope")
+    active_op = data.get("active_operation")
     scope_line = ""
     if isinstance(review_scope, dict) and isinstance(review_scope.get("paths"), list):
         scope_line = (
             f"review_scope: mode={review_scope.get('mode')} "
             f"exact_paths={len(review_scope['paths'])}\n"
         )
+    operation_line = ""
+    if isinstance(active_op, dict) and isinstance(active_op.get("type"), str):
+        operation_line = f"active_operation: {active_op['type']}\n"
     incomplete = bool(envelope["truncated"]) or (
         isinstance(conversion, dict) and conversion.get("content_diff_complete") is False
     )
@@ -449,6 +453,7 @@ def _build_preview_summary(snapshot_id: str, envelope: dict[str, object]) -> str
         "MANUAL REVIEW REQUIRED BEFORE UPLOAD\n"
         f"snapshot_id: {snapshot_id}\ntask: {envelope['task']}\n"
         f"git: branch={branch} head={head}\n"
+        f"{operation_line}"
         "changes: "
         f"tracked_modified={status_counts[0]} untracked={status_counts[1]} "
         f"staged={status_counts[2]} unstaged={status_counts[3]} changed_files={changed_files}\n"
@@ -525,11 +530,16 @@ def _summary_scope(task: str, data: dict[str, object]) -> dict[str, object]:
 
 def _summary_result(task: str, data: dict[str, object]) -> dict[str, object]:
     if task == "repo-status":
-        return {
+        result = {
             **_summary_status_counts(data),
             "upstream": _bounded_summary_text(data.get("upstream", "not available")),
             "ahead_behind": data.get("ahead_behind", "not available"),
         }
+        if "active_operation" in data:
+            active = data["active_operation"]
+            if isinstance(active, dict) and isinstance(active.get("type"), str):
+                result["active_operation"] = _bounded_summary_text(active["type"])
+        return result
     if task == "diff-audit":
         result: dict[str, object] = {
             **_summary_status_counts(data),
@@ -615,7 +625,7 @@ def _build_summary_output(artifact: SnapshotArtifact, runner_version: str) -> by
         or (isinstance(initial_publication, dict) and initial_publication.get("complete") is False)
     )
     if task in {"repo-status", "diff-audit"}:
-        review_needed = result["changed_files"] != 0
+        review_needed = result["changed_files"] != 0 or "active_operation" in data
     elif task == "branch-review":
         review_needed = any(result[key] != 0 for key in ("commits", "diff_files", "deleted_files"))
     else:
@@ -709,6 +719,9 @@ def _snapshot_data_scan_manifest(envelope: dict[str, object]) -> ScanModeManifes
     review_scope = data.get("review_scope")
     if review_scope is not None:
         _collect_string_modes(review_scope, bindings, ("review_scope",))
+    active_operation = data.get("active_operation")
+    if active_operation is not None:
+        _collect_string_modes(active_operation, bindings, ("active_operation",))
     if task == "diff-audit":
         bindings[("staged_diff",)] = ScanMode.UNIFIED_DIFF
         bindings[("unstaged_diff",)] = ScanMode.UNIFIED_DIFF
@@ -1036,6 +1049,140 @@ def _validate_review_scope(value: object) -> None:
         raise RunnerError(ARTIFACT_VALIDATION_FAILED, "snapshot review-scope schema is invalid")
 
 
+def _validate_active_operation(value: object) -> None:
+    if not isinstance(value, dict):
+        raise RunnerError(ARTIFACT_VALIDATION_FAILED, "snapshot active-operation schema is invalid")
+    op_type = value.get("type")
+    if not isinstance(op_type, str):
+        raise RunnerError(ARTIFACT_VALIDATION_FAILED, "snapshot active-operation schema is invalid")
+
+    if op_type == "merge":
+        allowed = {"type", "heads", "message", "mode"}
+        if not set(value).issubset(allowed) or "heads" not in value:
+            raise RunnerError(
+                ARTIFACT_VALIDATION_FAILED, "snapshot active-operation schema is invalid"
+            )
+        heads = value["heads"]
+        if not isinstance(heads, list) or not (1 <= len(heads) <= 64):
+            raise RunnerError(
+                ARTIFACT_VALIDATION_FAILED, "snapshot active-operation schema is invalid"
+            )
+        for head in heads:
+            if not isinstance(head, str) or SNAPSHOT_GIT_OID_RE.fullmatch(head) is None:
+                raise RunnerError(
+                    ARTIFACT_VALIDATION_FAILED, "snapshot active-operation schema is invalid"
+                )
+        if "message" in value and (
+            not isinstance(value["message"], str) or len(value["message"]) > 4096
+        ):
+            raise RunnerError(
+                ARTIFACT_VALIDATION_FAILED, "snapshot active-operation schema is invalid"
+            )
+        if "mode" in value and (not isinstance(value["mode"], str) or len(value["mode"]) > 256):
+            raise RunnerError(
+                ARTIFACT_VALIDATION_FAILED, "snapshot active-operation schema is invalid"
+            )
+    elif op_type in {"cherry-pick", "revert"}:
+        allowed = {"type", "head"}
+        if set(value) != allowed:
+            raise RunnerError(
+                ARTIFACT_VALIDATION_FAILED, "snapshot active-operation schema is invalid"
+            )
+        head = value["head"]
+        if not isinstance(head, str) or SNAPSHOT_GIT_OID_RE.fullmatch(head) is None:
+            raise RunnerError(
+                ARTIFACT_VALIDATION_FAILED, "snapshot active-operation schema is invalid"
+            )
+    elif op_type == "rebase":
+        required = {"type", "head_name", "onto", "orig_head"}
+        allowed = {
+            "type",
+            "head_name",
+            "onto",
+            "orig_head",
+            "stopped_sha",
+            "step",
+            "total_steps",
+            "interactive",
+        }
+        if not (required <= set(value) <= allowed):
+            raise RunnerError(
+                ARTIFACT_VALIDATION_FAILED, "snapshot active-operation schema is invalid"
+            )
+        head_name = value["head_name"]
+        if (
+            not isinstance(head_name, str)
+            or not head_name
+            or len(head_name) > 4096
+            or "\n" in head_name
+            or "\r" in head_name
+        ):
+            raise RunnerError(
+                ARTIFACT_VALIDATION_FAILED, "snapshot active-operation schema is invalid"
+            )
+        for key in ("onto", "orig_head"):
+            val = value[key]
+            if not isinstance(val, str) or SNAPSHOT_GIT_OID_RE.fullmatch(val) is None:
+                raise RunnerError(
+                    ARTIFACT_VALIDATION_FAILED, "snapshot active-operation schema is invalid"
+                )
+        if "stopped_sha" in value:
+            sha = value["stopped_sha"]
+            if sha is not None and (
+                not isinstance(sha, str) or SNAPSHOT_GIT_OID_RE.fullmatch(sha) is None
+            ):
+                raise RunnerError(
+                    ARTIFACT_VALIDATION_FAILED, "snapshot active-operation schema is invalid"
+                )
+        if "interactive" in value and not isinstance(value["interactive"], bool):
+            raise RunnerError(
+                ARTIFACT_VALIDATION_FAILED, "snapshot active-operation schema is invalid"
+            )
+        for key in ("step", "total_steps"):
+            if key in value:
+                num = value[key]
+                if num is not None and (
+                    isinstance(num, bool) or not isinstance(num, int) or num < 0
+                ):
+                    raise RunnerError(
+                        ARTIFACT_VALIDATION_FAILED, "snapshot active-operation schema is invalid"
+                    )
+    elif op_type == "bisect":
+        allowed = {"type", "start"}
+        if set(value) != allowed:
+            raise RunnerError(
+                ARTIFACT_VALIDATION_FAILED, "snapshot active-operation schema is invalid"
+            )
+        start = value["start"]
+        if (
+            not isinstance(start, str)
+            or not start
+            or len(start) > 4096
+            or "\n" in start
+            or "\r" in start
+        ):
+            raise RunnerError(
+                ARTIFACT_VALIDATION_FAILED, "snapshot active-operation schema is invalid"
+            )
+    elif op_type == "am":
+        allowed = {"type", "step", "total_steps"}
+        if not set(value).issubset(allowed):
+            raise RunnerError(
+                ARTIFACT_VALIDATION_FAILED, "snapshot active-operation schema is invalid"
+            )
+        for key in ("step", "total_steps"):
+            if key in value:
+                num = value[key]
+                if num is not None and (
+                    isinstance(num, bool) or not isinstance(num, int) or num < 0
+                ):
+                    raise RunnerError(
+                        ARTIFACT_VALIDATION_FAILED, "snapshot active-operation schema is invalid"
+                    )
+    else:
+        raise RunnerError(ARTIFACT_VALIDATION_FAILED, "snapshot active-operation schema is invalid")
+
+
 def _validate_initial_publication(
     value: object,
     contexts: list[object],
@@ -1354,7 +1501,7 @@ def _validate_snapshot_envelope(value: object) -> dict[str, object]:
     }
     schema = required_data[str(task)]
     optional_data_by_task = {
-        "repo-status": {"conversion_safety", "upstream", "ahead_behind"},
+        "repo-status": {"conversion_safety", "upstream", "ahead_behind", "active_operation"},
         "diff-audit": {
             "conversion_safety",
             "baseline_kind",
@@ -1376,6 +1523,8 @@ def _validate_snapshot_envelope(value: object) -> dict[str, object]:
         _validate_conversion_safety(data["conversion_safety"])
     if "review_scope" in data:
         _validate_review_scope(data["review_scope"])
+    if "active_operation" in data:
+        _validate_active_operation(data["active_operation"])
     if task == "repo-status":
         upstream_fields = {"upstream", "ahead_behind"}
         present_upstream_fields = set(data) & upstream_fields

@@ -5,6 +5,19 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.1.0
+
+- Added: structured active Git operation detection in `repo-status` (`active_operation`).
+  Detects merge, cherry-pick, revert, rebase (`rebase-merge` and `rebase-apply`),
+  bisect, and am states using Git metadata without executing repository-controlled
+  code or mutating repository state.
+- Changed: repositories with an active Git operation now trigger `open_artifact: true`
+  and an `active_operation: <type>` line in human-readable and JSON summaries,
+  ensuring downstream reviewers are immediately alerted.
+- Security: enforces bounded reads, strict file type and permission checks, and
+  fails closed with exit code 2 on ambiguous, conflicting, symlinked, or malformed
+  operation metadata.
+
 ## 2.0.2
 
 - Fixed: `_ACTIVE_REPOSITORY_ROOT` ContextVar lifecycle is now strictly guarded
