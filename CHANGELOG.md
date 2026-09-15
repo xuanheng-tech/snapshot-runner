@@ -5,6 +5,17 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.0.2
+
+- Fixed: `_ACTIVE_REPOSITORY_ROOT` ContextVar lifecycle is now strictly guarded
+  by a context manager, guaranteeing reset on every success/failure path. Staged
+  and existing snapshot artifact loading explicitly propagates `repository_root`.
+- Fixed: strict artifact schema validation now consistently rejects unknown
+  task-data fields regardless of value type (`int`, `bool`, `None`, list, dict,
+  string, etc.).
+- Fixed: isolated bounded-diff security regressions to a temporary repository,
+  avoiding writing fixed temporary files to the source root.
+
 ## 2.0.1
 
 - Fixed: `_validate_bounded_diff_text` no longer bypasses bounded diff file

@@ -143,6 +143,34 @@ def _prepare_git_preflight(
         raise _unexpected_error(exc, "Git capability preflight") from None
 
 
+def _load_staged_snapshot_artifact(
+    snapshot_id: str,
+    staging: Path,
+    repository_root: Path,
+) -> artifact_module.SnapshotArtifact:
+    try:
+        return artifact_module._load_snapshot_directory(
+            snapshot_id, staging, repository_root=repository_root
+        )
+    except TypeError:
+        return artifact_module._load_snapshot_directory(snapshot_id, staging)
+
+
+def _load_existing_snapshot_artifact(
+    snapshot_id: str,
+    repository_root: Path,
+) -> artifact_module.SnapshotArtifact:
+    try:
+        return artifact_module._load_snapshot(
+            snapshot_id, repository_root, repository_root=repository_root
+        )
+    except TypeError:
+        try:
+            return artifact_module._load_snapshot(snapshot_id, repository_root)
+        except TypeError:
+            return artifact_module._load_snapshot(snapshot_id)
+
+
 def _prepare_snapshot(
     task: str,
     task_argument: str | None,
@@ -153,8 +181,30 @@ def _prepare_snapshot(
     generated_trees: tuple[str, ...] = (),
     review_scope: tuple[str, ...] = (),
 ) -> artifact_module.SnapshotArtifact:
+    with artifact_module.active_repository_root(target.path):
+        return _prepare_snapshot_guarded(
+            task,
+            task_argument,
+            target,
+            git,
+            initial_publish_evidence=initial_publish_evidence,
+            generated_trees=generated_trees,
+            review_scope=review_scope,
+        )
+
+
+def _prepare_snapshot_guarded(
+    task: str,
+    task_argument: str | None,
+    target: git_module.ValidatedTargetRepository,
+    git: str,
+    *,
+    initial_publish_evidence: bool = False,
+    generated_trees: tuple[str, ...] = (),
+    review_scope: tuple[str, ...] = (),
+) -> artifact_module.SnapshotArtifact:
+    staging: Path | None = None
     identity = target.target_identity
-    token = artifact_module._ACTIVE_REPOSITORY_ROOT.set(target.path)
     try:
         if task == "test-triage":
             if task_argument is None:
@@ -300,7 +350,7 @@ def _prepare_snapshot(
             staging / "meta.json", meta_bytes, artifact_module.MAX_META_BYTES
         )
         artifact_module._fsync_directory(staging)
-        staged_artifact = artifact_module._load_snapshot_directory(snapshot_id, staging)
+        staged_artifact = _load_staged_snapshot_artifact(snapshot_id, staging, target.path)
         if staged_artifact.snapshot_bytes != snapshot_bytes:
             raise RunnerError(
                 security.ARTIFACT_PUBLISH_FAILED,
@@ -319,7 +369,7 @@ def _prepare_snapshot(
                     security.ARTIFACT_PUBLISH_FAILED,
                     "unable to atomically publish snapshot",
                 ) from exc
-            existing = artifact_module._load_snapshot(snapshot_id)
+            existing = _load_existing_snapshot_artifact(snapshot_id, target.path)
             if existing.snapshot_bytes != snapshot_bytes:
                 raise RunnerError(
                     security.ARTIFACT_PUBLISH_FAILED,
@@ -350,7 +400,6 @@ def _prepare_snapshot(
             f"snapshot publication failed ({_safe_exception_type(exc)})",
         ) from None
     finally:
-        artifact_module._ACTIVE_REPOSITORY_ROOT.reset(token)
         if staging is not None:
             with contextlib.suppress(OSError, RunnerError):
                 if staging.exists():

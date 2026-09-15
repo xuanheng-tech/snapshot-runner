@@ -66,6 +66,18 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _ACTIVE_REPOSITORY_ROOT: contextvars.ContextVar[Path | None] = contextvars.ContextVar(
     "_ACTIVE_REPOSITORY_ROOT", default=None
 )
+
+
+@contextlib.contextmanager
+def active_repository_root(repository_root: Path | None):
+    """Safely bind active repository root to ContextVar with guaranteed reset."""
+    token = _ACTIVE_REPOSITORY_ROOT.set(repository_root)
+    try:
+        yield
+    finally:
+        _ACTIVE_REPOSITORY_ROOT.reset(token)
+
+
 TASKS = ("repo-status", "diff-audit", "branch-review", "test-triage")
 SNAPSHOT_ID_RE = re.compile(r"[0-9a-f]{64}")
 SNAPSHOT_GIT_OID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
@@ -1356,7 +1368,7 @@ def _validate_snapshot_envelope(value: object) -> dict[str, object]:
     optional_data = optional_data_by_task[str(task)]
     if (
         not set(schema) <= set(data)
-        or set(data) - set(schema) > optional_data
+        or not (set(data) - set(schema) <= optional_data)
         or any(not isinstance(data[key], kind) for key, kind in schema.items())
     ):
         raise RunnerError(ARTIFACT_VALIDATION_FAILED, "snapshot task data schema is invalid")
@@ -1407,7 +1419,8 @@ def _validate_snapshot_envelope(value: object) -> dict[str, object]:
         if present_baseline_fields and (
             present_baseline_fields != baseline_fields
             or data["baseline_kind"] != "empty_tree"
-            or SNAPSHOT_GIT_OID_RE.fullmatch(str(data["baseline_oid"])) is None
+            or not isinstance(data["baseline_oid"], str)
+            or SNAPSHOT_GIT_OID_RE.fullmatch(data["baseline_oid"]) is None
         ):
             raise RunnerError(ARTIFACT_VALIDATION_FAILED, "diff baseline schema is invalid")
         if "initial_publication" in data and present_baseline_fields != baseline_fields:

@@ -4658,66 +4658,150 @@ def test_runner_root_bounded_diff_text_is_not_bypassed() -> None:
     ],
 )
 def test_runner_root_bounded_diff_text_anomalies_fail_closed(
+    tmp_path: Path,
     anomaly: str,
     expected_match: str,
 ) -> None:
-    """Hostile, symlink, binary, oversized, and non-UTF8 files fail closed under runner root."""
+    """Hostile, symlink, binary, oversized, and non-UTF8 files fail closed in isolated runner repo."""
+    runner_repo = tmp_path / "snapshot-runner"
+    runner_repo.mkdir()
+    (runner_repo / "pyproject.toml").write_text(
+        (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )
     test_file_name = f"_tmp_audit_{anomaly}.csv"
-    test_path = PROJECT_ROOT / test_file_name
-    try:
-        if anomaly == "symlink":
-            test_path.symlink_to(PROJECT_ROOT / "pyproject.toml")
-        elif anomaly == "binary":
-            test_path.write_bytes(b"a,b,c\n1,2,\x00\n")
-        elif anomaly == "oversized":
-            test_path.write_bytes(b"x" * (security.MAX_EXTENSIONLESS_TEXT_BYTES + 1))
-        elif anomaly == "non_utf8":
-            test_path.write_bytes(b"a,b,c\n\xff\xfe\n")
+    test_path = runner_repo / test_file_name
+    if anomaly == "symlink":
+        test_path.symlink_to(runner_repo / "pyproject.toml")
+    elif anomaly == "binary":
+        test_path.write_bytes(b"a,b,c\n1,2,\x00\n")
+    elif anomaly == "oversized":
+        test_path.write_bytes(b"x" * (security.MAX_EXTENSIONLESS_TEXT_BYTES + 1))
+    elif anomaly == "non_utf8":
+        test_path.write_bytes(b"a,b,c\n\xff\xfe\n")
 
-        with pytest.raises(security.SecurityError, match=expected_match):
-            security._validate_bounded_diff_text(test_file_name, PROJECT_ROOT)
+    with pytest.raises(security.SecurityError, match=expected_match):
+        security._validate_bounded_diff_text(test_file_name, runner_repo)
 
-        diff_text = (
-            f"diff --git a/{test_file_name} b/{test_file_name}\n"
-            f"--- a/{test_file_name}\n"
-            f"+++ b/{test_file_name}\n"
-            "@@ -1 +1 @@\n"
-            "-old\n"
-            "+new\n"
-        )
-        with pytest.raises(security.SecurityError, match=expected_match):
-            security.sanitize_text(
-                diff_text,
-                scan_mode=security.ScanMode.UNIFIED_DIFF,
-                repository_root=PROJECT_ROOT,
-            )
-    finally:
-        if test_path.is_symlink() or test_path.exists():
-            test_path.unlink()
-
-
-def test_runner_root_valid_bounded_diff_text_passes_validation() -> None:
-    """Valid bounded text files under runner root pass validation normally."""
-    test_file_name = "_tmp_valid_audit.csv"
-    test_path = PROJECT_ROOT / test_file_name
-    try:
-        test_path.write_text("header1,header2\nval1,val2\n", encoding="utf-8")
-        security._validate_bounded_diff_text(test_file_name, PROJECT_ROOT)
-
-        diff_text = (
-            f"diff --git a/{test_file_name} b/{test_file_name}\n"
-            f"--- a/{test_file_name}\n"
-            f"+++ b/{test_file_name}\n"
-            "@@ -1 +1 @@\n"
-            "-header1,header2\n"
-            "+val1,val2\n"
-        )
-        sanitized = security.sanitize_text(
+    diff_text = (
+        f"diff --git a/{test_file_name} b/{test_file_name}\n"
+        f"--- a/{test_file_name}\n"
+        f"+++ b/{test_file_name}\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+    with pytest.raises(security.SecurityError, match=expected_match):
+        security.sanitize_text(
             diff_text,
             scan_mode=security.ScanMode.UNIFIED_DIFF,
-            repository_root=PROJECT_ROOT,
+            repository_root=runner_repo,
         )
-        assert sanitized.text == diff_text
-    finally:
-        if test_path.is_symlink() or test_path.exists():
-            test_path.unlink()
+
+
+def test_runner_root_valid_bounded_diff_text_passes_validation(tmp_path: Path) -> None:
+    """Valid bounded text files under isolated runner repo pass validation normally."""
+    runner_repo = tmp_path / "snapshot-runner"
+    runner_repo.mkdir()
+    (runner_repo / "pyproject.toml").write_text(
+        (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    test_file_name = "_tmp_valid_audit.csv"
+    test_path = runner_repo / test_file_name
+    test_path.write_text("header1,header2\nval1,val2\n", encoding="utf-8")
+    security._validate_bounded_diff_text(test_file_name, runner_repo)
+
+    diff_text = (
+        f"diff --git a/{test_file_name} b/{test_file_name}\n"
+        f"--- a/{test_file_name}\n"
+        f"+++ b/{test_file_name}\n"
+        "@@ -1 +1 @@\n"
+        "-header1,header2\n"
+        "+val1,val2\n"
+    )
+    sanitized = security.sanitize_text(
+        diff_text,
+        scan_mode=security.ScanMode.UNIFIED_DIFF,
+        repository_root=runner_repo,
+    )
+    assert sanitized.text == diff_text
+
+
+def test_active_repository_root_lifecycle_and_sequential_isolation(
+    tmp_path: Path,
+) -> None:
+    """Early failure or sequential calls must not leak active repository root context."""
+    repo_a = tmp_path / "repo_a"
+    repo_b = tmp_path / "repo_b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+
+    # Initial state must be clean
+    assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() is None
+
+    # Normal context manager usage restores None
+    with artifact_module.active_repository_root(repo_a):
+        assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() == repo_a
+    assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() is None
+
+    # Failure inside context manager restores None
+    with (
+        pytest.raises(RuntimeError, match="synthetic failure"),
+        artifact_module.active_repository_root(repo_a),
+    ):
+        assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() == repo_a
+        raise RuntimeError("synthetic failure")
+    assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() is None
+
+    # Nested context managers restore outer context properly
+    with artifact_module.active_repository_root(repo_a):
+        assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() == repo_a
+        with artifact_module.active_repository_root(repo_b):
+            assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() == repo_b
+        assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() == repo_a
+    assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() is None
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        123,
+        True,
+        False,
+        None,
+        ["unexpected"],
+        {"nested": "value"},
+        "unexpected_string",
+        45.67,
+    ],
+)
+@pytest.mark.parametrize(
+    "task",
+    ["repo-status", "diff-audit", "branch-review", "test-triage"],
+)
+def test_unknown_task_data_fields_fail_schema_validation(task: str, bad_value: object) -> None:
+    """Unknown fields in task data must fail schema validation regardless of type."""
+    snapshot = _safe_snapshot(task=task)
+    envelope = snapshot.as_envelope()
+    envelope["data"]["unknown_field"] = bad_value
+    with pytest.raises(
+        runner.RunnerError, match="snapshot task data schema is invalid"
+    ) as exc_info:
+        artifact_module._validate_snapshot_envelope(envelope)
+    assert exc_info.value.code == security.ARTIFACT_VALIDATION_FAILED
+
+
+def test_cli_main_sequential_calls_and_early_failures_do_not_leak_context(
+    tmp_path: Path,
+) -> None:
+    """Sequential runner.main calls in the same process must never leak repository context."""
+    assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() is None
+
+    # Call 1: Early failure (nonexistent repo path)
+    code = runner.main(["repo-status", "--repo", str(tmp_path / "nonexistent")])
+    assert code != 0
+    assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() is None
+
+    # Call 2: Early argument syntax failure
+    code = runner.main(["diff-audit", "--unexpected-flag-xyz"])
+    assert code != 0
+    assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() is None
