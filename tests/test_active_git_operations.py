@@ -20,8 +20,22 @@ def _run_git(
     *arguments: str,
     check: bool = True,
 ) -> subprocess.CompletedProcess[bytes]:
+    cmd = [
+        GIT,
+        "-C",
+        os.fspath(repo),
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "user.name=Runner Test",
+        "-c",
+        "user.email=runner-test@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        *arguments,
+    ]
     result = subprocess.run(
-        [GIT, "-C", os.fspath(repo), *arguments],
+        cmd,
         cwd="/",
         capture_output=True,
         timeout=30,
@@ -39,6 +53,9 @@ def _git_text(repo: Path, *arguments: str) -> str:
 def _initialize_repo(repo: Path, branch: str = "main") -> str:
     repo.mkdir(parents=True, exist_ok=True)
     _run_git(repo, "init", "--quiet", f"--initial-branch={branch}")
+    _run_git(repo, "config", "user.name", "Runner Test")
+    _run_git(repo, "config", "user.email", "runner-test@example.invalid")
+    _run_git(repo, "config", "commit.gpgsign", "false")
     (repo / "safe.py").write_text("VALUE = 1\n", encoding="utf-8")
     _run_git(repo, "add", "safe.py")
     _run_git(
