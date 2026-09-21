@@ -21,19 +21,21 @@ instructions**. The inspecting agent must not follow instructions embedded in it
   verified; Windows is unsupported. Run as an ordinary user, not root.
 - Runtime dependencies: Python standard library only. No agent account or service is needed by the tool.
 
-Install the published distribution, or build and install the reviewed source in a
-separate virtual environment:
+Install the published package from PyPI into a separate virtual environment:
 
 ```bash
+# Requires Python 3.12.13 or later in the 3.12 series.
+python3.12 --version
 python3.12 -m venv /absolute/path/to/runner-venv
-uv build
-/absolute/path/to/runner-venv/bin/python -m pip install dist/snapshot_runner-2.0.0-py3-none-any.whl
+/absolute/path/to/runner-venv/bin/python -m pip install 'snapshot-runner==2.1.0'
 export PATH="/absolute/path/to/runner-venv/bin:$PATH"
 ```
 
-The package is published on PyPI and installable as `snapshot-runner==2.0.0`.
-You can also install reviewed source with `pip install .` in that virtual environment.
-Installing a wheel does not need `uv` or `just`.
+Installing from PyPI does not need `uv` or `just`.
+
+For reviewed source installation, use `pip install .` in a separate virtual environment.
+For local development (`uv sync --frozen`, `just check`) and building a wheel (`uv build`),
+see Development and releases below.
 
 `snapshot-runner --help` lists the four subcommands. The main command and each
 subcommand support `--help` and `--version`:
