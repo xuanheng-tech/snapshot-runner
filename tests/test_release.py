@@ -41,7 +41,12 @@ def repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (repo / "pyproject.toml").write_text(f'[project]\nname = "{r.PACKAGE}"\nversion = "1.2.3"\n')
     (repo / "snapshot_runner/__init__.py").write_text('__version__ = "1.2.3"\n')
     (repo / "CHANGELOG.md").write_text("# Changelog\n\n## Unreleased\n\n## 1.2.3\n\n- Notes\n")
-    subprocess.run(["git", "add", "pyproject.toml", "snapshot_runner", "CHANGELOG.md"], check=True)
+    (repo / "README.md").write_text(
+        "Current stable release: **1.2.3**.\n\npip install 'snapshot-runner==1.2.3'\n"
+    )
+    subprocess.run(
+        ["git", "add", "pyproject.toml", "snapshot_runner", "CHANGELOG.md", "README.md"], check=True
+    )
     subprocess.run(
         [
             "git",
@@ -625,3 +630,64 @@ def test_record_closure_waits_but_build_and_pending_do_not(
     # Closure path: polls.
     assert r.pypi_files(RELEASE, wait=True) is None
     assert observed == [True]
+
+
+def test_check_readme_version_accepts_matching_stable_and_pins() -> None:
+    readme = (
+        "Current stable release: **1.2.3**.\n\n"
+        "pip install 'snapshot-runner==1.2.3'\n"
+        "Older note about 1.0.0 remains historical prose.\n"
+    )
+    r.check_readme_version(readme, "1.2.3")
+
+
+def test_check_readme_version_rejects_stable_mismatch() -> None:
+    readme = "Current stable release: **1.2.0**.\n\npip install 'snapshot-runner==1.2.3'\n"
+    with pytest.raises(r.ReleaseError, match="current stable release"):
+        r.check_readme_version(readme, "1.2.3")
+
+
+def test_check_readme_version_rejects_install_pin_mismatch() -> None:
+    readme = "Current stable release: **1.2.3**.\n\npip install 'snapshot-runner==1.2.0'\n"
+    with pytest.raises(r.ReleaseError, match="install version pin"):
+        r.check_readme_version(readme, "1.2.3")
+
+
+def test_identity_rejects_readme_install_pin_mismatch(repository: Path) -> None:
+    (repository / "README.md").write_text(
+        "Current stable release: **1.2.3**.\n\npip install 'snapshot-runner==1.2.0'\n"
+    )
+    subprocess.run(["git", "add", "README.md"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "stale readme pin",
+        ],
+        check=True,
+    )
+    subprocess.run(["git", "tag", "-d", TAG], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "tag",
+            "-a",
+            TAG,
+            "-m",
+            "Fixture release",
+        ],
+        check=True,
+    )
+    with pytest.raises(r.ReleaseError, match="install version pin"):
+        r.identity(TAG)

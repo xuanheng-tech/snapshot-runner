@@ -189,7 +189,7 @@ suite. Tests use synthetic repositories; no credentials or real services are req
 The public CLI contract is recorded in `tool_cli_contract.json`.
 
 GitHub is the only release-package build and PyPI publishing authority. An annotated
-`vX.Y.Z` tag must match both package version declarations. The build job runs `just check`
+`vX.Y.Z` tag must match both package version declarations. The README current-stable declaration and `snapshot-runner==X.Y.Z` install pins must match that same version; `scripts/release.py` rejects mismatches during release preparation. Historical changelog entries are not part of that check. The build job runs `just check`
 before building a wheel and sdist; a separate job uses OIDC Trusted Publishing after
 approval in the `pypi` environment. Gitea uses the same quality gate and records the
 identical public tag and Release without building or uploading a second package.
