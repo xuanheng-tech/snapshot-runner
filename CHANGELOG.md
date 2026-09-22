@@ -14,7 +14,8 @@ public source baseline; it was not tagged or published to PyPI.
   prints the evidence attributed to one file (file context, diff sections with rename-aware
   attribution, deleted-file metadata, conversion and initial-publication records, and gaps).
   Evidence reads use a new `evidence_schema_version` 1 single-line JSON output that repeats
-  the snapshot's trust boundary and security notice.
+  the snapshot's trust boundary and security notice. Adding the reader moves the public CLI
+  contract to `contract_version` 3.
 - Security: `read` re-validates the artifact through the existing canonical loader, never
   executes Git or any repository operation, never re-collects or rebuilds evidence, requires an
   explicit validated absolute `--repo`, refuses artifacts whose repository name does not match
