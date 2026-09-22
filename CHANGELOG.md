@@ -5,6 +5,8 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.3.0 - 2026-09-23
+
 - Changed: `summary.next_action` is now derived from the evidence actually available instead of
   from "there is something to review". `open_artifact` is kept for genuinely whole-artifact
   cases — incomplete evidence, any recorded evidence gap, a mid-flight Git operation, or a
