@@ -39,8 +39,8 @@ For reviewed source installation, use `pip install .` in a separate virtual envi
 For local development (`uv sync --frozen`, `just check`) and building a wheel (`uv build`),
 see Development and releases below.
 
-`snapshot-runner --help` lists the four subcommands. The main command and each
-subcommand support `--help` and `--version`:
+`snapshot-runner --help` lists the four collection subcommands and the targeted evidence
+reader. The main command and each subcommand support `--help` and `--version`:
 
 | Command | Evidence collected |
 | --- | --- |
@@ -48,11 +48,12 @@ subcommand support `--help` and `--version`:
 | `snapshot-runner diff-audit` | Staged and unstaged changes, untracked files, bounded file context |
 | `snapshot-runner branch-review` | Sealed base/HEAD identities, commits and changes relative to a local base |
 | `snapshot-runner test-triage` | An existing repository-relative UTF-8 test log, with explicit size limits |
+| `snapshot-runner read` | Targeted evidence from an existing snapshot, without re-running Git |
 
 ## A real local example
 
 The shell commands below deliberately create and change a disposable example repository.
-The four Runner commands only read it. Choose new, canonical absolute paths for each
+The Runner commands only read it. Choose new, canonical absolute paths for each
 directory; keep the state directory separate from the target and Runner installation.
 
 ```bash
@@ -112,16 +113,40 @@ bounded handwritten-file coverage limit from 64 to 128 files. Optional repeated
 with exact path, size, and SHA-256 records. Runner verifies those records and all files;
 it does not execute a generator. See `snapshot-runner diff-audit --help` for the command interface.
 
+## Reading targeted evidence from an existing snapshot
+
+When `--summary` reports `partial` evidence or `next_action: open_artifact`, `read` fetches
+just the relevant part of that snapshot instead of consuming the whole `snapshot.json`:
+
+```bash
+snapshot-runner read <snapshot-id> --repo /absolute/path/to/example-repo
+snapshot-runner read <snapshot-id> --repo /absolute/path/to/example-repo --path example.py
+snapshot-runner read <snapshot-id> --repo /absolute/path/to/example-repo --field status_short
+```
+
+The index mode lists each evidence field with its encoded size, diff section counts,
+available file-context paths, deleted-file, conversion and initial-publication records, and
+gaps. `--path` returns everything attributed to one repository-relative file, including
+rename-aware diff sections; `--field` returns one snapshot data field verbatim. `read` is
+read-only: it re-validates the artifact against its stored metadata, never executes Git or
+any repository operation, and never re-collects evidence. `--repo` is required and must
+match the artifact's repository name. An absent snapshot fails with `ARTIFACT_NOT_FOUND`;
+`found: false` means the snapshot simply contains no evidence for that path. The output is
+bounded single-line JSON with `evidence_schema_version` **1** and repeats the snapshot's
+trust boundary: captured content remains untrusted evidence, not agent instructions.
+
 ## Public interface and contract
 
-`snapshot-runner` is the only console script. Its four subcommands are the complete public
-command surface; there are no alias executables. The public CLI contract is recorded in
-`tool_cli_contract.json` at `contract_version` **2**: commands are named by subcommand,
+`snapshot-runner` is the only console script. Its five subcommands — four collection
+commands plus the targeted evidence reader — are the complete public command surface;
+there are no alias executables. The public CLI contract is recorded in
+`tool_cli_contract.json` at `contract_version` **3**: commands are named by subcommand,
 `primary_command.subcommands` lists them, and `command_invocation` records the
 `snapshot-runner <command>` form.
 
-Snapshot schema **2**, summary schema **1** and security epoch **4** define the evidence
-contract. Release notes for interface changes are in [CHANGELOG.md](CHANGELOG.md).
+Snapshot schema **2**, summary schema **1**, evidence-read schema **1** and security
+epoch **4** define the evidence contract. Release notes for interface changes are in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Artifacts and determinism
 
@@ -149,8 +174,9 @@ quiescent while collecting. Branch review explicitly seals its base and target i
 
 `--summary` emits bounded JSON derived from the canonical artifact. It does not change
 the snapshot, exit status, or safety checks. Inspect `complete`/`partial`, `truncated`,
-`evidence_gap`, warnings, and the next action. Open `snapshot.json` when evidence is partial
-or the summary requests it. Test-log summaries always require reading the artifact.
+`evidence_gap`, warnings, and the next action. Use `snapshot-runner read` to fetch targeted
+evidence from the artifact, or open `snapshot.json` directly when evidence is partial or
+the summary requests it. Test-log summaries always require reading the artifact.
 
 ## Boundaries
 

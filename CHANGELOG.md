@@ -5,6 +5,20 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+- Added: the `read` subcommand for on-demand evidence from an existing content-addressed
+  snapshot, so callers no longer consume the whole `snapshot.json` after a summary points to
+  it: `snapshot-runner read <snapshot-id> --repo <path>` prints a bounded evidence index,
+  `--field <name>` prints one snapshot data field verbatim, and `--path <relative-path>`
+  prints the evidence attributed to one file (file context, diff sections with rename-aware
+  attribution, deleted-file metadata, conversion and initial-publication records, and gaps).
+  Evidence reads use a new `evidence_schema_version` 1 single-line JSON output that repeats
+  the snapshot's trust boundary and security notice.
+- Security: `read` re-validates the artifact through the existing canonical loader, never
+  executes Git or any repository operation, never re-collects or rebuilds evidence, requires an
+  explicit validated absolute `--repo`, refuses artifacts whose repository name does not match
+  the validated target, and fails closed with exit code 2 (`ARTIFACT_NOT_FOUND`,
+  `ARGUMENT_ERROR`, or `ARTIFACT_VALIDATION_FAILED`).
+
 ## 2.1.0
 
 - Added: structured active Git operation detection in `repo-status` (`active_operation`).

@@ -88,11 +88,33 @@
         "truncated",
         "workflow_failed"
       ]
+    },
+    {
+      "flags": [
+        "--repo",
+        "--field",
+        "--path",
+        "--version",
+        "--help"
+      ],
+      "name": "read",
+      "operation_class": "read_only",
+      "preconditions": [
+        "exact_absolute_repository_root",
+        "existing_content_addressed_snapshot",
+        "private_owned_state_directory"
+      ],
+      "result_statuses": [
+        "complete",
+        "partial",
+        "workflow_failed"
+      ]
     }
   ],
-  "contract_version": 2,
+  "contract_version": 3,
   "flags": {
     "canonical_artifact": "snapshot.json",
+    "evidence_read": "bounded_targeted_json_derived_from_canonical_artifact",
     "summary": "bounded_json_derived_from_canonical_artifact"
   },
   "operation_classes": [
@@ -107,6 +129,7 @@
     "subcommands": [
       "branch-review",
       "diff-audit",
+      "read",
       "repo-status",
       "test-triage"
     ]

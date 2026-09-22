@@ -45,6 +45,7 @@ from .security import (
     is_raster_image_evidence,
     is_sensitive_repository_path,
     sanitize_json_value,
+    unified_diff_path_changes,
 )
 from .security import (
     is_safe_repository_name as _is_safe_repository_name,
@@ -62,6 +63,7 @@ SNAPSHOT_SECURITY_EPOCH_ERROR = "snapshot producer security epoch is not current
 MAX_META_BYTES = 64 * 1024
 MAX_PREVIEW_BYTES = 16 * 1024 * 1024
 MAX_SUMMARY_BYTES = 64 * 1024
+MAX_EVIDENCE_BYTES = MAX_SNAPSHOT_BYTES
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _ACTIVE_REPOSITORY_ROOT: contextvars.ContextVar[Path | None] = contextvars.ContextVar(
     "_ACTIVE_REPOSITORY_ROOT", default=None
@@ -83,9 +85,11 @@ SNAPSHOT_ID_RE = re.compile(r"[0-9a-f]{64}")
 SNAPSHOT_GIT_OID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 SNAPSHOT_META_SCHEMA_VERSION = 2
 SUMMARY_SCHEMA_VERSION = 1
+EVIDENCE_SCHEMA_VERSION = 1
 SUMMARY_TEXT_LIMIT = 256
 SUMMARY_WARNING_LIMIT = 5
 SNAPSHOT_FILE_NAMES = frozenset({"meta.json", "preview.txt", "snapshot.json"})
+DIFF_EVIDENCE_FIELDS = ("staged_diff", "unstaged_diff", "diff")
 
 
 def _runner_security_error(error: SecurityError, fallback: str) -> RunnerError:
@@ -661,6 +665,241 @@ def _build_summary_output(artifact: SnapshotArtifact, runner_version: str) -> by
     encoded = json.dumps(summary, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
     if len(encoded) > MAX_SUMMARY_BYTES:
         raise RunnerError(ARTIFACT_VALIDATION_FAILED, "hard output limit exceeded: summary")
+    return encoded
+
+
+def _encoded_evidence_size(value: object) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _diff_section_texts(diff: str) -> list[str]:
+    if not diff:
+        return []
+    if not diff.startswith("diff --git "):
+        raise RunnerError(
+            ARTIFACT_VALIDATION_FAILED, "snapshot diff evidence is not section-aligned"
+        )
+    sections: list[list[str]] = []
+    for line in diff.splitlines(keepends=True):
+        if line.startswith("diff --git "):
+            sections.append([line])
+        else:
+            sections[-1].append(line)
+    return ["".join(section) for section in sections]
+
+
+def _matched_diff_sections(
+    diff: str,
+    target_path: str,
+    repository_root: Path,
+) -> dict[str, object]:
+    sections = _diff_section_texts(diff)
+    if not sections:
+        return {"total": 0, "matched": 0, "sections": []}
+    try:
+        changes = unified_diff_path_changes(diff, repository_root=repository_root)
+    except SecurityError as exc:
+        raise RunnerError(
+            ARTIFACT_VALIDATION_FAILED, "snapshot diff evidence failed targeted attribution"
+        ) from exc
+    if len(changes) != len(sections):
+        raise RunnerError(
+            ARTIFACT_VALIDATION_FAILED, "snapshot diff evidence failed targeted attribution"
+        )
+    matched = [
+        section
+        for section, (old_path, new_path) in zip(sections, changes, strict=True)
+        if target_path in (old_path, new_path)
+    ]
+    return {"total": len(sections), "matched": len(matched), "sections": matched}
+
+
+def _evidence_index(data: dict[str, object], gaps: list[object]) -> dict[str, object]:
+    fields = [{"field": key, "bytes": _encoded_evidence_size(value)} for key, value in data.items()]
+    diff_sections: dict[str, object] = {}
+    for key in DIFF_EVIDENCE_FIELDS:
+        value = data.get(key)
+        if isinstance(value, str):
+            diff_sections[key] = {"total": len(_diff_section_texts(value))}
+    contexts = data.get("file_context")
+    file_context: list[object] = []
+    if isinstance(contexts, list):
+        for context in contexts:
+            if not isinstance(context, dict) or not isinstance(context.get("path"), str):
+                continue
+            entry: dict[str, object] = {
+                "path": context["path"],
+                "bytes": len(str(context.get("content", "")).encode("utf-8")),
+            }
+            source = context.get("source")
+            if isinstance(source, str):
+                entry["source"] = source
+            file_context.append(entry)
+    deleted = data.get("deleted_files")
+    deleted_files = list(deleted) if isinstance(deleted, list) else []
+    conversion = data.get("conversion_safety")
+    conversion_safety_files: list[object] = []
+    if isinstance(conversion, dict) and isinstance(conversion.get("files"), list):
+        for record in conversion["files"]:
+            if isinstance(record, dict) and isinstance(record.get("path"), str):
+                conversion_safety_files.append(record["path"])
+    publication = data.get("initial_publication")
+    initial_publication_files: list[object] = []
+    if isinstance(publication, dict) and isinstance(publication.get("files"), list):
+        for record in publication["files"]:
+            if isinstance(record, dict) and isinstance(record.get("path"), str):
+                initial_publication_files.append(
+                    {
+                        "path": record["path"],
+                        "coverage": record.get("coverage"),
+                        "bytes": record.get("bytes"),
+                    }
+                )
+    return {
+        "fields": fields,
+        "diff_sections": diff_sections,
+        "file_context": file_context,
+        "deleted_files": deleted_files,
+        "conversion_safety_files": conversion_safety_files,
+        "initial_publication_files": initial_publication_files,
+        "evidence_gaps": list(gaps),
+    }
+
+
+def _evidence_for_path(
+    data: dict[str, object],
+    gaps: list[object],
+    target_path: str,
+    repository_root: Path,
+) -> tuple[dict[str, object], bool]:
+    contexts = data.get("file_context")
+    file_context: list[object] = []
+    if isinstance(contexts, list):
+        file_context = [
+            context
+            for context in contexts
+            if isinstance(context, dict) and context.get("path") == target_path
+        ]
+    deleted = data.get("deleted_files")
+    deleted_files: list[object] = []
+    if isinstance(deleted, list):
+        deleted_files = [
+            record
+            for record in deleted
+            if isinstance(record, dict) and record.get("path") == target_path
+        ]
+    conversion = data.get("conversion_safety")
+    conversion_safety_files: list[object] = []
+    if isinstance(conversion, dict) and isinstance(conversion.get("files"), list):
+        conversion_safety_files = [
+            record
+            for record in conversion["files"]
+            if isinstance(record, dict) and record.get("path") == target_path
+        ]
+    publication = data.get("initial_publication")
+    initial_publication_files: list[object] = []
+    if isinstance(publication, dict) and isinstance(publication.get("files"), list):
+        initial_publication_files = [
+            record
+            for record in publication["files"]
+            if isinstance(record, dict) and record.get("path") == target_path
+        ]
+    targeted_gaps = [
+        gap for gap in gaps if isinstance(gap, dict) and gap.get("subject") == target_path
+    ]
+    diff_sections: dict[str, object] = {}
+    matched_any = False
+    for key in DIFF_EVIDENCE_FIELDS:
+        value = data.get(key)
+        if isinstance(value, str):
+            matched = _matched_diff_sections(value, target_path, repository_root)
+            diff_sections[key] = matched
+            matched_count = matched["matched"]
+            matched_any = matched_any or (isinstance(matched_count, int) and matched_count > 0)
+    evidence: dict[str, object] = {
+        "path": target_path,
+        "file_context": file_context,
+        "deleted_files": deleted_files,
+        "conversion_safety_files": conversion_safety_files,
+        "initial_publication_files": initial_publication_files,
+        "evidence_gaps": targeted_gaps,
+        "diff_sections": diff_sections,
+    }
+    found = (
+        bool(file_context)
+        or bool(deleted_files)
+        or bool(conversion_safety_files)
+        or bool(initial_publication_files)
+        or bool(targeted_gaps)
+        or matched_any
+    )
+    return evidence, found
+
+
+def _build_evidence_output(
+    artifact: SnapshotArtifact,
+    runner_version: str,
+    *,
+    repository_root: Path,
+    field: str | None = None,
+    path: str | None = None,
+) -> bytes:
+    envelope = artifact.envelope
+    task = envelope.get("task")
+    data = envelope.get("data")
+    repository = envelope.get("repository")
+    gaps = envelope.get("evidence_gaps")
+    if (
+        task != artifact.task
+        or task not in TASKS
+        or not isinstance(data, dict)
+        or not isinstance(repository, str)
+        or not isinstance(gaps, list)
+        or (field is not None and path is not None)
+    ):
+        raise RunnerError(ARTIFACT_VALIDATION_FAILED, "evidence source artifact is invalid")
+    truncated = envelope.get("truncated") is True
+    conversion = data.get("conversion_safety")
+    initial_publication = data.get("initial_publication")
+    incomplete = (
+        truncated
+        or (isinstance(conversion, dict) and conversion.get("content_diff_complete") is False)
+        or (isinstance(initial_publication, dict) and initial_publication.get("complete") is False)
+    )
+    if field is not None:
+        if field not in data:
+            raise RunnerError(
+                ARTIFACT_VALIDATION_FAILED, "evidence field selector does not match snapshot data"
+            )
+        selector: dict[str, object] = {"kind": "field", "value": field}
+        evidence: dict[str, object] = {"field": field, "value": data[field]}
+        found = True
+    elif path is not None:
+        selector = {"kind": "path", "value": path}
+        evidence, found = _evidence_for_path(data, gaps, path, repository_root)
+    else:
+        selector = {"kind": "index"}
+        evidence = _evidence_index(data, gaps)
+        found = True
+    output: dict[str, object] = {
+        "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
+        "runner_version": runner_version,
+        "command": task,
+        "snapshot_id": artifact.snapshot_id,
+        "repository": repository,
+        "artifact": os.fspath(artifact.directory / "snapshot.json"),
+        "selector": selector,
+        "status": "partial" if incomplete else "complete",
+        "truncated": truncated,
+        "evidence_gap": bool(gaps),
+        "found": found,
+        "evidence": evidence,
+        "trust_boundary": TRUST_BOUNDARY,
+        "security_notice": SECURITY_NOTICE,
+    }
+    encoded = json.dumps(output, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
+    if len(encoded) > MAX_EVIDENCE_BYTES:
+        raise RunnerError(ARTIFACT_VALIDATION_FAILED, "hard output limit exceeded: evidence")
     return encoded
 
 

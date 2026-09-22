@@ -5,7 +5,7 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_COMMANDS = {"repo-status", "diff-audit", "branch-review", "test-triage"}
+EXPECTED_COMMANDS = {"repo-status", "diff-audit", "branch-review", "test-triage", "read"}
 
 
 def test_public_cli_contract_and_package_are_consistent() -> None:
@@ -15,8 +15,8 @@ def test_public_cli_contract_and_package_are_consistent() -> None:
         project = tomllib.load(stream)["project"]
 
     assert contract["schema_version"] == 1
-    # contract_version 2 records the 2.0.0 removal of the provider-named aliases.
-    assert contract["contract_version"] == 2
+    # contract_version 3 records the addition of the targeted-evidence read subcommand.
+    assert contract["contract_version"] == 3
     assert contract["tool_name"] == "snapshot-runner"
     assert contract["tool_version"] == project["version"]
     assert {command["name"] for command in contract["commands"]} == EXPECTED_COMMANDS
@@ -29,6 +29,17 @@ def test_public_cli_contract_and_package_are_consistent() -> None:
         "--scope-path" not in command["flags"]
         for name, command in commands.items()
         if name != "diff-audit"
+    )
+    assert {"--field", "--path"} <= set(commands["read"]["flags"])
+    assert set(commands["read"]["result_statuses"]) == {
+        "complete",
+        "partial",
+        "workflow_failed",
+    }
+    assert all(
+        not {"--field", "--path"} & set(command["flags"])
+        for name, command in commands.items()
+        if name != "read"
     )
 
     primary = contract["primary_command"]
