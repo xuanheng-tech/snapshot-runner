@@ -53,6 +53,39 @@ def test_collects_extensionless_context_entry_without_evidence_gap(tmp_path: Pat
     assert "completeness: evidence_gaps=0 truncated=no incomplete=no" in preview
 
 
+@pytest.mark.parametrize("relative", ["module.mjs", "legacy.cjs"])
+def test_collects_javascript_module_context_without_evidence_gap(
+    tmp_path: Path,
+    relative: str,
+) -> None:
+    content = "export const boundary = 1;\n"
+    (tmp_path / relative).write_text(content, encoding="utf-8")
+    builder = _diff_audit_builder(tmp_path, f" M {relative}\n")
+
+    collect._add_context(builder, [relative])
+    envelope = builder.finish().as_envelope()
+
+    assert security.is_relevant_text_path(relative)
+    assert envelope["data"]["file_context"] == [{"path": relative, "content": content}]
+    assert envelope["evidence_gaps"] == []
+    assert "file_refused" not in json.dumps(envelope)
+
+
+def test_nul_bytes_still_refuse_a_javascript_module_context(tmp_path: Path) -> None:
+    relative = "packed.mjs"
+    (tmp_path / relative).write_bytes(b"export const packed = 1;\n\x00\xf7\xff\n")
+    builder = _diff_audit_builder(tmp_path, f" M {relative}\n")
+
+    collect._add_context(builder, [relative])
+    envelope = builder.finish().as_envelope()
+
+    gaps = envelope["evidence_gaps"]
+    assert [gap["kind"] for gap in gaps] == ["file_refused"]
+    assert gaps[0]["subject"] == relative
+    assert "binary" in gaps[0]["reason"]
+    assert envelope["data"]["file_context"] == []
+
+
 def test_collects_large_uv_lock_up_to_four_mib_without_evidence_gap(tmp_path: Path) -> None:
     relative = "uv.lock"
     content = _synthetic_context(collect.MAX_FILE_BYTES + 1)

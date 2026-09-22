@@ -101,6 +101,8 @@ ALLOWED_TEXT_SUFFIXES = frozenset(
         ".html",
         ".css",
         ".js",
+        ".mjs",
+        ".cjs",
         ".ts",
         ".tsx",
         ".jsx",

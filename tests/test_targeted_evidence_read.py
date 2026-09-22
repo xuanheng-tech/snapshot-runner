@@ -848,3 +848,38 @@ def test_read_reports_validation_for_a_present_but_malformed_artifact(
     assert err == (
         "workflow_failed: ARTIFACT_NOT_FOUND: snapshot not found in the private snapshot store\n"
     )
+
+
+def test_javascript_module_changes_are_audited_and_targeted_readable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state = _private_state(tmp_path, monkeypatch)
+    repo = _initialize_repository(tmp_path)
+    (repo / "app.mjs").write_text("export const boundary = 1;\n", encoding="utf-8")
+    (repo / "legacy.cjs").write_text("module.exports.boundary = 2;\n", encoding="utf-8")
+    _git(repo, "add", "app.mjs", "legacy.cjs")
+
+    summary = _prepare_summary(repo, capsys)
+    snapshot_id = str(summary["snapshot_id"])
+    envelope = json.loads(
+        (state / "snapshot-runner" / "snapshots" / snapshot_id / "snapshot.json").read_bytes()
+    )
+
+    refused = {gap["subject"] for gap in envelope["evidence_gaps"] if gap["kind"] == "file_refused"}
+    assert "app.mjs" not in refused
+    assert "legacy.cjs" not in refused
+    assert summary["result"]["diff_files"] == 2
+
+    exit_code, out, err = _read_output(repo, snapshot_id, capsys, "--path", "app.mjs")
+    assert exit_code == 0 and err == ""
+    payload = json.loads(out)
+    assert payload["found"] is True
+    assert payload["evidence"]["diff_sections"]["staged_diff"]["matched"] == 1
+    assert "export const boundary = 1;" in json.dumps(payload)
+
+    exit_code, out, _err = _read_output(repo, snapshot_id, capsys, "--field", "staged_diff")
+    assert exit_code == 0
+    field = json.loads(out)
+    assert all(f"b/{name}" in field["evidence"]["value"] for name in ("app.mjs", "legacy.cjs"))
