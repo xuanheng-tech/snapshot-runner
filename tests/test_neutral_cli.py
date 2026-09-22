@@ -120,6 +120,13 @@ def test_primary_cli_collects_evidence_and_preserves_target(workspace, task: str
     if task == "test-triage":
         assert summary["status"] == "complete"
         assert summary["next_action"] == "open_artifact"
+    elif task == "branch-review":
+        # A non-empty sealed range is complete evidence awaiting review, so it must point at
+        # the existing targeted selectors instead of the whole artifact.
+        assert summary["status"] == "complete"
+        assert summary["evidence_gap"] is False
+        assert summary["result"]["commits"] == 1
+        assert summary["next_action"] == "read_targeted"
 
 
 @pytest.mark.parametrize("args", [[], ["--repo", "relative"], ["--unexpected"]])

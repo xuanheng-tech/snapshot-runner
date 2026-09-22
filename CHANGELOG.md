@@ -5,6 +5,16 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+- Changed: `summary.next_action` is now derived from the evidence actually available instead of
+  from "there is something to review". `open_artifact` is kept for genuinely whole-artifact
+  cases — incomplete evidence, any recorded evidence gap, a mid-flight Git operation, or a
+  collected test log — while complete evidence that only awaits review now reports
+  `read_targeted`, pointing the reviewer at the existing `read --path`/`--field` selectors
+  rather than at the entire `snapshot.json`. `continue` still means nothing needs review.
+  `snapshot_id` and the artifact path stay in every summary, so no recommendation removes
+  access to evidence and no gap is downgraded. This is marked by
+  `summary_schema_version` **2**; stored snapshots, `contract_version` and the canonical
+  artifact layer are unchanged.
 - Fixed: `.mjs`, `.cjs`, `.mts` and `.cts` sources are now collected as bounded text evidence
   instead of producing a `file_refused` evidence gap; `.js`, `.jsx`, `.ts` and `.tsx` were
   already accepted. Sensitive-path, NUL/binary, UTF-8, size and safe-open checks still apply

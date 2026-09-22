@@ -84,7 +84,7 @@ TASKS = ("repo-status", "diff-audit", "branch-review", "test-triage")
 SNAPSHOT_ID_RE = re.compile(r"[0-9a-f]{64}")
 SNAPSHOT_GIT_OID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 SNAPSHOT_META_SCHEMA_VERSION = 2
-SUMMARY_SCHEMA_VERSION = 1
+SUMMARY_SCHEMA_VERSION = 2
 EVIDENCE_SCHEMA_VERSION = 1
 SUMMARY_TEXT_LIMIT = 256
 SUMMARY_WARNING_LIMIT = 5
@@ -634,7 +634,21 @@ def _build_summary_output(artifact: SnapshotArtifact, runner_version: str) -> by
         review_needed = any(result[key] != 0 for key in ("commits", "diff_files", "deleted_files"))
     else:
         review_needed = True
-    needs_artifact = incomplete or review_needed
+    # Summary counts cannot assess a mid-flight Git operation or a collected test log, and any
+    # incompleteness or evidence gap has to be inspected in the artifact itself, so those still
+    # require it whole. Complete evidence that merely awaits review can be fetched selectively
+    # through `read --path/--field` rather than by consuming the entire snapshot.
+    whole_artifact_required = (
+        bool(gaps)
+        or task == "test-triage"
+        or (task == "repo-status" and "active_operation" in data)
+    )
+    if incomplete or whole_artifact_required:
+        next_action = "open_artifact"
+    elif review_needed:
+        next_action = "read_targeted"
+    else:
+        next_action = "continue"
     warnings, warnings_omitted = _summary_warnings(envelope, data)
     head = (
         data.get("head")
@@ -655,7 +669,7 @@ def _build_summary_output(artifact: SnapshotArtifact, runner_version: str) -> by
         "head": head,
         "scope": _summary_scope(task, data),
         "status": "partial" if incomplete else "complete",
-        "next_action": "open_artifact" if needs_artifact else "continue",
+        "next_action": next_action,
         "result": result,
         "truncated": truncated,
         "evidence_gap": bool(gaps),

@@ -115,8 +115,9 @@ it does not execute a generator. See `snapshot-runner diff-audit --help` for the
 
 ## Reading targeted evidence from an existing snapshot
 
-When `--summary` reports `partial` evidence or `next_action: open_artifact`, `read` fetches
-just the relevant part of that snapshot instead of consuming the whole `snapshot.json`:
+When `--summary` reports `next_action: read_targeted`, `read` fetches just the relevant part of
+that snapshot instead of consuming the whole `snapshot.json`. It is equally useful for
+`partial` evidence; open `snapshot.json` itself when the summary reports `open_artifact`:
 
 ```bash
 snapshot-runner read <snapshot-id> --repo /absolute/path/to/example-repo
@@ -144,7 +145,7 @@ there are no alias executables. The public CLI contract is recorded in
 `primary_command.subcommands` lists them, and `command_invocation` records the
 `snapshot-runner <command>` form.
 
-Snapshot schema **2**, summary schema **1**, evidence-read schema **1** and security
+Snapshot schema **2**, summary schema **2**, evidence-read schema **1** and security
 epoch **4** define the evidence contract. Release notes for interface changes are in
 [CHANGELOG.md](CHANGELOG.md).
 
@@ -174,9 +175,13 @@ quiescent while collecting. Branch review explicitly seals its base and target i
 
 `--summary` emits bounded JSON derived from the canonical artifact. It does not change
 the snapshot, exit status, or safety checks. Inspect `complete`/`partial`, `truncated`,
-`evidence_gap`, warnings, and the next action. Use `snapshot-runner read` to fetch targeted
-evidence from the artifact, or open `snapshot.json` directly when evidence is partial or
-the summary requests it. Test-log summaries always require reading the artifact.
+`evidence_gap`, warnings, and the deterministic `next_action`: `open_artifact` when evidence is
+incomplete or any gap was recorded, for a mid-flight Git operation, or for a collected test log;
+`read_targeted` when complete evidence only awaits review; `continue` when nothing needs review.
+Every summary keeps `snapshot_id` and the artifact path, so a recommendation never removes
+access to the evidence. Use `snapshot-runner read` to fetch targeted evidence from the artifact,
+or open `snapshot.json` directly when evidence is partial or the summary requests it. Test-log
+summaries always require reading the artifact.
 
 ## Boundaries
 

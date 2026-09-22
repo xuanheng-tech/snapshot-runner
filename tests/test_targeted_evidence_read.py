@@ -883,3 +883,85 @@ def test_javascript_module_changes_are_audited_and_targeted_readable(
     assert exit_code == 0
     field = json.loads(out)
     assert all(f"b/{name}" in field["evidence"]["value"] for name in ("app.mjs", "legacy.cjs"))
+
+
+def test_complete_evidence_recommends_targeted_read_on_a_tiny_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _private_state(tmp_path, monkeypatch)
+    repo = _initialize_repository(tmp_path)
+    (repo / "safe.py").write_text("VALUE = 2\n", encoding="utf-8")
+
+    summary = _prepare_summary(repo, capsys)
+    assert summary["summary_schema_version"] == artifact_module.SUMMARY_SCHEMA_VERSION == 2
+    assert summary["status"] == "complete"
+    assert summary["evidence_gap"] is False
+    assert summary["result"]["changed_files"] == 1
+    assert summary["next_action"] == "read_targeted"
+    # Recommending targeted read must never remove the pointer to the stored evidence.
+    assert summary["artifact"].endswith("snapshot.json")
+
+    exit_code, out, err = _read_output(
+        repo, str(summary["snapshot_id"]), capsys, "--path", "safe.py"
+    )
+    assert exit_code == 0 and err == ""
+    assert json.loads(out)["found"] is True
+
+
+def test_a_refused_file_still_points_at_the_whole_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _private_state(tmp_path, monkeypatch)
+    repo = _initialize_repository(tmp_path)
+    (repo / "asset.bin").write_bytes(b"RAW BLOB\n")
+    _git(repo, "add", "asset.bin")
+
+    summary = _prepare_summary(repo, capsys)
+    assert summary["evidence_gap"] is True
+    assert any(warning["kind"] == "file_refused" for warning in summary["warnings"])
+    assert summary["next_action"] == "open_artifact"
+
+
+def test_an_unchanged_repository_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _private_state(tmp_path, monkeypatch)
+    repo = _initialize_repository(tmp_path)
+
+    summary = _prepare_summary(repo, capsys)
+    assert summary["status"] == "complete"
+    assert summary["result"]["changed_files"] == 0
+    assert summary["next_action"] == "continue"
+
+
+def test_repo_status_read_targeted_reaches_the_collected_change_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """repo-status stores no diff text, so its recommendation must still be actionable."""
+    _private_state(tmp_path, monkeypatch)
+    repo = _initialize_repository(tmp_path)
+    (repo / "safe.py").write_text("VALUE = 3\n", encoding="utf-8")
+
+    summary = _prepare_summary(repo, capsys, task="repo-status")
+    assert summary["status"] == "complete"
+    assert summary["evidence_gap"] is False
+    assert summary["next_action"] == "read_targeted"
+    snapshot_id = str(summary["snapshot_id"])
+
+    exit_code, out, err = _read_output(repo, snapshot_id, capsys, "--field", "status_short")
+    assert exit_code == 0 and err == ""
+    assert "safe.py" in json.loads(out)["evidence"]["value"]
+
+    exit_code, out, _err = _read_output(repo, snapshot_id, capsys)
+    assert exit_code == 0
+    index = json.loads(out)
+    assert index["found"] is True
+    assert "status_short" in json.dumps(index["evidence"])
