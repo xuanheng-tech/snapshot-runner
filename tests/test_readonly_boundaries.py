@@ -1618,6 +1618,8 @@ def test_test_triage_log_limit_preserves_bounded_head_and_tail(tmp_path: Path) -
         ("web.tsx", security.ScanMode.PLAIN_TEXT),
         ("module.mjs", security.ScanMode.PLAIN_TEXT),
         ("legacy.cjs", security.ScanMode.PLAIN_TEXT),
+        ("typing.mts", security.ScanMode.PLAIN_TEXT),
+        ("declarations.cts", security.ScanMode.PLAIN_TEXT),
         ("Justfile", security.ScanMode.PLAIN_TEXT),
         ("Dockerfile", security.ScanMode.PLAIN_TEXT),
         ("notes.md", security.ScanMode.PLAIN_TEXT),

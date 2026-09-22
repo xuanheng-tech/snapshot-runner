@@ -5,9 +5,9 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
-- Fixed: `.mjs` and `.cjs` sources are now collected as bounded text evidence instead of
-  producing a `file_refused` evidence gap; `.js`, `.jsx`, `.ts` and `.tsx` were already
-  accepted. Sensitive-path, NUL/binary, UTF-8, size and safe-open checks still apply
+- Fixed: `.mjs`, `.cjs`, `.mts` and `.cts` sources are now collected as bounded text evidence
+  instead of producing a `file_refused` evidence gap; `.js`, `.jsx`, `.ts` and `.tsx` were
+  already accepted. Sensitive-path, NUL/binary, UTF-8, size and safe-open checks still apply
   unchanged, and the scan-mode classifier semantics are untouched, so
   `SCAN_CLASSIFIER_VERSION` and previously published artifacts are unaffected.
 

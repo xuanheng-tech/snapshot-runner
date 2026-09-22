@@ -53,7 +53,7 @@ def test_collects_extensionless_context_entry_without_evidence_gap(tmp_path: Pat
     assert "completeness: evidence_gaps=0 truncated=no incomplete=no" in preview
 
 
-@pytest.mark.parametrize("relative", ["module.mjs", "legacy.cjs"])
+@pytest.mark.parametrize("relative", ["module.mjs", "legacy.cjs", "typing.mts", "rules.cts"])
 def test_collects_javascript_module_context_without_evidence_gap(
     tmp_path: Path,
     relative: str,
@@ -71,8 +71,11 @@ def test_collects_javascript_module_context_without_evidence_gap(
     assert "file_refused" not in json.dumps(envelope)
 
 
-def test_nul_bytes_still_refuse_a_javascript_module_context(tmp_path: Path) -> None:
-    relative = "packed.mjs"
+@pytest.mark.parametrize("relative", ["packed.mjs", "packed.mts"])
+def test_nul_bytes_still_refuse_a_javascript_module_context(
+    tmp_path: Path,
+    relative: str,
+) -> None:
     (tmp_path / relative).write_bytes(b"export const packed = 1;\n\x00\xf7\xff\n")
     builder = _diff_audit_builder(tmp_path, f" M {relative}\n")
 

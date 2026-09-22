@@ -104,6 +104,8 @@ ALLOWED_TEXT_SUFFIXES = frozenset(
         ".mjs",
         ".cjs",
         ".ts",
+        ".mts",
+        ".cts",
         ".tsx",
         ".jsx",
         ".lock",
