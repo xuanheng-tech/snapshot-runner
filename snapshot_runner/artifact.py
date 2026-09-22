@@ -697,7 +697,9 @@ def _matched_diff_sections(
     if not sections:
         return {"total": 0, "matched": 0, "sections": []}
     try:
-        changes = unified_diff_path_changes(diff, repository_root=repository_root)
+        changes = unified_diff_path_changes(
+            diff, repository_root=repository_root, verify_live_diff_text=False
+        )
     except SecurityError as exc:
         raise RunnerError(
             ARTIFACT_VALIDATION_FAILED, "snapshot diff evidence failed targeted attribution"
@@ -1024,6 +1026,7 @@ def _sanitize_validate_snapshot(
     *,
     extra_paths: tuple[Path, ...] = (),
     expected_scan_manifest: ScanModeManifest | None = None,
+    verify_live_diff_text: bool = True,
 ) -> dict[str, object]:
     envelope = _validate_snapshot_envelope(payload)
     try:
@@ -1052,6 +1055,7 @@ def _sanitize_validate_snapshot(
             scan_manifest=scan_manifest,
             repository_root=repository_root,
             explicit_paths=explicit_paths,
+            verify_live_diff_text=verify_live_diff_text,
         )
     except SecurityError as exc:
         raise _runner_security_error(exc, "artifact sanitization failed closed") from exc
@@ -1064,6 +1068,7 @@ def _sanitize_validate_snapshot(
             scan_manifest=scan_manifest,
             repository_root=repository_root,
             explicit_paths=explicit_paths,
+            verify_live_diff_text=verify_live_diff_text,
         )
     except SecurityError as exc:
         raise _runner_security_error(exc, "artifact invariant scan failed closed") from exc
@@ -1985,6 +1990,7 @@ def _load_snapshot_directory(
         envelope_value,
         active_root if active_root is not None else REPOSITORY_ROOT,
         extra_paths=(directory,),
+        verify_live_diff_text=False,
     )
     if _serialize_snapshot(envelope) != snapshot_bytes:
         raise RunnerError(

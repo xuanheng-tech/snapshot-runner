@@ -743,3 +743,79 @@ def test_field_mode_returns_verbatim_diff_and_caps_fail_closed(
         )
     assert excinfo.value.code == artifact_module.ARTIFACT_VALIDATION_FAILED
     assert "hard output limit exceeded: evidence" in str(excinfo.value)
+
+
+def _publish_csv_diff_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> tuple[Path, str, Path, dict[str, object]]:
+    state = _private_state(tmp_path, monkeypatch)
+    repo = _initialize_repository(tmp_path)
+    (repo / "data.csv").write_text("col_a,col_b\n1,2\n", encoding="utf-8")
+    _git(repo, "add", "data.csv")
+    snapshot_id = str(_prepare_summary(repo, capsys)["snapshot_id"])
+    store_dir = state / "snapshot-runner" / "snapshots" / snapshot_id
+    envelope = json.loads((store_dir / "snapshot.json").read_bytes())
+    return repo, snapshot_id, store_dir, envelope
+
+
+@pytest.mark.parametrize("removal", ["delete", "move"])
+def test_read_survives_removing_a_referenced_csv_after_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    removal: str,
+) -> None:
+    repo, snapshot_id, _store_dir, envelope = _publish_csv_diff_snapshot(
+        tmp_path, monkeypatch, capsys
+    )
+    data = envelope["data"]
+    assert isinstance(data, dict)
+    staged_diff = data["staged_diff"]
+    assert isinstance(staged_diff, str)
+    assert "data.csv" in staged_diff
+
+    if removal == "delete":
+        (repo / "data.csv").unlink()
+    else:
+        (repo / "data.csv").rename(repo / "moved.csv")
+
+    exit_code, out, err = _read_output(repo, snapshot_id, capsys)
+    assert (exit_code, err) == (0, "")
+    index = json.loads(out)
+    assert index["selector"] == {"kind": "index"}
+    assert index["snapshot_id"] == snapshot_id
+
+    exit_code, out, err = _read_output(repo, snapshot_id, capsys, "--field", "staged_diff")
+    assert (exit_code, err) == (0, "")
+    field = json.loads(out)
+    assert field["evidence"] == {"field": "staged_diff", "value": staged_diff}
+
+    exit_code, out, err = _read_output(repo, snapshot_id, capsys, "--path", "data.csv")
+    assert (exit_code, err) == (0, "")
+    payload = json.loads(out)
+    assert payload["found"] is True
+    staged = payload["evidence"]["diff_sections"]["staged_diff"]
+    assert staged["matched"] >= 1
+    assert any("data.csv" in section for section in staged["sections"])
+
+
+def test_read_fails_closed_on_a_tampered_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo, snapshot_id, store_dir, _envelope = _publish_csv_diff_snapshot(
+        tmp_path, monkeypatch, capsys
+    )
+    path = store_dir / "snapshot.json"
+    original = bytearray(path.read_bytes())
+    original[len(original) // 2] ^= 0x20
+    path.write_bytes(bytes(original))
+
+    exit_code, out, err = _read_output(repo, snapshot_id, capsys)
+    assert exit_code == 2
+    assert out == ""
+    assert err.startswith("workflow_failed: ARTIFACT_PUBLISH_FAILED:")
+    assert "data.csv" not in out

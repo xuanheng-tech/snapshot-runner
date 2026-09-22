@@ -18,6 +18,11 @@ public source baseline; it was not tagged or published to PyPI.
   explicit validated absolute `--repo`, refuses artifacts whose repository name does not match
   the validated target, and fails closed with exit code 2 (`ARTIFACT_NOT_FOUND`,
   `ARGUMENT_ERROR`, or `ARTIFACT_VALIDATION_FAILED`).
+- Fixed: reading a snapshot no longer depends on the current worktree. The canonical loader
+  and `--path` attribution skip the live content probe for `.csv`/`.gitattributes` diff paths,
+  so evidence stays readable after those files are deleted or moved; capture-time validation,
+  the scan-mode classification and the content-hash canonical invariant are unchanged, so a
+  tampered or malformed artifact still fails closed.
 
 ## 2.1.0
 

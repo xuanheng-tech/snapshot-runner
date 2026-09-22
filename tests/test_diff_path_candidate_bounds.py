@@ -95,10 +95,12 @@ def test_evaluated_candidates_never_exceed_the_hard_bound(
     for components in (10, 60, 127, 200, 400):
         evaluated = 0
 
-        def counting(raw: str, prefix: str, root, _original=original) -> str:
+        def counting(
+            raw: str, prefix: str, root, *, verify_live_diff_text: bool = True, _original=original
+        ) -> str:
             nonlocal evaluated
             evaluated += 1
-            return _original(raw, prefix, root)
+            return _original(raw, prefix, root, verify_live_diff_text=verify_live_diff_text)
 
         monkeypatch.setattr(security, "_diff_prefixed_path", counting)
         with contextlib.suppress(security.SecurityError):

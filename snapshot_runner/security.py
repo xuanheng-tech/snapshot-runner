@@ -486,6 +486,8 @@ def _validate_bounded_diff_text(
 def _classify_diff_scan_mode(
     relative_path: str,
     repository_root: Path | None,
+    *,
+    verify_live_diff_text: bool = True,
 ) -> ScanMode:
     requires_validation = _is_explicit_bounded_diff_text_path(relative_path)
     try:
@@ -497,7 +499,7 @@ def _classify_diff_scan_mode(
             return ScanMode.PLAIN_TEXT
         mode = ScanMode.PLAIN_TEXT
         requires_validation = True
-    if mode is ScanMode.PLAIN_TEXT and requires_validation:
+    if mode is ScanMode.PLAIN_TEXT and requires_validation and verify_live_diff_text:
         _validate_bounded_diff_text(relative_path, repository_root)
     return mode
 
@@ -610,17 +612,21 @@ def _diff_prefixed_path(
     raw: str,
     prefix: str,
     repository_root: Path | None,
+    *,
+    verify_live_diff_text: bool = True,
 ) -> str:
     if not raw.startswith(prefix) or len(raw) == len(prefix):
         raise SecurityError("unified diff path prefix is invalid")
     relative = raw[len(prefix) :]
-    _classify_diff_scan_mode(relative, repository_root)
+    _classify_diff_scan_mode(relative, repository_root, verify_live_diff_text=verify_live_diff_text)
     return relative
 
 
 def _diff_git_path_candidates(
     raw: str,
     repository_root: Path | None,
+    *,
+    verify_live_diff_text: bool = True,
 ) -> tuple[tuple[str, str], ...]:
     raw_pairs: list[tuple[str, str]] = []
     if raw.startswith('"'):
@@ -646,8 +652,12 @@ def _diff_git_path_candidates(
             old_atom = _decode_git_path_atom(old_raw)
             new_atom = _decode_git_path_atom(new_raw)
             candidate = (
-                _diff_prefixed_path(old_atom, "a/", repository_root),
-                _diff_prefixed_path(new_atom, "b/", repository_root),
+                _diff_prefixed_path(
+                    old_atom, "a/", repository_root, verify_live_diff_text=verify_live_diff_text
+                ),
+                _diff_prefixed_path(
+                    new_atom, "b/", repository_root, verify_live_diff_text=verify_live_diff_text
+                ),
             )
         except SecurityError as exc:
             errors.append(exc)
@@ -668,16 +678,25 @@ def _diff_side_path(
     raw: str,
     prefix: str,
     repository_root: Path | None,
+    *,
+    verify_live_diff_text: bool = True,
 ) -> str | None:
     decoded = _parse_single_git_path_atom(raw, allow_trailing_tab=True)
     if decoded == "/dev/null":
         return None
-    return _diff_prefixed_path(decoded, prefix, repository_root)
+    return _diff_prefixed_path(
+        decoded, prefix, repository_root, verify_live_diff_text=verify_live_diff_text
+    )
 
 
-def _diff_metadata_path(raw: str, repository_root: Path | None) -> str:
+def _diff_metadata_path(
+    raw: str,
+    repository_root: Path | None,
+    *,
+    verify_live_diff_text: bool = True,
+) -> str:
     relative = _parse_single_git_path_atom(raw, allow_trailing_tab=False)
-    _classify_diff_scan_mode(relative, repository_root)
+    _classify_diff_scan_mode(relative, repository_root, verify_live_diff_text=verify_live_diff_text)
     return relative
 
 
@@ -685,11 +704,25 @@ def _diff_mode(
     old_path: str | None,
     new_path: str | None,
     repository_root: Path | None,
+    *,
+    verify_live_diff_text: bool = True,
 ) -> ScanMode:
     if old_path is None and new_path is None:
         raise SecurityError("unified diff has no file path")
-    old_mode = _classify_diff_scan_mode(old_path, repository_root) if old_path is not None else None
-    new_mode = _classify_diff_scan_mode(new_path, repository_root) if new_path is not None else None
+    old_mode = (
+        _classify_diff_scan_mode(
+            old_path, repository_root, verify_live_diff_text=verify_live_diff_text
+        )
+        if old_path is not None
+        else None
+    )
+    new_mode = (
+        _classify_diff_scan_mode(
+            new_path, repository_root, verify_live_diff_text=verify_live_diff_text
+        )
+        if new_path is not None
+        else None
+    )
     if old_mode is not None and new_mode is not None and old_mode is not new_mode:
         raise SecurityError("unified diff old and new path modes conflict")
     return old_mode or new_mode  # type: ignore[return-value]
@@ -824,6 +857,7 @@ def _process_unified_diff(
     repository_root: Path | None,
     explicit_paths: tuple[Path, ...],
     sanitize_payload: bool,
+    verify_live_diff_text: bool = True,
 ) -> tuple[SanitizedText, tuple[tuple[str | None, str | None], ...]]:
     if "\x00" in text:
         raise SecurityError("unified diff contains a forbidden NUL")
@@ -842,6 +876,7 @@ def _process_unified_diff(
         candidates = _diff_git_path_candidates(
             header[len("diff --git ") :],
             repository_root,
+            verify_live_diff_text=verify_live_diff_text,
         )
         index += 1
         saw_old_header = False
@@ -860,7 +895,9 @@ def _process_unified_diff(
                 _validate_diff_control_line(line)
                 if saw_old_header:
                     raise SecurityError("unified diff repeats its old file side header")
-                old_side = _diff_side_path(line[4:], "a/", repository_root)
+                old_side = _diff_side_path(
+                    line[4:], "a/", repository_root, verify_live_diff_text=verify_live_diff_text
+                )
                 saw_old_header = True
                 index += 1
                 continue
@@ -868,7 +905,9 @@ def _process_unified_diff(
                 _validate_diff_control_line(line)
                 if saw_new_header:
                     raise SecurityError("unified diff repeats its new file side header")
-                new_side = _diff_side_path(line[4:], "b/", repository_root)
+                new_side = _diff_side_path(
+                    line[4:], "b/", repository_root, verify_live_diff_text=verify_live_diff_text
+                )
                 saw_new_header = True
                 index += 1
                 continue
@@ -891,7 +930,9 @@ def _process_unified_diff(
                     new_file=new_file,
                     deleted_file=deleted_file,
                 )
-                mode = _diff_mode(old_side, new_side, repository_root)
+                mode = _diff_mode(
+                    old_side, new_side, repository_root, verify_live_diff_text=verify_live_diff_text
+                )
                 old_count, new_count = _parse_diff_hunk_header(lines[index])
                 index += 1
                 old_refs: list[int] = []
@@ -1003,7 +1044,11 @@ def _process_unified_diff(
                     if metadata_kind is not None and metadata_kind != kind:
                         raise SecurityError("unified diff mixes rename and copy metadata")
                     metadata_kind = kind
-                    relative = _diff_metadata_path(line[len(prefix) :], repository_root)
+                    relative = _diff_metadata_path(
+                        line[len(prefix) :],
+                        repository_root,
+                        verify_live_diff_text=verify_live_diff_text,
+                    )
                     if side == "old":
                         if metadata_old is not None:
                             raise SecurityError("unified diff repeats old rename or copy metadata")
@@ -1034,8 +1079,18 @@ def _process_unified_diff(
             new_file=new_file,
             deleted_file=deleted_file,
         )
-        mode = _diff_mode(change[0], change[1], repository_root)
-        if _diff_mode(selected[0], selected[1], repository_root) is not mode:
+        mode = _diff_mode(
+            change[0], change[1], repository_root, verify_live_diff_text=verify_live_diff_text
+        )
+        if (
+            _diff_mode(
+                selected[0],
+                selected[1],
+                repository_root,
+                verify_live_diff_text=verify_live_diff_text,
+            )
+            is not mode
+        ):
             raise SecurityError("unified diff path modes conflict")
         changes.append(change)
     return (
@@ -1052,12 +1107,14 @@ def _sanitize_unified_diff(
     *,
     repository_root: Path | None,
     explicit_paths: tuple[Path, ...],
+    verify_live_diff_text: bool = True,
 ) -> SanitizedText:
     sanitized, _changes = _process_unified_diff(
         text,
         repository_root=repository_root,
         explicit_paths=explicit_paths,
         sanitize_payload=True,
+        verify_live_diff_text=verify_live_diff_text,
     )
     return sanitized
 
@@ -1066,12 +1123,14 @@ def unified_diff_path_changes(
     text: str,
     *,
     repository_root: Path | None,
+    verify_live_diff_text: bool = True,
 ) -> tuple[tuple[str | None, str | None], ...]:
     _sanitized, changes = _process_unified_diff(
         text,
         repository_root=repository_root,
         explicit_paths=(),
         sanitize_payload=False,
+        verify_live_diff_text=verify_live_diff_text,
     )
     return changes
 
@@ -1082,6 +1141,7 @@ def sanitize_text(
     scan_mode: ScanMode | None = None,
     repository_root: Path | None = None,
     explicit_paths: tuple[Path, ...] = (),
+    verify_live_diff_text: bool = True,
 ) -> SanitizedText:
     """Redact deterministic credentials and filesystem absolute paths."""
     if not isinstance(scan_mode, ScanMode):
@@ -1091,6 +1151,7 @@ def sanitize_text(
             text,
             repository_root=repository_root,
             explicit_paths=explicit_paths,
+            verify_live_diff_text=verify_live_diff_text,
         )
     text = _normalize_leading_bom(text)
     if "\x00" in text:
@@ -1118,6 +1179,7 @@ def sanitize_json_value(
     explicit_paths: tuple[Path, ...] = (),
     max_depth: int = MAX_SANITIZE_DEPTH,
     max_elements: int = MAX_SANITIZE_ELEMENTS,
+    verify_live_diff_text: bool = True,
 ) -> object:
     if max_depth < 0 or max_elements <= 0:
         raise SecurityError("invalid recursive sanitization limits")
@@ -1155,6 +1217,7 @@ def sanitize_json_value(
                 scan_mode=mode_for(path),
                 repository_root=repository_root,
                 explicit_paths=explicit_paths,
+                verify_live_diff_text=verify_live_diff_text,
             ).text
         if current is None or isinstance(current, (bool, int)):
             return current
