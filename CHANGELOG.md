@@ -5,6 +5,8 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.2.0 - 2026-09-22
+
 - Added: the `read` subcommand for on-demand evidence from an existing content-addressed
   snapshot, so callers no longer consume the whole `snapshot.json` after a summary points to
   it: `snapshot-runner read <snapshot-id> --repo <path>` prints a bounded evidence index,
