@@ -238,6 +238,14 @@ commit/ref, original build run, and file hashes. PyPI's publisher attestation id
 the release-control workflow; the source-bound build receipt identifies package source.
 An existing build artifact blocks a second build: resume its original publish job.
 
+## Acknowledgements
+
+Contributor attribution for this project follows Git history; no author identity is asserted
+here beyond it. Qoder (QoderCN) is acknowledged as an AI development tool contributor for the
+targeted evidence `read` work and the JavaScript/TypeScript module evidence fix. AI-assisted
+contributions are credited as tooling and are never presented as a natural person or a GitHub
+identity.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
