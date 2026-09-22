@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -817,5 +818,33 @@ def test_read_fails_closed_on_a_tampered_snapshot(
     exit_code, out, err = _read_output(repo, snapshot_id, capsys)
     assert exit_code == 2
     assert out == ""
-    assert err.startswith("workflow_failed: ARTIFACT_PUBLISH_FAILED:")
+    assert err.startswith("workflow_failed: ARTIFACT_VALIDATION_FAILED:")
+    assert "ARTIFACT_PUBLISH_FAILED" not in err
     assert "data.csv" not in out
+
+
+def test_read_reports_validation_for_a_present_but_malformed_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo, snapshot_id, store_dir, _envelope = _publish_csv_diff_snapshot(
+        tmp_path, monkeypatch, capsys
+    )
+
+    # The directory exists but no longer carries the required three-file manifest.
+    (store_dir / "preview.txt").unlink()
+    exit_code, out, err = _read_output(repo, snapshot_id, capsys)
+    assert exit_code == 2
+    assert out == ""
+    assert err.startswith("workflow_failed: ARTIFACT_VALIDATION_FAILED:")
+    assert "ARTIFACT_NOT_FOUND" not in err
+
+    # Removing the whole directory is the only case reported as not found.
+    shutil.rmtree(store_dir)
+    exit_code, out, err = _read_output(repo, snapshot_id, capsys)
+    assert exit_code == 2
+    assert out == ""
+    assert err == (
+        "workflow_failed: ARTIFACT_NOT_FOUND: snapshot not found in the private snapshot store\n"
+    )

@@ -610,9 +610,14 @@ def _run_read(arguments: argparse.Namespace) -> int:
             directory.lstat()
         except FileNotFoundError as exc:
             raise RunnerError(security.ARTIFACT_NOT_FOUND, SNAPSHOT_NOT_FOUND_ERROR) from exc
-        artifact = artifact_module._load_snapshot(
-            arguments.snapshot_id, repository_root=target_path
-        )
+        try:
+            artifact = artifact_module._load_snapshot(
+                arguments.snapshot_id, repository_root=target_path
+            )
+        except RunnerError as exc:
+            if exc.code == security.ARTIFACT_PUBLISH_FAILED:
+                raise RunnerError(security.ARTIFACT_VALIDATION_FAILED, exc.message) from None
+            raise
         if artifact.envelope.get("repository") != target_name:
             raise RunnerError(
                 security.ARTIFACT_VALIDATION_FAILED,
