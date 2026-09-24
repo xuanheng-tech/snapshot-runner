@@ -1291,3 +1291,80 @@ def test_branch_review_refuses_only_the_context_of_a_rewritten_path(
     reasons = {gap["reason"] for gap in envelope["evidence_gaps"]}
     assert collect.REDACTION_REWRITTEN_PATH_REASON in reasons
     assert "FEATURE BODY" in envelope["data"]["diff"]
+
+
+def _stage_rewriting_directories(repo: Path) -> None:
+    """Put a raster image and an executable extensionless file under rewriting directories.
+
+    Both reach ``_append_context`` through the versioned (``source=``) producers rather than
+    the worktree classifier, so they exercise the other half of the guard.
+    """
+    image = repo / "docs(foo)"
+    image.mkdir()
+    (image / "shot.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + b"pixeldata" * 4)
+    script = repo / "notes!"
+    script.mkdir()
+    runner = script / "runner"
+    runner.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    runner.chmod(0o755)
+    stable = repo / "plain"
+    stable.mkdir()
+    (stable / "ok.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + b"pixeldata" * 4)
+    _git(repo, "add", "-A")
+
+
+def test_guard_also_covers_versioned_blob_and_extensionless_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state = _private_state(tmp_path, monkeypatch)
+    repo = _initialize_repository(tmp_path)
+    _stage_rewriting_directories(repo)
+
+    summary = _prepare_summary(repo, capsys)
+    envelope = _envelope(state, str(summary["snapshot_id"]))
+
+    assert summary["status"] == "partial"
+    # Only the stable-directory image is collected, and it arrives through the versioned route.
+    assert [entry["path"] for entry in envelope["data"]["file_context"]] == ["plain/ok.png"]
+    assert envelope["data"]["file_context"][0]["source"] in {"index", "target"}
+    assert "binary image evidence" in json.dumps(envelope["data"]["file_context"])
+    refused = {entry["subject"] for entry in envelope["evidence_gaps"]}
+    assert refused == {
+        security.sanitize_text(
+            "docs(foo)/shot.png", scan_mode=security.ScanMode.PLAIN_TEXT, repository_root=repo
+        ).text,
+        security.sanitize_text(
+            "notes!/runner", scan_mode=security.ScanMode.PLAIN_TEXT, repository_root=repo
+        ).text,
+    }
+    assert {entry["reason"] for entry in envelope["evidence_gaps"]} == {
+        collect.REDACTION_REWRITTEN_PATH_REASON
+    }
+
+
+def test_initial_publish_evidence_still_fails_closed_on_a_rewritten_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Pins the documented boundary: that route re-reads records by name, so it is not softened."""
+    state = _private_state(tmp_path, monkeypatch)
+    repo = tmp_path / "target-repo"
+    (repo / "docs(foo)").mkdir(parents=True)
+    _git(repo, "init", "--quiet", "--initial-branch=target-main")
+    (repo / "docs(foo)" / "rule.md").write_text("RULE 0\n", encoding="utf-8")
+    (repo / "plain.md").write_text("PLAIN\n", encoding="utf-8")
+
+    assert (
+        runner.main(
+            ["diff-audit", "--repo", os.fspath(repo), "--initial-publish-evidence", "--summary"],
+            neutral=True,
+        )
+        == 2
+    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "publication evidence requires a stable regular file" in captured.err
+    assert not (state / "snapshot-runner" / "snapshots").exists()

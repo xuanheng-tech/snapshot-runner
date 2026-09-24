@@ -26,10 +26,11 @@ public source baseline; it was not tagged or published to PyPI.
   `read --path docs(x)/notes.md` still reports `found: true` with its diff section; an *untracked*
   file under such a path has no diff channel, so after this fix its refusal is visible through the
   evidence index and `--summary` while `read --path` for it returns `found: false`. The
-  `--initial-publish-evidence` and `--generated-tree` routes are untouched by this change and still
-  fail closed on a rewritten path before the guard is reached — measured identical on 2.3.1 and this
-  code, e.g. `publication evidence requires a stable regular file` — because their records are read
-  back from disk by name, so a redacted name cannot round-trip.
+  `--initial-publish-evidence` route is untouched by this change and still fails closed on a
+  rewritten path (`publication evidence requires a stable regular file`, no artifact published, now
+  pinned by a test): its records are read back from disk by name, so a redacted name cannot
+  round-trip, and publication completeness is deliberately not weakened here. The same holds for
+  `--generated-tree`, whose manifest is validated before any context is collected.
 
 ## 2.3.1 - 2026-09-24
 
