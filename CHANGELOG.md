@@ -5,6 +5,8 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.3.1 - 2026-09-24
+
 - Fixed: absolute-path and `file://` redaction no longer consumes the backslash of a following
   quote escape, which previously downgraded an escaped quote to a bare one and corrupted captured
   nested JSON bodies (stored `.json`/`.jsonl` evidence that no longer parses). A path match may
