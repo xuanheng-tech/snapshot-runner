@@ -5,6 +5,8 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.3.2 - 2026-09-25
+
 - Fixed: a repository-relative path that the redactor rewrites no longer destroys the whole
   snapshot. `ABSOLUTE_PATH_RE` anchors on any `/` that does not follow a word character, so an
   ordinary directory ending in punctuation or a space (`docs/foo(bar)/notes.md`,
