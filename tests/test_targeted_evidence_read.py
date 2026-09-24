@@ -13,7 +13,7 @@ import pytest
 import snapshot_runner as runner_namespace
 from snapshot_runner import artifact as artifact_module
 from snapshot_runner import cli as runner
-from snapshot_runner import collect, git
+from snapshot_runner import collect, git, security
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE_KEYS = [
@@ -1004,3 +1004,290 @@ def test_legacy_corrupted_body_stays_readable_and_new_capture_keeps_json_parseab
     exit_code, out, err = _read_output(repo, snapshot_id, capsys, "--field", "file_context")
     assert exit_code == 0 and err == ""
     assert json.loads(out)["evidence"]["value"] == envelope["data"]["file_context"]
+
+
+REWRITTEN_PATH_DIRECTORIES = (
+    "docs/foo(bar)",
+    "my dir (1)",
+    "notes!",
+    "文档（新）",
+    "release v2 ",
+)
+
+
+def _redacted_form(state_root: Path, relative: str) -> security.SanitizedText:
+    return security.sanitize_text(
+        relative,
+        scan_mode=security.ScanMode.PLAIN_TEXT,
+        repository_root=state_root,
+    )
+
+
+def test_relative_path_that_redaction_rewrites_refuses_only_its_own_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A bracketed directory used to destroy every piece of evidence in the snapshot."""
+
+    state = _private_state(tmp_path, monkeypatch)
+    repo = _initialize_repository(tmp_path)
+    (repo / "safe.py").write_text("VALUE = 2\n", encoding="utf-8")
+    for index, directory in enumerate(REWRITTEN_PATH_DIRECTORIES):
+        leaf = repo / directory
+        leaf.mkdir(parents=True)
+        (leaf / f"rule{index}.md").write_text(f"RULE BODY {index}\n", encoding="utf-8")
+    deep = repo / "a" / "b!" / "c"
+    deep.mkdir(parents=True)
+    (deep / "long.py").write_text("VALUE = 3\n", encoding="utf-8")
+
+    summary = _prepare_summary(repo, capsys)
+    snapshot_id = str(summary["snapshot_id"])
+    envelope = json.loads(
+        (state / "snapshot-runner" / "snapshots" / snapshot_id / "snapshot.json").read_bytes()
+    )
+
+    expected_refusals = [
+        f"{directory}/rule{index}.md" for index, directory in enumerate(REWRITTEN_PATH_DIRECTORIES)
+    ]
+    expected_refusals.append("a/b!/c/long.py")
+    assert summary["status"] == "partial"
+    assert summary["evidence_gap"] is True
+    assert summary["next_action"] == "open_artifact"
+    # The summary channel is bounded; the artifact records every refusal it omits.
+    assert summary["warnings_omitted"] == len(expected_refusals) - len(summary["warnings"])
+    assert {warning["kind"] for warning in summary["warnings"]} == {"file_refused"}
+    assert [gap["reason"] for gap in envelope["evidence_gaps"]] == [
+        collect.REDACTION_REWRITTEN_PATH_REASON
+    ] * len(expected_refusals)
+
+    collected = {entry["path"] for entry in envelope["data"]["file_context"]}
+    assert collected == {"safe.py"}
+    assert "VALUE = 2" in json.dumps(envelope["data"]["file_context"])
+
+    published_subjects = {gap["subject"] for gap in envelope["evidence_gaps"]}
+    for relative in expected_refusals:
+        subject = _redacted_form(repo, relative).text
+        assert "<ABS_PATH:" in subject
+        assert subject in published_subjects
+        # A refusal must stay expressible: re-redacting the published subject changes nothing.
+        assert _redacted_form(repo, subject).text == subject
+    # Refused means refused: no body of a refused file is transported, and no other evidence moved.
+    assert "RULE BODY" not in json.dumps(envelope)
+    assert "VALUE = 3" not in json.dumps(envelope)
+
+    exit_code, out, err = _read_output(repo, snapshot_id, capsys, "--path", "safe.py")
+    assert exit_code == 0 and err == ""
+    assert json.loads(out)["found"] is True
+
+    store_directory = state / "snapshot-runner" / "snapshots" / snapshot_id
+    before = _file_hashes(store_directory)
+    _read_output(repo, snapshot_id, capsys)
+    _read_output(repo, snapshot_id, capsys, "--field", "evidence_gaps")
+    assert _file_hashes(store_directory) == before
+
+
+def test_ordinary_relative_paths_still_collect_without_any_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state = _private_state(tmp_path, monkeypatch)
+    repo = _initialize_repository(tmp_path)
+    for name in ("docs/guide.md", "src/app core/x.py", "weird'quote/y.md", "a+b/c.py"):
+        leaf = repo / name
+        leaf.parent.mkdir(parents=True, exist_ok=True)
+        leaf.write_text("BODY\n", encoding="utf-8")
+    (repo / "safe.py").write_text("VALUE = 4\n", encoding="utf-8")
+
+    summary = _prepare_summary(repo, capsys)
+    envelope = json.loads(
+        (
+            state / "snapshot-runner" / "snapshots" / str(summary["snapshot_id"]) / "snapshot.json"
+        ).read_bytes()
+    )
+
+    assert summary["status"] == "complete"
+    assert summary["evidence_gap"] is False
+    assert envelope["evidence_gaps"] == []
+    assert {entry["path"] for entry in envelope["data"]["file_context"]} == {
+        "docs/guide.md",
+        "src/app core/x.py",
+        "weird'quote/y.md",
+        "a+b/c.py",
+        "safe.py",
+    }
+
+
+def test_guard_never_stores_a_path_the_publisher_would_rewrite(tmp_path: Path) -> None:
+    repo = tmp_path / "target-repo"
+    repo.mkdir()
+    builder = collect.SnapshotBuilder("diff-audit", repo.name, repo)
+    for index, directory in enumerate(REWRITTEN_PATH_DIRECTORIES):
+        builder.gap("file_refused", f"{directory}/rule{index}.md", "synthetic gap")
+    builder.add_text(
+        "status_short",
+        "?? a/b!/c.py\n",
+        source="git-status",
+        scan_mode=security.ScanMode.PLAIN_TEXT,
+    )
+
+    envelope = builder.finish().as_envelope()
+
+    subjects = [gap["subject"] for gap in envelope["evidence_gaps"]]
+    assert all(_redacted_form(repo, subject).text == subject for subject in subjects)
+    assert (
+        security.sanitize_text(
+            "a/b!/c.py", scan_mode=security.ScanMode.PLAIN_TEXT, repository_root=repo
+        ).text
+        != "a/b!/c.py"
+    )
+
+
+def _envelope(state: Path, snapshot_id: str) -> dict[str, object]:
+    store = state / "snapshot-runner" / "snapshots" / snapshot_id / "snapshot.json"
+    return json.loads(store.read_bytes())
+
+
+def test_tracked_file_under_a_rewritten_path_stays_selectable_by_its_real_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The diff channel keeps the true path, so the refusal never costs targeted attribution."""
+    state = _private_state(tmp_path, monkeypatch)
+    repo = _initialize_repository(tmp_path)
+    rewritten = repo / "docs(x)"
+    rewritten.mkdir()
+    (rewritten / "notes.md").write_text("NOTE BODY\n", encoding="utf-8")
+    _git(repo, "add", "docs(x)/notes.md")
+    _git(
+        repo,
+        "-c",
+        "user.name=Runner Test",
+        "-c",
+        "user.email=runner-test@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--quiet",
+        "-m",
+        "ADD_REWRITTEN_PATH",
+    )
+    (rewritten / "notes.md").write_text("NOTE BODY EDITED\n", encoding="utf-8")
+
+    summary = _prepare_summary(repo, capsys)
+    snapshot_id = str(summary["snapshot_id"])
+    envelope = _envelope(state, snapshot_id)
+
+    assert summary["status"] == "partial"
+    assert envelope["data"]["file_context"] == []
+    assert [(gap["kind"], gap["reason"]) for gap in envelope["evidence_gaps"]] == [
+        ("file_refused", collect.REDACTION_REWRITTEN_PATH_REASON)
+    ]
+
+    exit_code, out, err = _read_output(repo, snapshot_id, capsys, "--path", "docs(x)/notes.md")
+    assert exit_code == 0 and err == ""
+    payload = json.loads(out)
+    assert payload["found"] is True
+    assert payload["evidence"]["diff_sections"]["unstaged_diff"]["matched"] == 1
+    assert "NOTE BODY EDITED" in json.dumps(payload["evidence"])
+
+
+def test_untracked_file_under_a_rewritten_path_reports_its_refusal_in_the_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An untracked file has no diff channel, so its refusal is surfaced, not silently dropped."""
+    state = _private_state(tmp_path, monkeypatch)
+    repo = _initialize_repository(tmp_path)
+    rewritten = repo / "docs(x)"
+    rewritten.mkdir()
+    (rewritten / "ghost.md").write_text("UNTRACKED_BODY\n", encoding="utf-8")
+
+    summary = _prepare_summary(repo, capsys)
+    snapshot_id = str(summary["snapshot_id"])
+    envelope = _envelope(state, snapshot_id)
+
+    assert "UNTRACKED_BODY" not in json.dumps(envelope)
+    gaps = envelope["evidence_gaps"]
+    assert [gap["kind"] for gap in gaps] == ["file_refused"]
+    expected_subject = security.sanitize_text(
+        "docs(x)/ghost.md", scan_mode=security.ScanMode.PLAIN_TEXT, repository_root=repo
+    ).text
+    assert expected_subject != "docs(x)/ghost.md"
+    assert gaps[0]["subject"] == expected_subject
+
+    exit_code, out, _err = _read_output(repo, snapshot_id, capsys)
+    assert exit_code == 0
+    index = json.loads(out)
+    assert index["evidence"]["evidence_gaps"] == gaps
+
+    exit_code, out, err = _read_output(repo, snapshot_id, capsys, "--path", "docs(x)/ghost.md")
+    assert exit_code == 0 and err == ""
+    assert json.loads(out)["found"] is False
+
+
+def test_rewritten_path_does_not_preempt_an_existing_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The guard runs after classification, so a CR/LF name still fails closed unsanitised-free."""
+    _private_state(tmp_path, monkeypatch)
+    repo = _initialize_repository(tmp_path)
+    rewritten = repo / "docs(x)"
+    rewritten.mkdir()
+    (rewritten / "we\nird.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    assert runner.main(["diff-audit", "--repo", os.fspath(repo), "--summary"], neutral=True) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "snapshot builder data changed during final sanitization" not in captured.err
+    assert captured.err.startswith("workflow_failed: SNAPSHOT_COLLECTION_FAILED: ")
+    assert "prepare refused" in captured.err
+
+
+def test_branch_review_refuses_only_the_context_of_a_rewritten_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state = _private_state(tmp_path, monkeypatch)
+    repo = _initialize_repository(tmp_path)
+    _git(repo, "checkout", "-qb", "feature/x")
+    rewritten = repo / "docs(x)"
+    rewritten.mkdir()
+    (rewritten / "notes.md").write_text("FEATURE BODY\n", encoding="utf-8")
+    (repo / "safe.py").write_text("VALUE = 7\n", encoding="utf-8")
+    _git(repo, "add", "docs(x)/notes.md", "safe.py")
+    _git(
+        repo,
+        "-c",
+        "user.name=Runner Test",
+        "-c",
+        "user.email=runner-test@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--quiet",
+        "-m",
+        "FEATURE_REWRITTEN_PATH",
+    )
+
+    assert (
+        runner.main(
+            ["branch-review", "--repo", os.fspath(repo), "target-main", "--summary"], neutral=True
+        )
+        == 0
+    )
+    summary = json.loads(capsys.readouterr().out)
+    snapshot_id = str(summary["snapshot_id"])
+    envelope = _envelope(state, snapshot_id)
+
+    assert summary["status"] == "partial"
+    assert [entry["path"] for entry in envelope["data"]["file_context"]] == ["safe.py"]
+    reasons = {gap["reason"] for gap in envelope["evidence_gaps"]}
+    assert collect.REDACTION_REWRITTEN_PATH_REASON in reasons
+    assert "FEATURE BODY" in envelope["data"]["diff"]

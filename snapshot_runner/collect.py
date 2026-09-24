@@ -75,6 +75,9 @@ SECURITY_NOTICE = (
 )
 
 
+REDACTION_REWRITTEN_PATH_REASON = "relative path is rewritten by redaction; file context refused"
+
+
 def _snapshot_security_error(error: SecurityError, fallback: str) -> RunnerError:
     if str(error) == YAML_CONTENT_REFUSED:
         return RunnerError(SNAPSHOT_COLLECTION_FAILED, YAML_CONTENT_REFUSED)
@@ -1049,6 +1052,29 @@ def _record_extensionless_gap(
     )
 
 
+def _redaction_stable_path(builder: SnapshotBuilder, relative: str) -> bool:
+    """Return whether ``relative`` survives the redactor that later re-checks it.
+
+    ``ABSOLUTE_PATH_RE`` anchors on any ``/`` that does not follow a word character, so an
+    ordinary in-repo directory ending in punctuation — ``docs/foo(bar)/baz.py``, a name ending
+    in a space or ``!``, a full-width bracket — is rewritten as if it were absolute, and the
+    credential rules rewrite token-shaped segments the same way. ``SnapshotBuilder.finish``
+    re-sanitises every stored field and refuses the whole snapshot when any value moves, so a
+    path the redactor touches must never become an identifying value.
+    """
+    try:
+        sanitized = sanitize_text(
+            relative,
+            scan_mode=ScanMode.PLAIN_TEXT,
+            repository_root=builder.repo_root,
+        )
+    except SecurityError as exc:
+        raise _snapshot_security_error(
+            exc, "unable to sanitize file context path; prepare refused"
+        ) from exc
+    return sanitized.text == relative
+
+
 def _append_context(
     builder: SnapshotBuilder,
     contexts: list[dict[str, object]],
@@ -1080,6 +1106,9 @@ def _append_context(
                 "versioned file context metadata is invalid",
             )
         scan_mode = ScanMode.PLAIN_TEXT
+    if not _redaction_stable_path(builder, relative):
+        builder.gap("file_refused", relative, REDACTION_REWRITTEN_PATH_REASON)
+        return
     try:
         sanitized = sanitize_text(
             content,

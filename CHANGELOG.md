@@ -5,6 +5,32 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+- Fixed: a repository-relative path that the redactor rewrites no longer destroys the whole
+  snapshot. `ABSOLUTE_PATH_RE` anchors on any `/` that does not follow a word character, so an
+  ordinary directory ending in punctuation or a space (`docs/foo(bar)/notes.md`,
+  `my dir (1)/leaf.py`, `notes!/x.py`, `文档（新）/a.py`, `a/b!/c/long.py`) was redacted as if it were
+  absolute; the credential rules do the same to a token-shaped segment. `_append_context` stored
+  such a path verbatim while `SnapshotBuilder.finish` re-sanitises every field and refuses on any
+  change, so one such file ended `prepare` with
+  `SNAPSHOT_COLLECTION_FAILED: snapshot builder data changed during final sanitization` and left no
+  artifact. `_append_context` now refuses only the affected file — a `file_refused` evidence gap,
+  after the existing classifier so every prior refusal still fires first and no unsanitised name
+  enters a gap subject — while every other file, diff and status keeps its evidence and the snapshot
+  publishes (`status: partial`, `evidence_gap: true`, `next_action: open_artifact`). The guard is
+  strictly additive: before it, any repository that reached this point produced no artifact at all,
+  so no collected body was lost to it. No field, schema, `summary_schema_version`,
+  `contract_version`, classifier version or canonical serialization changed, so artifacts published
+  by 2.3.x keep reading byte-for-byte.
+- Boundary of that fix, measured rather than assumed: a tracked file under a rewritten path stays
+  selectable, because the unified-diff channel keeps its real `a/…`/`b/…` headers and
+  `read --path docs(x)/notes.md` still reports `found: true` with its diff section; an *untracked*
+  file under such a path has no diff channel, so after this fix its refusal is visible through the
+  evidence index and `--summary` while `read --path` for it returns `found: false`. The
+  `--initial-publish-evidence` and `--generated-tree` routes are untouched by this change and still
+  fail closed on a rewritten path before the guard is reached — measured identical on 2.3.1 and this
+  code, e.g. `publication evidence requires a stable regular file` — because their records are read
+  back from disk by name, so a redacted name cannot round-trip.
+
 ## 2.3.1 - 2026-09-24
 
 - Fixed: absolute-path and `file://` redaction no longer consumes the backslash of a following
