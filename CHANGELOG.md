@@ -5,6 +5,54 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+- Fixed: a wide changeset of non-ASCII or quoted paths no longer prevents a `diff-audit` snapshot
+  from existing. Git is queried with `-c core.quotePath=true`, which writes one non-ASCII path byte
+  as four (`\346`), and `collect_diff_audit` asked for each workspace direction in a single
+  whole-tree `git diff … --` command whenever no path had to be routed away from the diff. One
+  command may return at most `MAX_GIT_OUTPUT_BYTES` (2 MiB) and that budget is charged *after* the
+  escaping, so a large enough path set crosses it on its own headers: on one scratch tree 8,000
+  staged `q"uote's/目录_*.py` files measured 1,672,000 raw bytes as 2,536,000 escaped, and
+  `_decode_unified_diff` refused the run with `truncated unified diff evidence was refused`,
+  publishing nothing. Both directions now always go through `_bounded_path_batches` — at most 256
+  paths and 32 KiB of path bytes per command, already shared with conversion attribute inspection —
+  and one `:(top,literal)` pathspec diff per batch, concatenated in the order Git reported the
+  paths, which is the route `diff-audit` already took whenever a path had been routed away. Scratch
+  trees that publish now, each holding its complete diff: 300 paths / 1,503,600 bytes, 4,000 paths
+  / 3,964,000 bytes, 8,000 paths / 2,864,000 bytes, and 3,015,000 staged together with 3,015,000
+  unstaged.
+- A batch whose escaped bodies still overrun the per-command bound is halved and retried in place,
+  so the command count follows the diff and not only the path count: 257 CJK paths carrying
+  2,828,653 escaped bytes are admitted as three bounded commands after one 256-path command
+  overruns. Division stops at a single path, where halving cannot help and the pre-existing refusal
+  still applies, and it stops once the collected diff has grown past `SNAPSHOT_CONTENT_BUDGET`,
+  since the artifact could not carry the rest. On a 15,448,000-byte tree that second stop holds
+  peak resident memory at 44 MiB rather than 165 MiB and returns in 0.4 s rather than 3.7 s, with
+  the same `truncated unified diff evidence was refused` diagnostic 2.3.2 produced.
+- No evidence content, schema, `summary_schema_version`, `contract_version`, classifier version or
+  canonical serialization changed, and batching is not a re-rendering: for a diff that fits, the
+  batches only re-partition the same path set, so their concatenation is the byte stream one
+  whole-tree command would have produced. Measured with a scratch A/B harness against the
+  pre-change code — `diff-audit` artifacts identical in snapshot ID and `snapshot.json` bytes for
+  seven trees (including a 303-path repository spanning two batches, 480,034 B) and `repo-status`
+  identical for all eight (empty, unborn, clean, typechange, gitlink, backslash and tab in name,
+  quote-heavy, conflicted); the conflicted tree refused `diff-audit` identically on both sides for
+  a pre-existing sanitization reason. `tests/test_workspace_diff_batching.py` asserts the same
+  equality from the artifact side: `staged_diff` and `unstaged_diff` each equal the single whole-tree
+  `git diff` their own reference command produces. Other artifact fields are not compared by that
+  test. `branch-review` still collects its range diff in one command and `git status --short` still
+  reports an over-bound command as a `git_output_limit` evidence gap rather than a refusal; neither
+  route changed, and wide changesets now simply issue more small Git commands.
+- Ceiling of this fix, stated because collecting large diffs at all makes it visible: a workspace
+  diff that does not fit alongside the rest of the evidence is still cut at a raw byte offset by
+  `add_text`, and a cut landing inside a diff header pair makes `finish()` refuse the snapshot with
+  `snapshot builder invariant failed closed` (one 20,000-path tree whose staged diff measured
+  7,160,000 bytes — below `SNAPSHOT_CONTENT_BUDGET` on its own — fails this way because of the
+  evidence collected around it). That truncation behaviour belongs to the budget mechanism, not to
+  batching: the same `add_text`-then-`finish()` sequence refuses identically on 2.3.2, where such
+  a repository never reached it because its whole-tree command was refused for truncating first.
+  Either way no artifact was published before or is published now. Aligning that cut to a complete
+  diff entry is separate work.
+
 ## 2.3.2 - 2026-09-25
 
 - Fixed: a repository-relative path that the redactor rewrites no longer destroys the whole

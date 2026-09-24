@@ -1496,6 +1496,7 @@ def _refuse_yaml_paths(paths: list[str]) -> None:
 
 
 def _bounded_path_batches(paths: list[str]) -> list[tuple[str, ...]]:
+    """Split ``paths`` into duplicate-free runs of at most 256 paths and 32 KiB each."""
     batches: list[tuple[str, ...]] = []
     current: list[str] = []
     current_bytes = 0
@@ -2346,6 +2347,46 @@ def _workspace_changed_paths(
     return staged, unstaged, untracked
 
 
+def _batch_unified_diff(
+    git: GitRunner,
+    builder: SnapshotBuilder,
+    subject: str,
+    batch: tuple[str, ...],
+    *,
+    cached: bool,
+    divisible: bool,
+) -> str:
+    cached_argument = ("--cached",) if cached else ()
+    result = git.run(
+        (
+            "-c",
+            "core.quotePath=true",
+            "diff",
+            *cached_argument,
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--",
+            *(f":(top,literal){path}" for path in batch),
+        )
+    )
+    if result.truncated and divisible and len(batch) > 1:
+        # Only escaped diff bodies can push an in-limits batch past the per-command
+        # bound; halving keeps every path in order instead of refusing the whole diff.
+        middle = len(batch) // 2
+        return "".join(
+            (
+                _batch_unified_diff(
+                    git, builder, subject, batch[:middle], cached=cached, divisible=True
+                ),
+                _batch_unified_diff(
+                    git, builder, subject, batch[middle:], cached=cached, divisible=True
+                ),
+            )
+        )
+    return _decode_unified_diff(result, subject, builder)
+
+
 def _workspace_unified_diff(
     git: GitRunner,
     builder: SnapshotBuilder,
@@ -2354,23 +2395,23 @@ def _workspace_unified_diff(
     *,
     cached: bool,
 ) -> str:
+    # A per-command bound limits one batch, not the snapshot: keep dividing only while the
+    # artifact can still carry what was collected, so an over-budget tree is refused at the
+    # command bound instead of accumulating a diff that no longer fits.
+    budget = max(0, SNAPSHOT_CONTENT_BUDGET - builder.content_bytes)
     chunks: list[str] = []
+    collected = 0
     for batch in _bounded_path_batches(paths):
-        cached_argument = ("--cached",) if cached else ()
-        result = git.run(
-            (
-                "-c",
-                "core.quotePath=true",
-                "diff",
-                *cached_argument,
-                "--no-renames",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--",
-                *(f":(top,literal){path}" for path in batch),
-            )
+        chunk = _batch_unified_diff(
+            git,
+            builder,
+            subject,
+            batch,
+            cached=cached,
+            divisible=collected < budget,
         )
-        chunks.append(_decode_unified_diff(result, subject, builder))
+        chunks.append(chunk)
+        collected += len(chunk.encode("utf-8"))
     return "".join(chunks)
 
 
@@ -3216,58 +3257,20 @@ def collect_diff_audit(
     status_text = _decode_git(
         git.run(("status", "--short", "--untracked-files=all")), "git-status", builder
     )
-    if (
-        omitted_conversion_paths
-        or extensionless.fallback_paths
-        or images.paths
-        or unsupported_diff_paths
-    ):
-        staged = _workspace_unified_diff(
-            git,
-            builder,
-            "staged-diff",
-            staged_diff_paths,
-            cached=True,
-        )
-        unstaged = _workspace_unified_diff(
-            git,
-            builder,
-            "unstaged-diff",
-            unstaged_diff_paths,
-            cached=False,
-        )
-    else:
-        staged = _decode_unified_diff(
-            git.run(
-                (
-                    "-c",
-                    "core.quotePath=true",
-                    "diff",
-                    "--cached",
-                    "--no-renames",
-                    "--no-ext-diff",
-                    "--no-textconv",
-                    "--",
-                )
-            ),
-            "staged-diff",
-            builder,
-        )
-        unstaged = _decode_unified_diff(
-            git.run(
-                (
-                    "-c",
-                    "core.quotePath=true",
-                    "diff",
-                    "--no-renames",
-                    "--no-ext-diff",
-                    "--no-textconv",
-                    "--",
-                )
-            ),
-            "unstaged-diff",
-            builder,
-        )
+    staged = _workspace_unified_diff(
+        git,
+        builder,
+        "staged-diff",
+        staged_diff_paths,
+        cached=True,
+    )
+    unstaged = _workspace_unified_diff(
+        git,
+        builder,
+        "unstaged-diff",
+        unstaged_diff_paths,
+        cached=False,
+    )
     staged_changes = _validate_workspace_diff_paths(
         staged,
         staged_diff_paths,
