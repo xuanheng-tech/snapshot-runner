@@ -56,12 +56,21 @@ PEM_PRIVATE_KEY_BOUNDARY_RE = re.compile(
     r"EC[ \t]+PRIVATE[ \t]+KEY|OPENSSH[ \t]+PRIVATE[ \t]+KEY)[ \t]*-{5}",
     re.IGNORECASE,
 )
-FILE_URI_RE = re.compile(r"(?i)\bfile://(?:localhost)?/[^\s\x00\"'<>]+")
+FILE_URI_RE = re.compile(r"(?i)\bfile://(?:localhost)?/(?:[^\s\x00\"'<>\\]|\\(?![\"']))+")
 AUTH_HEADER_RE = re.compile(
     r"(?i)(?P<prefix>\b(?:proxy-)?authorization\s*[:=]\s*)(?P<value>[^\r\n]*)"
 )
 BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
-ABSOLUTE_PATH_RE = re.compile(r"(?<![\w+.:/~-])/(?!/)(?:[^\s\x00\"'<>|]+/)*[^\s\x00\"'<>|,;:)]*")
+# A match may consume a backslash only when it is not the escape of a following
+# quote: swallowing the backslash of \" would downgrade the escaped quote to a
+# bare one and corrupt the surrounding JSON or quoted region of captured text.
+# Paths therefore end at an escape sequence exactly as they end at a quote,
+# while interior backslashes stay fully redacted.
+ABSOLUTE_PATH_RE = re.compile(
+    r"(?<![\w+.:/~-])/(?!/)"
+    r"(?:(?:[^\s\x00\"'<>|\\]|\\(?![\"']))+/)*"
+    r"(?:[^\s\x00\"'<>|,;:)\\]|\\(?![\"']))*"
+)
 
 KNOWN_TOKEN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("OPENAI_TOKEN", re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{16,}\b")),
@@ -338,19 +347,23 @@ def _redact_absolute_paths(
 ) -> str:
     redacted, file_uri_count = FILE_URI_RE.subn("[REDACTED_FILE_URI]", text)
     counts["FILE_URI"] += file_uri_count
-    replacements: list[tuple[str, str]] = []
+    # A tuple is (original, replacement, is_security_replacement): removing the
+    # repository's own root prefix is deterministic relativization of in-repo
+    # paths, not a security disclosure event, and must not inflate the count.
+    replacements: list[tuple[str, str, bool]] = []
     if repository_root is not None:
         repository = os.fspath(repository_root)
-        replacements.append((repository + os.sep, ""))
-        replacements.append((repository, "."))
+        replacements.append((repository + os.sep, "", False))
+        replacements.append((repository, ".", False))
     for path in explicit_paths:
-        replacements.append((os.fspath(path), _safe_basename(os.fspath(path))))
+        replacements.append((os.fspath(path), _safe_basename(os.fspath(path)), True))
     replacements.sort(key=lambda item: len(item[0]), reverse=True)
-    for original, replacement in replacements:
+    for original, replacement, is_security_replacement in replacements:
         if original and original in redacted:
             occurrences = redacted.count(original)
             redacted = redacted.replace(original, replacement)
-            counts["ABSOLUTE_PATH"] += occurrences
+            if is_security_replacement:
+                counts["ABSOLUTE_PATH"] += occurrences
 
     def generic_path(match: re.Match[str]) -> str:
         raw = match.group(0)

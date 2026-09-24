@@ -965,3 +965,42 @@ def test_repo_status_read_targeted_reaches_the_collected_change_evidence(
     index = json.loads(out)
     assert index["found"] is True
     assert "status_short" in json.dumps(index["evidence"])
+
+
+def test_legacy_corrupted_body_stays_readable_and_new_capture_keeps_json_parseable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state = _private_state(tmp_path, monkeypatch)
+    repo = _initialize_repository(tmp_path)
+    legacy = '{"a": "b"<ABS_PATH:_:deadbeef1234>"c": "d"}\n'
+    (repo / "legacy.json").write_text(legacy, encoding="utf-8")
+    (repo / "latest.json").write_text(
+        '{"note": "path is \\"/etc/hosts\\" and uri \\"file:///srv/x\\" end"}\n',
+        encoding="utf-8",
+    )
+    _git(repo, "add", "legacy.json", "latest.json")
+
+    summary = _prepare_summary(repo, capsys)
+    snapshot_id = str(summary["snapshot_id"])
+    envelope = json.loads(
+        (state / "snapshot-runner" / "snapshots" / snapshot_id / "snapshot.json").read_bytes()
+    )
+    contexts = {entry["path"]: entry["content"] for entry in envelope["data"]["file_context"]}
+    # Bodies are opaque transported data: a legacy malformed artifact never blocks capture
+    # or retrieval, and the new sanitizer cannot strip a quote escape from fresh bodies.
+    assert contexts["legacy.json"] == legacy
+    json.loads(contexts["latest.json"])
+    assert "/etc/hosts" not in contexts["latest.json"]
+    assert "file:///srv" not in contexts["latest.json"]
+
+    exit_code, out, err = _read_output(repo, snapshot_id, capsys, "--path", "legacy.json")
+    assert exit_code == 0 and err == ""
+    payload = json.loads(out)
+    assert payload["found"] is True
+    assert "legacy.json" in json.dumps(payload)
+
+    exit_code, out, err = _read_output(repo, snapshot_id, capsys, "--field", "file_context")
+    assert exit_code == 0 and err == ""
+    assert json.loads(out)["evidence"]["value"] == envelope["data"]["file_context"]

@@ -5,6 +5,19 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+- Fixed: absolute-path and `file://` redaction no longer consumes the backslash of a following
+  quote escape, which previously downgraded an escaped quote to a bare one and corrupted captured
+  nested JSON bodies (stored `.json`/`.jsonl` evidence that no longer parses). A path match may
+  still cross interior backslashes — they stay fully redacted — but ends at an escape sequence
+  exactly as it ends at a bare quote; the `<ABS_PATH:…>` / `[REDACTED_FILE_URI]` forms, the
+  credential gates and every refusal gate are otherwise unchanged.
+- Fixed: `redactions["ABSOLUTE_PATH"]` counts only genuine replacement events (generic-path
+  markers and explicit out-of-repository path substitutions). Deterministic removal of the
+  repository's own root prefix is relativization of in-repo paths and no longer inflates the
+  security-redaction count, so the counter reconciles with the placeholders actually emitted.
+- Preserve: previously published snapshots are unchanged and remain readable; a body captured
+  with the old escaping behaviour is transported verbatim by `read` index/field/path selectors.
+
 ## 2.3.0 - 2026-09-23
 
 - Changed: `summary.next_action` is now derived from the evidence actually available instead of

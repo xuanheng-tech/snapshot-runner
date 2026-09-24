@@ -4304,6 +4304,64 @@ def test_recursive_sanitizer_enforces_depth_elements_and_key_collisions() -> Non
         security.sanitize_json_value(colliding, scan_mode=security.ScanMode.PLAIN_TEXT)
 
 
+def test_absolute_path_redaction_preserves_json_string_boundaries() -> None:
+    body = '{"note": "path is \\"/etc/hosts\\" and uri \\"file:///srv/x\\" end"}'
+    sanitized = security.sanitize_text(
+        body,
+        scan_mode=security.ScanMode.PLAIN_TEXT,
+        repository_root=Path("/home/dev/project"),
+    )
+    json.loads(sanitized.text)
+    assert "/etc/hosts" not in sanitized.text
+    assert "file:///srv" not in sanitized.text
+    assert "<ABS_PATH:" in sanitized.text
+    assert sanitized.redactions["ABSOLUTE_PATH"] == sanitized.text.count("<ABS_PATH:")
+
+
+def test_interior_backslash_tokens_stay_fully_redacted() -> None:
+    sanitized = security.sanitize_text(
+        "db /home/dev/private\\weird/cache/app.db and uri file:///srv/a\\seg/x.log end",
+        scan_mode=security.ScanMode.PLAIN_TEXT,
+        repository_root=Path("/home/dev/project"),
+    )
+    for leaked in ("private", "weird", "/cache/", "seg", "x.log", "/home/dev/private"):
+        assert leaked not in sanitized.text, sanitized.text
+    assert "ABS_PATH:app.db" in sanitized.text
+    assert "[REDACTED_FILE_URI]" in sanitized.text
+    escaped = security.sanitize_text(
+        '{"k": "see \\"/var/db/app\\\\" end"}',
+        scan_mode=security.ScanMode.PLAIN_TEXT,
+        repository_root=None,
+    )
+    json.loads(escaped.text)
+    assert "<ABS_PATH:" in escaped.text
+    assert "/var/db" not in escaped.text
+
+
+def test_redaction_counts_record_security_replacements_only() -> None:
+    root = Path("/home/dev/project")
+    relativized = security.sanitize_text(
+        "run python /home/dev/project/main.py and /home/dev/project/tools/run.sh now",
+        scan_mode=security.ScanMode.PLAIN_TEXT,
+        repository_root=root,
+    )
+    assert "ABSOLUTE_PATH" not in relativized.redactions
+    assert "main.py" in relativized.text and "/home/dev" not in relativized.text
+    genuine = security.sanitize_text(
+        "cfg /etc/passwd here",
+        scan_mode=security.ScanMode.PLAIN_TEXT,
+        repository_root=root,
+    )
+    assert genuine.redactions["ABSOLUTE_PATH"] == genuine.text.count("<ABS_PATH:") == 1
+    explicit = security.sanitize_text(
+        "see /home/dev/elsewhere/secret.txt now",
+        scan_mode=security.ScanMode.PLAIN_TEXT,
+        explicit_paths=(Path("/home/dev/elsewhere/secret.txt"),),
+    )
+    assert explicit.redactions["ABSOLUTE_PATH"] == 1
+    assert "/home/dev/elsewhere/" not in explicit.text
+
+
 def _extensionless_diff_target(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
