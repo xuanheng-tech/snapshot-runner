@@ -29,7 +29,6 @@ READ_TARGET_REPOSITORY_REQUIRED_ERROR = "explicit --repo is required for read"
 SNAPSHOT_NOT_FOUND_ERROR = "snapshot not found in the private snapshot store"
 EVIDENCE_FIELD_MISSING_ERROR = "requested evidence field is not present in the snapshot task data"
 BRANCH_REVIEW_UNBORN_ERROR = "branch-review requires a target branch with at least one commit"
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _safe_exception_type(error: BaseException) -> str:
@@ -67,7 +66,7 @@ def _installed_runner_root() -> Path | None:
 def _validated_runner_worktree_path() -> Path:
     installed_root = _installed_runner_root()
     return security.canonical_owned_directory(
-        installed_root if installed_root is not None else REPOSITORY_ROOT,
+        installed_root if installed_root is not None else model_module.REPOSITORY_ROOT,
         "Runner runtime root",
         git_module.RUNNER_REPOSITORY_INVALID_ERROR,
     )

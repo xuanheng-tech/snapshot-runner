@@ -31,6 +31,7 @@ from .model import (
     MAX_PREVIEW_BYTES,
     MAX_SNAPSHOT_BYTES,
     PRODUCER_SECURITY_EPOCH,
+    REPOSITORY_ROOT,
     SNAPSHOT_FILE_NAMES,
     SNAPSHOT_ID_RE,
     SNAPSHOT_META_SCHEMA_VERSION,
@@ -55,7 +56,6 @@ from .security import (
     validate_no_symlink_ancestors as _validate_no_symlink_ancestors,
 )
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _ACTIVE_REPOSITORY_ROOT: contextvars.ContextVar[Path | None] = contextvars.ContextVar(
     "_ACTIVE_REPOSITORY_ROOT", default=None
 )

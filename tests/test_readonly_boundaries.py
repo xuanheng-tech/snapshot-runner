@@ -2171,7 +2171,7 @@ def test_target_and_runner_worktrees_must_not_contain_each_other(
     container.mkdir()
     runner_repo.mkdir()
     child.mkdir()
-    monkeypatch.setattr(application, "REPOSITORY_ROOT", runner_repo)
+    monkeypatch.setattr(model, "REPOSITORY_ROOT", runner_repo)
     for candidate in (container, runner_repo, child):
         with pytest.raises(runner.RunnerError, match=f"^{git.TARGET_REPOSITORY_INVALID_ERROR}$"):
             application._validate_target_repository_path(os.fspath(candidate))
@@ -2289,7 +2289,7 @@ def test_state_git_admin_overlap_stops_after_only_fixed_path_validation(
         observed.append((self.repo_root, arguments))
         return original_run(self, arguments, maximum=maximum)
 
-    monkeypatch.setattr(application, "REPOSITORY_ROOT", runner_repo)
+    monkeypatch.setattr(model, "REPOSITORY_ROOT", runner_repo)
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state))
     monkeypatch.setattr(git.GitRunner, "run", recording_run)
     monkeypatch.setattr(git, "_find_executable", lambda _name: "/usr/bin/git")
@@ -2339,7 +2339,7 @@ def test_repo_status_snapshot_is_isolated_from_runner_repository(
     )
     (runner_repo / "RUNNER_ONLY_CANARY.txt").write_text("runner only\n", encoding="utf-8")
     (target_repo / "TARGET_ONLY_CANARY.txt").write_text("target only\n", encoding="utf-8")
-    monkeypatch.setattr(application, "REPOSITORY_ROOT", runner_repo)
+    monkeypatch.setattr(model, "REPOSITORY_ROOT", runner_repo)
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state))
     monkeypatch.chdir(runner_repo)
 
@@ -2390,7 +2390,7 @@ def test_shared_common_dir_repo_status_contains_only_target_worktree_evidence(
     state = tmp_path / "isolated-state"
     state.mkdir(mode=0o700)
     state.chmod(0o700)
-    monkeypatch.setattr(application, "REPOSITORY_ROOT", runner_repo)
+    monkeypatch.setattr(model, "REPOSITORY_ROOT", runner_repo)
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state))
 
     validated = _validated_test_repository(target_repo)
@@ -2456,7 +2456,7 @@ def test_shared_common_dir_branch_review_rejects_runner_current_ref(
     state = tmp_path / "isolated-state"
     state.mkdir(mode=0o700)
     state.chmod(0o700)
-    monkeypatch.setattr(application, "REPOSITORY_ROOT", runner_repo)
+    monkeypatch.setattr(model, "REPOSITORY_ROOT", runner_repo)
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state))
 
     result = runner.main(
@@ -3164,7 +3164,7 @@ def test_runner_shallow_repository_refuses_every_target_prepare(
     _initialize_isolation_repo(runner_repo, "runner", "RUNNER")
     _initialize_isolation_repo(target_repo, "target", "TARGET")
     (runner_repo / ".git" / "shallow").write_bytes(b"")
-    monkeypatch.setattr(application, "REPOSITORY_ROOT", runner_repo)
+    monkeypatch.setattr(model, "REPOSITORY_ROOT", runner_repo)
 
     _assert_capability_prepare_rejected_before_content(
         monkeypatch,

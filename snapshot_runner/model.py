@@ -10,6 +10,8 @@ from pathlib import Path
 from .security import SCAN_CLASSIFIER_VERSION
 
 MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024
+# The runner's own source tree, resolved once so that every reader shares one binding.
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 MAX_FILE_BYTES = 256 * 1024
 UV_LOCK_MAX_FILE_BYTES = 4 * 1024 * 1024
 MAX_TEST_LOG_BYTES = 2 * 1024 * 1024
