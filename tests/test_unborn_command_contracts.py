@@ -352,8 +352,8 @@ def test_provider_named_alias_entrypoints_are_gone() -> None:
     """2.0.0 removed the four codex-* console scripts and their entrypoint functions."""
     for name in REMOVED_ALIAS_ENTRYPOINTS:
         assert not hasattr(runner, name), name
-    source = (PROJECT_ROOT / "snapshot_runner" / "cli.py").read_text(encoding="utf-8")
-    assert "codex" not in source.lower()
+    for path in sorted((PROJECT_ROOT / "snapshot_runner").rglob("*.py")):
+        assert "codex" not in path.read_text(encoding="utf-8").lower(), path
 
 
 @pytest.mark.parametrize("task", PUBLIC_SUBCOMMANDS)

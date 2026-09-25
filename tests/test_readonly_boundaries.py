@@ -381,10 +381,15 @@ def test_prepare_only_analyze_refuses_before_prepare_boundaries(
 
 
 def test_automatic_analysis_production_implementation_is_absent() -> None:
-    source = (PROJECT_ROOT / "snapshot_runner/cli.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
+    # Whole package, not one entry module: the workflow layer this guard exists to keep out
+    # now lives in application.py, which a cli.py-only scan would never read.
+    trees = [
+        ast.parse(path.read_text(encoding="utf-8"))
+        for path in sorted((PROJECT_ROOT / "snapshot_runner").rglob("*.py"))
+    ]
     definitions = {
         node.name
+        for tree in trees
         for node in ast.walk(tree)
         if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
     }
@@ -401,15 +406,20 @@ def test_automatic_analysis_production_implementation_is_absent() -> None:
         "validate_preflight",
     }
     assert definitions.isdisjoint(removed_symbols)
-    imported_roots = {
-        alias.name.split(".", 1)[0]
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.Import, ast.ImportFrom))
-        for alias in node.names
-    }
-    assert imported_roots.isdisjoint(
-        {"http", "pwd", "queue", "select", "selectors", "socket", "threading"}
-    )
+    banned_roots = {"http", "pwd", "queue", "select", "socket", "threading"}
+    for path, tree in zip(
+        sorted((PROJECT_ROOT / "snapshot_runner").rglob("*.py")), trees, strict=True
+    ):
+        imported_roots = {
+            alias.name.split(".", 1)[0]
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Import, ast.ImportFrom))
+            for alias in node.names
+        }
+        assert imported_roots.isdisjoint(banned_roots), path
+        # selectors is the bounded Git pipe reader and belongs to exactly one module.
+        if "selectors" in imported_roots:
+            assert path.name == "git.py", path
 
 
 @pytest.mark.parametrize(
@@ -1101,21 +1111,11 @@ def test_state_home_requires_an_absolute_existing_real_directory(
 
 
 def test_every_subprocess_is_shell_free() -> None:
-    source = "\n".join(
-        (PROJECT_ROOT / "snapshot_runner" / name).read_text(encoding="utf-8")
-        for name in (
-            "artifact.py",
-            "cli.py",
-            "collect/__init__.py",
-            "collect/builder.py",
-            "collect/readers.py",
-            "collect/security_gate.py",
-            "collect/tasks.py",
-            "collect/workspace.py",
-            "git.py",
-            "security.py",
-        )
-    )
+    # Every module of the package, discovered rather than listed: a hand-maintained list
+    # silently stops covering code the day a module is split.
+    files = sorted((PROJECT_ROOT / "snapshot_runner").rglob("*.py"))
+    assert files, "the package scan found no modules at all"
+    source = "\n".join(path.read_text(encoding="utf-8") for path in files)
     assert "shell=True" not in source
     assert "subprocess.run(" not in source
     assert "os.system(" not in source
