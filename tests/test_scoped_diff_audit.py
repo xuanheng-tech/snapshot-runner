@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from snapshot_runner import cli, isolation, security
+from snapshot_runner import application, cli, isolation, security
 
 
 def _git(repo: Path, *arguments: str) -> str:
@@ -134,7 +134,7 @@ def test_unexpected_exception_cleans_temporary_clone(
     def fail(*_args: object, **_kwargs: object) -> object:
         raise RuntimeError("synthetic unexpected failure")
 
-    monkeypatch.setattr(cli, "_prepare_snapshot", fail)
+    monkeypatch.setattr(application, "_prepare_snapshot", fail)
     result = cli.main(
         [
             "prepare",

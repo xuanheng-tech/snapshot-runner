@@ -22,15 +22,21 @@ import pytest  # noqa: E402 - isolation assertions must precede non-stdlib impor
 
 import snapshot_runner as runner_namespace  # noqa: E402
 from snapshot_runner import (  # noqa: E402
+    application,
+    collect,
+    git,
+    legacy_v2,
+    model,
+    security,
+)
+from snapshot_runner import (  # noqa: E402
     artifact as artifact_module,
 )
 from snapshot_runner import (  # noqa: E402
     cli as runner,
 )
 from snapshot_runner import (  # noqa: E402
-    collect,
-    git,
-    security,
+    store as store_module,
 )
 
 
@@ -180,12 +186,14 @@ def private_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 
 def _validated_test_repository(repo: Path) -> git.ValidatedTargetRepository:
-    target_path, target_name, runner_path = runner._validate_target_repository_path(os.fspath(repo))
+    target_path, target_name, runner_path = application._validate_target_repository_path(
+        os.fspath(repo)
+    )
     return git._validate_target_repository_context(
         target_path,
         target_name,
         runner_path,
-        artifact_module._state_home(target_path),
+        store_module._state_home(target_path),
         "/usr/bin/git",
         "diff-audit",
     )
@@ -237,9 +245,9 @@ def prepared_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     private_state: Path,
     target_repository: git.ValidatedTargetRepository,
-) -> artifact_module.SnapshotArtifact:
+) -> model.SnapshotArtifact:
     monkeypatch.setattr(collect, "collect_repo_status", lambda *_args, **_kwargs: _safe_snapshot())
-    return runner._prepare_snapshot("repo-status", None, target_repository, "/usr/bin/git")
+    return application._prepare_snapshot("repo-status", None, target_repository, "/usr/bin/git")
 
 
 def test_python_environment_and_project_modules_are_isolated() -> None:
@@ -345,10 +353,10 @@ def test_prepare_only_analyze_refuses_before_prepare_boundaries(
 
     for module, name in (
         (runner, "build_argument_parser"),
-        (artifact_module, "_state_home"),
-        (artifact_module, "_load_snapshot"),
+        (store_module, "_state_home"),
+        (store_module, "_load_snapshot"),
         (git, "_find_executable"),
-        (runner, "_prepare_snapshot"),
+        (application, "_prepare_snapshot"),
     ):
         monkeypatch.setattr(module, name, fail(name))
     monkeypatch.setattr(runner.os, "umask", fail("umask"))
@@ -444,7 +452,7 @@ def test_snapshot_directory_must_be_inside_validated_store_before_meta_read(
     outside.mkdir(mode=0o700)
     outside.chmod(0o700)
     with pytest.raises(runner.RunnerError, match="outside the validated snapshot store"):
-        artifact_module._load_snapshot_directory("c" * 64, outside)
+        store_module._load_snapshot_directory("c" * 64, outside)
 
 
 def test_current_meta_epoch_does_not_bypass_noncurrent_snapshot_envelope(
@@ -480,7 +488,7 @@ def test_current_meta_epoch_does_not_bypass_noncurrent_snapshot_envelope(
         path.write_bytes(payload)
         path.chmod(0o600)
     with pytest.raises(runner.RunnerError, match="snapshot envelope schema is invalid"):
-        artifact_module._load_snapshot(snapshot_id)
+        store_module._load_snapshot(snapshot_id)
 
 
 CLI_MARKER = "SYNTHETIC_CLI_MARKER"
@@ -569,12 +577,12 @@ def test_top_level_unexpected_exception_reports_code_and_type_without_payload(
     def fail(_arguments: argparse.Namespace) -> int:
         raise OSError(CLI_MARKER)
 
-    monkeypatch.setattr(runner, "_run_prepare", fail)
+    monkeypatch.setattr(application, "_run_prepare", fail)
     assert runner.main(["prepare", "repo-status", "--repo", os.fspath(target_repository.path)]) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == (
-        f"workflow_failed: {runner.RUNNER_UNEXPECTED_ERROR}: "
+        f"workflow_failed: {application.RUNNER_UNEXPECTED_ERROR}: "
         "unexpected OSError during prepare workflow\n"
     )
     assert CLI_MARKER not in captured.err
@@ -619,7 +627,7 @@ def test_top_level_keyboard_interrupt_semantics_are_not_suppressed(
     def fail(_arguments: argparse.Namespace) -> int:
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(runner, "_run_prepare", fail)
+    monkeypatch.setattr(application, "_run_prepare", fail)
     assert (
         runner.main(["prepare", "repo-status", "--repo", os.fspath(target_repository.path)])
         == 128 + signal.SIGINT
@@ -630,23 +638,21 @@ def test_top_level_keyboard_interrupt_semantics_are_not_suppressed(
 
 
 def test_prepare_publishes_content_addressed_private_snapshot(
-    prepared_snapshot: artifact_module.SnapshotArtifact,
+    prepared_snapshot: model.SnapshotArtifact,
 ) -> None:
     artifact = prepared_snapshot
     assert artifact.snapshot_id == hashlib.sha256(artifact.snapshot_bytes).hexdigest()
-    assert {
-        path.name for path in artifact.directory.iterdir()
-    } == artifact_module.SNAPSHOT_FILE_NAMES
+    assert {path.name for path in artifact.directory.iterdir()} == model.SNAPSHOT_FILE_NAMES
     assert not list(artifact.directory.parent.glob(".staging-*"))
     for path in (artifact.directory, artifact.directory.parent):
         assert stat.S_IMODE(path.lstat().st_mode) == 0o700
-    for name in artifact_module.SNAPSHOT_FILE_NAMES:
+    for name in model.SNAPSHOT_FILE_NAMES:
         assert stat.S_IMODE((artifact.directory / name).lstat().st_mode) == 0o600
     assert (artifact.directory / "snapshot.json").read_bytes() == artifact.snapshot_bytes
     envelope = json.loads(artifact.snapshot_bytes)
     meta = json.loads((artifact.directory / "meta.json").read_bytes())
     assert envelope["schema_version"] == collect.SNAPSHOT_SCHEMA_VERSION == 2
-    assert meta["schema_version"] == artifact_module.SNAPSHOT_META_SCHEMA_VERSION == 2
+    assert meta["schema_version"] == model.SNAPSHOT_META_SCHEMA_VERSION == 2
     assert envelope["producer_security_epoch"] == collect.PRODUCER_SECURITY_EPOCH == 4
     assert meta["producer_security_epoch"] == collect.PRODUCER_SECURITY_EPOCH
     preview = (artifact.directory / "preview.txt").read_text(encoding="utf-8")
@@ -659,10 +665,10 @@ def test_prepare_publishes_content_addressed_private_snapshot(
 
 
 def test_prepare_reuses_identical_existing_snapshot(
-    prepared_snapshot: artifact_module.SnapshotArtifact,
+    prepared_snapshot: model.SnapshotArtifact,
     target_repository: git.ValidatedTargetRepository,
 ) -> None:
-    repeated = runner._prepare_snapshot("repo-status", None, target_repository, "/usr/bin/git")
+    repeated = application._prepare_snapshot("repo-status", None, target_repository, "/usr/bin/git")
     assert repeated.snapshot_id == prepared_snapshot.snapshot_id
     assert repeated.snapshot_bytes == prepared_snapshot.snapshot_bytes
     assert repeated.directory == prepared_snapshot.directory
@@ -675,18 +681,18 @@ def test_prepare_revalidates_complete_staging_before_publish(
     target_repository: git.ValidatedTargetRepository,
 ) -> None:
     monkeypatch.setattr(collect, "collect_repo_status", lambda *_args, **_kwargs: _safe_snapshot())
-    original_atomic_write = artifact_module._atomic_write
+    original_atomic_write = store_module._atomic_write
 
     def corrupt_preview_after_write(path: Path, content: bytes, maximum: int) -> None:
         original_atomic_write(path, content, maximum)
         if path.name == "preview.txt":
             path.write_bytes(path.read_bytes() + b"corrupted-after-validation\n")
 
-    monkeypatch.setattr(artifact_module, "_atomic_write", corrupt_preview_after_write)
+    monkeypatch.setattr(store_module, "_atomic_write", corrupt_preview_after_write)
     with pytest.raises(runner.RunnerError, match="hash, identity, or size validation failed"):
-        runner._prepare_snapshot("repo-status", None, target_repository, "/usr/bin/git")
+        application._prepare_snapshot("repo-status", None, target_repository, "/usr/bin/git")
 
-    root = artifact_module.snapshot_output_root()
+    root = store_module.snapshot_output_root()
     assert root.is_dir()
     assert list(root.iterdir()) == []
 
@@ -698,10 +704,10 @@ def test_prepare_validates_before_rename_and_does_not_reload_after_publish(
 ) -> None:
     monkeypatch.setattr(collect, "collect_repo_status", lambda *_args, **_kwargs: _safe_snapshot())
     events: list[tuple[str, Path]] = []
-    original_validate = artifact_module._load_snapshot_directory
+    original_validate = store_module._load_snapshot_directory
     original_rename = runner.os.rename
 
-    def record_validation(snapshot_id: str, directory: Path) -> artifact_module.SnapshotArtifact:
+    def record_validation(snapshot_id: str, directory: Path) -> model.SnapshotArtifact:
         events.append(("validate", directory))
         return original_validate(snapshot_id, directory)
 
@@ -709,20 +715,20 @@ def test_prepare_validates_before_rename_and_does_not_reload_after_publish(
         events.append(("rename", source))
         original_rename(source, destination)
 
-    monkeypatch.setattr(artifact_module, "_load_snapshot_directory", record_validation)
+    monkeypatch.setattr(store_module, "_load_snapshot_directory", record_validation)
     monkeypatch.setattr(runner.os, "rename", record_rename)
     monkeypatch.setattr(
-        artifact_module,
+        store_module,
         "_load_snapshot",
         lambda _snapshot_id: pytest.fail("published snapshot was reloaded after rename"),
     )
 
-    artifact = runner._prepare_snapshot("repo-status", None, target_repository, "/usr/bin/git")
+    artifact = application._prepare_snapshot("repo-status", None, target_repository, "/usr/bin/git")
 
     assert [event for event, _path in events] == ["validate", "rename"]
     assert events[0][1].name.startswith(".staging-snapshot-")
     assert events[1][1] == events[0][1]
-    assert artifact.directory == artifact_module.snapshot_output_root() / artifact.snapshot_id
+    assert artifact.directory == store_module.snapshot_output_root() / artifact.snapshot_id
 
 
 def test_prepare_rename_failure_leaves_no_final_directory(
@@ -748,7 +754,7 @@ def test_prepare_rename_failure_leaves_no_final_directory(
     assert secret not in captured.err
     assert "unsafe diagnostic suppressed" not in captured.err
 
-    assert list(artifact_module.snapshot_output_root().iterdir()) == []
+    assert list(store_module.snapshot_output_root().iterdir()) == []
 
 
 def test_prepare_staging_fsync_failure_before_rename_leaves_no_final_directory(
@@ -757,19 +763,19 @@ def test_prepare_staging_fsync_failure_before_rename_leaves_no_final_directory(
     target_repository: git.ValidatedTargetRepository,
 ) -> None:
     monkeypatch.setattr(collect, "collect_repo_status", lambda *_args, **_kwargs: _safe_snapshot())
-    original_fsync = artifact_module._fsync_directory
+    original_fsync = store_module._fsync_directory
 
     def fail_staging_fsync(path: Path) -> None:
         if path.name.startswith(".staging-snapshot-"):
             raise OSError("synthetic staging fsync failure")
         original_fsync(path)
 
-    monkeypatch.setattr(artifact_module, "_fsync_directory", fail_staging_fsync)
+    monkeypatch.setattr(store_module, "_fsync_directory", fail_staging_fsync)
     with pytest.raises(runner.RunnerError, match="snapshot publication failed") as raised:
-        runner._prepare_snapshot("repo-status", None, target_repository, "/usr/bin/git")
+        application._prepare_snapshot("repo-status", None, target_repository, "/usr/bin/git")
     assert raised.value.code == security.ARTIFACT_PUBLISH_FAILED
 
-    assert list(artifact_module.snapshot_output_root().iterdir()) == []
+    assert list(store_module.snapshot_output_root().iterdir()) == []
 
 
 def test_prepare_parent_fsync_failure_returns_fixed_error_and_preserves_snapshot(
@@ -779,7 +785,7 @@ def test_prepare_parent_fsync_failure_returns_fixed_error_and_preserves_snapshot
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     snapshot = _safe_snapshot()
-    expected_envelope = artifact_module._sanitize_validate_snapshot(
+    expected_envelope = store_module._sanitize_validate_snapshot(
         snapshot.as_envelope(),
         target_repository.path,
         expected_scan_manifest=snapshot.scan_manifest,
@@ -788,9 +794,9 @@ def test_prepare_parent_fsync_failure_returns_fixed_error_and_preserves_snapshot
     expected_id = hashlib.sha256(expected_bytes).hexdigest()
     monkeypatch.setattr(collect, "collect_repo_status", lambda *_args, **_kwargs: snapshot)
     monkeypatch.setattr(git, "_find_executable", lambda _name: "/usr/bin/git")
-    root = artifact_module.snapshot_output_root()
+    root = store_module.snapshot_output_root()
     synced: list[Path] = []
-    original_fsync = artifact_module._fsync_directory
+    original_fsync = store_module._fsync_directory
 
     def fail_store_fsync(path: Path) -> None:
         synced.append(path)
@@ -798,20 +804,20 @@ def test_prepare_parent_fsync_failure_returns_fixed_error_and_preserves_snapshot
             raise OSError("synthetic parent fsync failure")
         original_fsync(path)
 
-    monkeypatch.setattr(artifact_module, "_fsync_directory", fail_store_fsync)
+    monkeypatch.setattr(store_module, "_fsync_directory", fail_store_fsync)
 
     assert runner.main(["prepare", "repo-status", "--repo", os.fspath(target_repository.path)]) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == (
         f"workflow_failed: {security.ARTIFACT_PUBLISH_FAILED}: "
-        f"{artifact_module.SNAPSHOT_PUBLISH_DURABILITY_ERROR}\n"
+        f"{model.SNAPSHOT_PUBLISH_DURABILITY_ERROR}\n"
     )
     destination = root / expected_id
     assert synced[-1] == root
     assert destination.is_dir()
     assert not list(root.glob(".staging-*"))
-    assert artifact_module._load_snapshot(expected_id).directory == destination
+    assert store_module._load_snapshot(expected_id).directory == destination
 
 
 def test_prepare_redacts_identified_secret_from_snapshot_and_preview(
@@ -838,7 +844,7 @@ def test_prepare_redacts_identified_secret_from_snapshot_and_preview(
         scan_mode=security.ScanMode.PLAIN_TEXT,
     )
     monkeypatch.setattr(collect, "collect_repo_status", lambda *_args, **_kwargs: builder.finish())
-    artifact = runner._prepare_snapshot("repo-status", None, target_repository, "/usr/bin/git")
+    artifact = application._prepare_snapshot("repo-status", None, target_repository, "/usr/bin/git")
     combined = artifact.snapshot_bytes + (artifact.directory / "preview.txt").read_bytes()
     assert b"abcdefghijklmnop" not in combined
     assert b"REDACTED_AUTH" in combined
@@ -889,7 +895,7 @@ def test_secret_formats_are_deterministically_redacted(
     ],
 )
 def test_snapshot_reload_revalidates_hash_missing_and_regular_files(
-    prepared_snapshot: artifact_module.SnapshotArtifact,
+    prepared_snapshot: model.SnapshotArtifact,
     tmp_path: Path,
     field: str,
     mutation: str,
@@ -905,20 +911,20 @@ def test_snapshot_reload_revalidates_hash_missing_and_regular_files(
         target.write_text("{}", encoding="utf-8")
         path.symlink_to(target)
     with pytest.raises(runner.RunnerError):
-        artifact_module._load_snapshot(prepared_snapshot.snapshot_id)
+        store_module._load_snapshot(prepared_snapshot.snapshot_id)
 
 
 def test_snapshot_reload_revalidates_owner_and_size(
     monkeypatch: pytest.MonkeyPatch,
-    prepared_snapshot: artifact_module.SnapshotArtifact,
+    prepared_snapshot: model.SnapshotArtifact,
 ) -> None:
     actual_uid = os.getuid()
     monkeypatch.setattr(runner.os, "getuid", lambda: actual_uid + 1)
     with pytest.raises(runner.RunnerError, match="owned by the current user"):
-        artifact_module._load_snapshot(prepared_snapshot.snapshot_id)
+        store_module._load_snapshot(prepared_snapshot.snapshot_id)
     monkeypatch.undo()
     with pytest.raises(runner.RunnerError, match="size bound"):
-        artifact_module._read_private_regular(
+        store_module._read_private_regular(
             prepared_snapshot.directory / "snapshot.json",
             1,
             "snapshot JSON",
@@ -929,7 +935,7 @@ def test_snapshot_reload_revalidates_schema() -> None:
     envelope = _safe_snapshot().as_envelope()
     envelope["schema_version"] = 999
     with pytest.raises(runner.RunnerError, match="schema"):
-        artifact_module._validate_snapshot_envelope(envelope)
+        legacy_v2._validate_snapshot_envelope(envelope)
 
 
 def test_conversion_safety_is_strictly_optional_and_schema_checked() -> None:
@@ -943,13 +949,13 @@ def test_conversion_safety_is_strictly_optional_and_schema_checked() -> None:
         "files": [],
     }
 
-    assert artifact_module._validate_snapshot_envelope(envelope) is envelope
+    assert legacy_v2._validate_snapshot_envelope(envelope) is envelope
 
     conversion_safety = data["conversion_safety"]
     assert isinstance(conversion_safety, dict)
     conversion_safety["external_commands_executed"] = True
     with pytest.raises(runner.RunnerError, match="conversion-safety"):
-        artifact_module._validate_snapshot_envelope(envelope)
+        legacy_v2._validate_snapshot_envelope(envelope)
 
 
 def test_snapshot_reload_verifies_hash_before_rebuilding_scan_manifest(
@@ -959,7 +965,7 @@ def test_snapshot_reload_verifies_hash_before_rebuilding_scan_manifest(
 ) -> None:
     snapshot = _snapshot_with_file_context("token: str\n", "safe.py")
     monkeypatch.setattr(collect, "collect_diff_audit", lambda *_args, **_kwargs: snapshot)
-    artifact = runner._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
+    artifact = application._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
     snapshot_path = artifact.directory / "snapshot.json"
     snapshot_path.write_bytes(snapshot_path.read_bytes() + b" ")
 
@@ -967,8 +973,9 @@ def test_snapshot_reload_verifies_hash_before_rebuilding_scan_manifest(
         raise AssertionError("classifier ran before hash validation")
 
     monkeypatch.setattr(artifact_module, "classify_scan_mode", unexpected_classifier)
+    monkeypatch.setattr(legacy_v2, "classify_scan_mode", unexpected_classifier)
     with pytest.raises(runner.RunnerError, match="hash"):
-        artifact_module._load_snapshot(artifact.snapshot_id)
+        store_module._load_snapshot(artifact.snapshot_id)
     assert artifact.directory.is_relative_to(private_state)
 
 
@@ -979,7 +986,7 @@ def test_snapshot_reload_rebuilds_manifest_with_same_fixed_classifier_after_vali
 ) -> None:
     snapshot = _snapshot_with_file_context("token: str\n", "safe.py")
     monkeypatch.setattr(collect, "collect_diff_audit", lambda *_args, **_kwargs: snapshot)
-    artifact = runner._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
+    artifact = application._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
     original = artifact_module.classify_scan_mode
     observed: list[str] = []
 
@@ -988,7 +995,8 @@ def test_snapshot_reload_rebuilds_manifest_with_same_fixed_classifier_after_vali
         return original(path)
 
     monkeypatch.setattr(artifact_module, "classify_scan_mode", recording_classifier)
-    loaded = artifact_module._load_snapshot(artifact.snapshot_id)
+    monkeypatch.setattr(legacy_v2, "classify_scan_mode", recording_classifier)
+    loaded = store_module._load_snapshot(artifact.snapshot_id)
     assert loaded.snapshot_id == artifact.snapshot_id
     assert observed and set(observed) == {"safe.py"}
     assert loaded.directory.is_relative_to(private_state)
@@ -1001,12 +1009,12 @@ def test_snapshot_reload_rejects_scan_classifier_version_drift(
 ) -> None:
     snapshot = _snapshot_with_file_context("token: str\n", "safe.py")
     monkeypatch.setattr(collect, "collect_diff_audit", lambda *_args, **_kwargs: snapshot)
-    artifact = runner._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
+    artifact = application._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
     monkeypatch.setattr(
         artifact_module, "SCAN_CLASSIFIER_VERSION", security.SCAN_CLASSIFIER_VERSION + 1
     )
     with pytest.raises(runner.RunnerError, match="classifier"):
-        artifact_module._load_snapshot(artifact.snapshot_id)
+        store_module._load_snapshot(artifact.snapshot_id)
     assert artifact.directory.is_relative_to(private_state)
 
 
@@ -1018,8 +1026,8 @@ def test_snapshot_ancestor_symlink_is_refused(
     linked_state.symlink_to(PROJECT_ROOT, target_is_directory=True)
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(linked_state))
     with pytest.raises(runner.RunnerError, match="symlink ancestor"):
-        artifact_module._ensure_private_state_directory(
-            artifact_module.snapshot_output_root(),
+        store_module._ensure_private_state_directory(
+            store_module.snapshot_output_root(),
             "snapshot store",
         )
 
@@ -1029,7 +1037,7 @@ def test_state_home_must_be_separate_from_runner_repository(
 ) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(PROJECT_ROOT))
     with pytest.raises(runner.RunnerError, match="outside and separate"):
-        artifact_module._state_home()
+        store_module._state_home()
 
 
 def test_state_home_refuses_parent_traversal_into_repository(
@@ -1038,7 +1046,7 @@ def test_state_home_refuses_parent_traversal_into_repository(
     raw = PROJECT_ROOT / ".." / PROJECT_ROOT.name
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(raw))
     with pytest.raises(runner.RunnerError, match="canonical"):
-        artifact_module._state_home()
+        store_module._state_home()
 
 
 def test_default_local_state_path_is_accepted_when_private(
@@ -1051,7 +1059,7 @@ def test_default_local_state_path_is_accepted_when_private(
     state.chmod(0o700)
     monkeypatch.delenv("XDG_STATE_HOME", raising=False)
     monkeypatch.setenv("HOME", os.fspath(home))
-    assert artifact_module._state_home() == state
+    assert store_module._state_home() == state
 
 
 def test_existing_state_home_requires_directory_owner_and_private_mode(
@@ -1063,12 +1071,12 @@ def test_existing_state_home_requires_directory_owner_and_private_mode(
     state.chmod(0o755)
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state))
     with pytest.raises(runner.RunnerError, match="mode 0700"):
-        artifact_module._state_home()
+        store_module._state_home()
     state.chmod(0o700)
     actual_uid = os.getuid()
     monkeypatch.setattr(runner.os, "getuid", lambda: actual_uid + 1)
     with pytest.raises(runner.RunnerError, match="owned by the current user"):
-        artifact_module._state_home()
+        store_module._state_home()
 
 
 def test_state_home_requires_an_absolute_existing_real_directory(
@@ -1077,25 +1085,36 @@ def test_state_home_requires_an_absolute_existing_real_directory(
 ) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", "relative/state")
     with pytest.raises(runner.RunnerError, match="must be absolute"):
-        artifact_module._state_home()
+        store_module._state_home()
 
     missing = tmp_path / "missing-state"
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(missing))
-    with pytest.raises(runner.RunnerError, match=f"^{artifact_module.STATE_HOME_MISSING_ERROR}$"):
-        artifact_module._state_home()
+    with pytest.raises(runner.RunnerError, match=f"^{model.STATE_HOME_MISSING_ERROR}$"):
+        store_module._state_home()
 
     state_file = tmp_path / "state-file"
     state_file.write_text("not a directory", encoding="utf-8")
     state_file.chmod(0o600)
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state_file))
     with pytest.raises(runner.RunnerError, match="non-directory|real directory"):
-        artifact_module._state_home()
+        store_module._state_home()
 
 
 def test_every_subprocess_is_shell_free() -> None:
     source = "\n".join(
         (PROJECT_ROOT / "snapshot_runner" / name).read_text(encoding="utf-8")
-        for name in ("artifact.py", "cli.py", "collect.py", "git.py", "security.py")
+        for name in (
+            "artifact.py",
+            "cli.py",
+            "collect/__init__.py",
+            "collect/builder.py",
+            "collect/readers.py",
+            "collect/security_gate.py",
+            "collect/tasks.py",
+            "collect/workspace.py",
+            "git.py",
+            "security.py",
+        )
     )
     assert "shell=True" not in source
     assert "subprocess.run(" not in source
@@ -1287,7 +1306,7 @@ def test_yaml_reproductions_fail_closed_through_prepare(
     with pytest.raises(runner.RunnerError):
         snapshot = _legacy_snapshot_with_yaml_context(raw, "synthetic.yaml")
         monkeypatch.setattr(collect, "collect_diff_audit", lambda *_args, **_kwargs: snapshot)
-        runner._prepare_snapshot(
+        application._prepare_snapshot(
             "diff-audit",
             None,
             target_repository,
@@ -1401,7 +1420,7 @@ def test_c01_yaml_semantics_fail_closed_at_every_boundary(
     unsafe_snapshot = _legacy_snapshot_with_yaml_context(raw, "synthetic.yaml")
     monkeypatch.setattr(collect, "collect_diff_audit", lambda *_args, **_kwargs: unsafe_snapshot)
     with pytest.raises(runner.RunnerError, match=f"^{security.YAML_CONTENT_REFUSED}$") as raised:
-        runner._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
+        application._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
     assert C01_MARKER not in str(raised.value)
     assert raised.value.code == security.ARTIFACT_VALIDATION_FAILED
     assert not list(private_state.rglob(".staging-*"))
@@ -1433,7 +1452,7 @@ def test_single_leading_bom_is_normalized_before_all_snapshot_boundaries(
     assert token not in str(builder.data["current_branch"])
     snapshot = _snapshot_with_file_context(raw, "synthetic.txt")
     monkeypatch.setattr(collect, "collect_diff_audit", lambda *_args, **_kwargs: snapshot)
-    artifact = runner._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
+    artifact = application._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
     combined = b"".join(path.read_bytes() for path in artifact.directory.iterdir())
     assert token.encode() not in combined
     assert "\ufeff".encode() not in combined
@@ -1547,7 +1566,7 @@ def test_yaml_depth_and_scalar_limits_reject_builder_and_artifact(
     snapshot = _legacy_snapshot_with_yaml_context(raw, "synthetic.yaml")
     monkeypatch.setattr(collect, "collect_diff_audit", lambda *_args, **_kwargs: snapshot)
     with pytest.raises(runner.RunnerError, match=f"^{security.YAML_CONTENT_REFUSED}$"):
-        runner._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
+        application._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
     assert not list(private_state.rglob(".staging-*"))
 
 
@@ -1561,7 +1580,7 @@ def test_yaml_token_limit_rejects_builder_and_artifact(
         read_attempted = True
         raise AssertionError("YAML file content was read")
 
-    monkeypatch.setattr(collect, "_read_regular_file", unexpected_read)
+    monkeypatch.setattr(collect.security_gate, "_read_regular_file", unexpected_read)
     builder = collect.SnapshotBuilder("repo-status", PROJECT_ROOT.name, PROJECT_ROOT)
     with pytest.raises(security.RunnerError, match=f"^{security.YAML_CONTENT_REFUSED}$"):
         collect._add_context(builder, ["synthetic.yml"])
@@ -1578,7 +1597,7 @@ def test_yaml_test_log_is_rejected_before_safe_open(
         opened = True
         raise AssertionError("YAML test log was opened")
 
-    monkeypatch.setattr(collect, "_open_repo_regular", unexpected_open)
+    monkeypatch.setattr(collect.readers, "_open_repo_regular", unexpected_open)
     with pytest.raises(security.RunnerError, match=f"^{security.YAML_CONTENT_REFUSED}$"):
         collect._read_test_log(PROJECT_ROOT, "synthetic.yaml")
     assert opened is False
@@ -1691,7 +1710,7 @@ def test_source_and_plain_text_do_not_gain_yaml_semantics_at_any_boundary(
 
     snapshot = _snapshot_with_file_context(raw, relative_path)
     monkeypatch.setattr(collect, "collect_diff_audit", lambda *_args, **_kwargs: snapshot)
-    artifact = runner._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
+    artifact = application._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
     contexts = artifact.envelope["data"]["file_context"]  # type: ignore[index]
     assert contexts[0]["content"] == raw  # type: ignore[index]
     assert not list(artifact.directory.parent.glob(".staging-*"))
@@ -1717,7 +1736,7 @@ def test_mixed_yaml_and_source_diff_rejects_the_entire_snapshot(
         collect, "collect_diff_audit", lambda *_args, **_kwargs: _snapshot_with_diff(raw)
     )
     with pytest.raises(runner.RunnerError, match=f"^{security.YAML_CONTENT_REFUSED}$"):
-        runner._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
+        application._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
     assert not (private_state / "snapshot-runner").exists()
 
 
@@ -1762,7 +1781,7 @@ def test_unified_diff_rejects_every_yaml_file_section_before_hunk_scanning(
         collect, "collect_diff_audit", lambda *_args, **_kwargs: _snapshot_with_diff(raw)
     )
     with pytest.raises(runner.RunnerError, match=f"^{security.YAML_CONTENT_REFUSED}$"):
-        runner._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
+        application._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
     assert not (private_state / "snapshot-runner").exists()
 
 
@@ -1919,7 +1938,7 @@ def test_test_triage_target_repository_rejections_happen_before_collection(
             task_argument="safe.log",
         )
         with pytest.raises(runner.RunnerError, match=f"^{git.TARGET_REPOSITORY_INVALID_ERROR}$"):
-            runner._run_prepare(arguments)
+            application._run_prepare(arguments)
     assert collected is False
 
 
@@ -1946,7 +1965,7 @@ def test_target_repository_wrong_owner_is_rejected_before_collection(
         task_argument=None,
     )
     with pytest.raises(runner.RunnerError, match=f"^{git.TARGET_REPOSITORY_INVALID_ERROR}$"):
-        runner._run_prepare(arguments)
+        application._run_prepare(arguments)
     assert collected is False
 
 
@@ -2019,10 +2038,10 @@ def test_prepare_only_public_entry_completes_all_four_prepare_workflows(
     directories = list(snapshot_root.iterdir())
     assert len(directories) == 1
     directory = directories[0]
-    assert {path.name for path in directory.iterdir()} == artifact_module.SNAPSHOT_FILE_NAMES
+    assert {path.name for path in directory.iterdir()} == model.SNAPSHOT_FILE_NAMES
     assert stat.S_IMODE(snapshot_root.lstat().st_mode) == 0o700
     assert stat.S_IMODE(directory.lstat().st_mode) == 0o700
-    for name in artifact_module.SNAPSHOT_FILE_NAMES:
+    for name in model.SNAPSHOT_FILE_NAMES:
         assert stat.S_IMODE((directory / name).lstat().st_mode) == 0o600
 
     snapshot_bytes = (directory / "snapshot.json").read_bytes()
@@ -2032,7 +2051,7 @@ def test_prepare_only_public_entry_completes_all_four_prepare_workflows(
     assert envelope["task"] == task
     assert envelope["schema_version"] == collect.SNAPSHOT_SCHEMA_VERSION == 2
     assert envelope["producer_security_epoch"] == collect.PRODUCER_SECURITY_EPOCH == 4
-    assert meta["schema_version"] == artifact_module.SNAPSHOT_META_SCHEMA_VERSION == 2
+    assert meta["schema_version"] == model.SNAPSHOT_META_SCHEMA_VERSION == 2
     assert meta["producer_security_epoch"] == collect.PRODUCER_SECURITY_EPOCH
     assert meta["snapshot_sha256"] == hashlib.sha256(snapshot_bytes).hexdigest()
     assert meta["preview_sha256"] == hashlib.sha256(preview_bytes).hexdigest()
@@ -2126,7 +2145,7 @@ def test_host_git_shallow_file_cannot_affect_prepare_evidence_or_artifacts(
     marker.write_text(f"{marker_body}\n", encoding="utf-8")
     monkeypatch.setenv("GIT_SHALLOW_FILE", os.fspath(marker))
 
-    artifact = runner._prepare_snapshot(
+    artifact = application._prepare_snapshot(
         "repo-status",
         None,
         target_repository,
@@ -2135,7 +2154,7 @@ def test_host_git_shallow_file_cannot_affect_prepare_evidence_or_artifacts(
 
     assert artifact.envelope["data"]["head"] == target_repository.target_identity.head  # type: ignore[index]
     combined = b"".join(
-        (artifact.directory / name).read_bytes() for name in artifact_module.SNAPSHOT_FILE_NAMES
+        (artifact.directory / name).read_bytes() for name in model.SNAPSHOT_FILE_NAMES
     )
     assert os.fspath(marker).encode() not in combined
     assert marker_body.encode() not in combined
@@ -2152,10 +2171,10 @@ def test_target_and_runner_worktrees_must_not_contain_each_other(
     container.mkdir()
     runner_repo.mkdir()
     child.mkdir()
-    monkeypatch.setattr(runner, "REPOSITORY_ROOT", runner_repo)
+    monkeypatch.setattr(application, "REPOSITORY_ROOT", runner_repo)
     for candidate in (container, runner_repo, child):
         with pytest.raises(runner.RunnerError, match=f"^{git.TARGET_REPOSITORY_INVALID_ERROR}$"):
-            runner._validate_target_repository_path(os.fspath(candidate))
+            application._validate_target_repository_path(os.fspath(candidate))
 
 
 @pytest.mark.parametrize("relation", ["target", "target-child", "target-parent"])
@@ -2171,7 +2190,7 @@ def test_state_home_is_separate_from_target_and_runner(
     }
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(candidates[relation]))
     with pytest.raises(runner.RunnerError, match="outside and separate"):
-        artifact_module._state_home(target_repository.path)
+        store_module._state_home(target_repository.path)
 
 
 def test_path_level_state_failure_runs_zero_git_commands_and_creates_no_artifact(
@@ -2216,7 +2235,7 @@ def test_path_level_state_failure_runs_zero_git_commands_and_creates_no_artifact
     )
 
     with pytest.raises(runner.RunnerError, match="outside and separate"):
-        runner._run_prepare(arguments)
+        application._run_prepare(arguments)
 
     assert git_calls == []
     assert resolved_executables == []
@@ -2270,7 +2289,7 @@ def test_state_git_admin_overlap_stops_after_only_fixed_path_validation(
         observed.append((self.repo_root, arguments))
         return original_run(self, arguments, maximum=maximum)
 
-    monkeypatch.setattr(runner, "REPOSITORY_ROOT", runner_repo)
+    monkeypatch.setattr(application, "REPOSITORY_ROOT", runner_repo)
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state))
     monkeypatch.setattr(git.GitRunner, "run", recording_run)
     monkeypatch.setattr(git, "_find_executable", lambda _name: "/usr/bin/git")
@@ -2295,7 +2314,7 @@ def test_state_git_admin_overlap_stops_after_only_fixed_path_validation(
     )
 
     with pytest.raises(runner.RunnerError, match=f"^{git.STATE_GIT_BOUNDARY_ERROR}$"):
-        runner._run_prepare(arguments)
+        application._run_prepare(arguments)
 
     assert observed == [(target_repo, path_validation), (runner_repo, path_validation)]
     assert not (state / "snapshot-runner").exists()
@@ -2320,7 +2339,7 @@ def test_repo_status_snapshot_is_isolated_from_runner_repository(
     )
     (runner_repo / "RUNNER_ONLY_CANARY.txt").write_text("runner only\n", encoding="utf-8")
     (target_repo / "TARGET_ONLY_CANARY.txt").write_text("target only\n", encoding="utf-8")
-    monkeypatch.setattr(runner, "REPOSITORY_ROOT", runner_repo)
+    monkeypatch.setattr(application, "REPOSITORY_ROOT", runner_repo)
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state))
     monkeypatch.chdir(runner_repo)
 
@@ -2342,9 +2361,7 @@ def test_repo_status_snapshot_is_isolated_from_runner_repository(
     directory = directories[0]
     snapshot_payload = json.loads((directory / "snapshot.json").read_bytes())
     meta_payload = json.loads((directory / "meta.json").read_bytes())
-    combined = b"".join(
-        (directory / name).read_bytes() for name in artifact_module.SNAPSHOT_FILE_NAMES
-    )
+    combined = b"".join((directory / name).read_bytes() for name in model.SNAPSHOT_FILE_NAMES)
 
     assert snapshot_payload["repository"] == target_repo.name
     assert meta_payload["repository"] == target_repo.name
@@ -2373,7 +2390,7 @@ def test_shared_common_dir_repo_status_contains_only_target_worktree_evidence(
     state = tmp_path / "isolated-state"
     state.mkdir(mode=0o700)
     state.chmod(0o700)
-    monkeypatch.setattr(runner, "REPOSITORY_ROOT", runner_repo)
+    monkeypatch.setattr(application, "REPOSITORY_ROOT", runner_repo)
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state))
 
     validated = _validated_test_repository(target_repo)
@@ -2403,9 +2420,7 @@ def test_shared_common_dir_repo_status_contains_only_target_worktree_evidence(
     assert len(directories) == 1
     directory = directories[0]
     snapshot_payload = json.loads((directory / "snapshot.json").read_bytes())
-    combined = b"".join(
-        (directory / name).read_bytes() for name in artifact_module.SNAPSHOT_FILE_NAMES
-    )
+    combined = b"".join((directory / name).read_bytes() for name in model.SNAPSHOT_FILE_NAMES)
     data = snapshot_payload["data"]
 
     assert data["current_branch"] == "target-only-branch"
@@ -2441,7 +2456,7 @@ def test_shared_common_dir_branch_review_rejects_runner_current_ref(
     state = tmp_path / "isolated-state"
     state.mkdir(mode=0o700)
     state.chmod(0o700)
-    monkeypatch.setattr(runner, "REPOSITORY_ROOT", runner_repo)
+    monkeypatch.setattr(application, "REPOSITORY_ROOT", runner_repo)
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state))
 
     result = runner.main(
@@ -2468,7 +2483,7 @@ def test_extra_git_like_arguments_are_rejected_before_collection(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(
-        runner,
+        application,
         "_run_prepare",
         lambda _arguments: pytest.fail("prepare ran with an extra Git-like argument"),
     )
@@ -2715,7 +2730,9 @@ def test_deleted_body_marker_is_absent_from_every_published_artifact_field(
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state))
     target = _validated_test_repository(repo)
 
-    artifact = runner._prepare_snapshot("branch-review", "comparison-base", target, "/usr/bin/git")
+    artifact = application._prepare_snapshot(
+        "branch-review", "comparison-base", target, "/usr/bin/git"
+    )
     data = artifact.envelope["data"]
     assert isinstance(data, dict)
     assert deleted_marker not in str(data["diff"])
@@ -2727,7 +2744,7 @@ def test_deleted_body_marker_is_absent_from_every_published_artifact_field(
     assert data["file_context"] == [
         {"path": "new_name.py", "content": "RENAMED_TARGET = 'sealed'\n"}
     ]
-    for name in artifact_module.SNAPSHOT_FILE_NAMES:
+    for name in model.SNAPSHOT_FILE_NAMES:
         assert deleted_marker.encode() not in (artifact.directory / name).read_bytes()
 
 
@@ -2763,7 +2780,7 @@ def test_branch_review_ref_change_during_collection_fails_without_artifact(
     repo, state, target, base_commit, target_head, target_ref = _branch_prepare_target(
         monkeypatch, tmp_path
     )
-    original = collect._add_branch_blob_context
+    original = collect.tasks._add_branch_blob_context
 
     def mutate_after_context(*args: object, **kwargs: object) -> None:
         original(*args, **kwargs)  # type: ignore[arg-type]
@@ -2772,9 +2789,9 @@ def test_branch_review_ref_change_during_collection_fails_without_artifact(
         else:
             _run_test_git(repo, "update-ref", target_ref, base_commit)
 
-    monkeypatch.setattr(collect, "_add_branch_blob_context", mutate_after_context)
+    monkeypatch.setattr(collect.tasks, "_add_branch_blob_context", mutate_after_context)
     with pytest.raises(runner.RunnerError, match=f"^{git.BRANCH_REVIEW_STATE_CHANGED_ERROR}$"):
-        runner._prepare_snapshot(
+        application._prepare_snapshot(
             "branch-review",
             "feature/example",
             target,
@@ -2809,7 +2826,7 @@ def test_branch_review_git_identity_change_during_collection_fails_closed(
 
     monkeypatch.setattr(git, "_validate_git_paths", changed_identity)
     with pytest.raises(runner.RunnerError, match=f"^{git.BRANCH_REVIEW_STATE_CHANGED_ERROR}$"):
-        runner._prepare_snapshot(
+        application._prepare_snapshot(
             "branch-review",
             "feature/example",
             target,
@@ -2825,19 +2842,19 @@ def test_branch_review_state_change_after_staging_leaves_no_final_artifact(
     repo, state, target, base_commit, _target_head, target_ref = _branch_prepare_target(
         monkeypatch, tmp_path
     )
-    original = artifact_module._load_snapshot_directory
+    original = store_module._load_snapshot_directory
 
     def mutate_after_staging(
         snapshot_id: str,
         directory: Path,
-    ) -> artifact_module.SnapshotArtifact:
+    ) -> model.SnapshotArtifact:
         artifact = original(snapshot_id, directory)
         _run_test_git(repo, "update-ref", target_ref, base_commit)
         return artifact
 
-    monkeypatch.setattr(artifact_module, "_load_snapshot_directory", mutate_after_staging)
+    monkeypatch.setattr(store_module, "_load_snapshot_directory", mutate_after_staging)
     with pytest.raises(runner.RunnerError, match=f"^{git.BRANCH_REVIEW_STATE_CHANGED_ERROR}$"):
-        runner._prepare_snapshot(
+        application._prepare_snapshot(
             "branch-review",
             "feature/example",
             target,
@@ -2873,18 +2890,18 @@ def test_replace_ref_created_during_collector_is_detected_without_publication(
 ) -> None:
     repo, state, target, _base, _head, _ref = _branch_prepare_target(monkeypatch, tmp_path)
     original_oid, replacement_oid, marker = _replacement_blob(repo, tmp_path)
-    original_collector = collect._add_branch_blob_context
+    original_collector = collect.tasks._add_branch_blob_context
 
     def add_replace_after_content(*args: object, **kwargs: object) -> None:
         original_collector(*args, **kwargs)  # type: ignore[arg-type]
         _run_test_git(repo, "replace", original_oid, replacement_oid)
 
-    monkeypatch.setattr(collect, "_add_branch_blob_context", add_replace_after_content)
+    monkeypatch.setattr(collect.tasks, "_add_branch_blob_context", add_replace_after_content)
     with pytest.raises(
         security.RunnerError,
         match=f"^{git.GIT_REPLACEMENT_REFUSED_ERROR}$",
     ):
-        runner._prepare_snapshot("branch-review", "feature/example", target, "/usr/bin/git")
+        application._prepare_snapshot("branch-review", "feature/example", target, "/usr/bin/git")
     _assert_state_has_no_marker_or_final_snapshot(state, marker)
 
 
@@ -2894,22 +2911,22 @@ def test_replace_ref_created_after_staging_validation_is_detected_before_rename(
 ) -> None:
     repo, state, target, _base, _head, _ref = _branch_prepare_target(monkeypatch, tmp_path)
     original_oid, replacement_oid, marker = _replacement_blob(repo, tmp_path)
-    original_load = artifact_module._load_snapshot_directory
+    original_load = store_module._load_snapshot_directory
 
     def add_replace_after_staging(
         snapshot_id: str,
         directory: Path,
-    ) -> artifact_module.SnapshotArtifact:
+    ) -> model.SnapshotArtifact:
         artifact = original_load(snapshot_id, directory)
         _run_test_git(repo, "replace", original_oid, replacement_oid)
         return artifact
 
-    monkeypatch.setattr(artifact_module, "_load_snapshot_directory", add_replace_after_staging)
+    monkeypatch.setattr(store_module, "_load_snapshot_directory", add_replace_after_staging)
     with pytest.raises(
         security.RunnerError,
         match=f"^{git.GIT_REPLACEMENT_REFUSED_ERROR}$",
     ):
-        runner._prepare_snapshot("branch-review", "feature/example", target, "/usr/bin/git")
+        application._prepare_snapshot("branch-review", "feature/example", target, "/usr/bin/git")
     _assert_state_has_no_marker_or_final_snapshot(state, marker)
 
 
@@ -3147,7 +3164,7 @@ def test_runner_shallow_repository_refuses_every_target_prepare(
     _initialize_isolation_repo(runner_repo, "runner", "RUNNER")
     _initialize_isolation_repo(target_repo, "target", "TARGET")
     (runner_repo / ".git" / "shallow").write_bytes(b"")
-    monkeypatch.setattr(runner, "REPOSITORY_ROOT", runner_repo)
+    monkeypatch.setattr(application, "REPOSITORY_ROOT", runner_repo)
 
     _assert_capability_prepare_rejected_before_content(
         monkeypatch,
@@ -3235,7 +3252,7 @@ def _assert_capability_prepare_rejected_before_content(
         match=f"^{expected_error}$",
     ):
         target = _validated_test_repository(repo)
-        runner._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
+        application._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
     assert content_calls == []
     assert not marker.exists()
     assert not (state / "snapshot-runner").exists()
@@ -3253,18 +3270,18 @@ def test_shallow_created_inside_collector_is_detected_without_publication(
 ) -> None:
     repo, state, target, base_commit, _head, _ref = _branch_prepare_target(monkeypatch, tmp_path)
     shallow = target.target_identity.paths.git_common_dir / "shallow"
-    original_collector_step = collect._add_branch_blob_context
+    original_collector_step = collect.tasks._add_branch_blob_context
 
     def add_shallow_inside_collector(*args: object, **kwargs: object) -> None:
         original_collector_step(*args, **kwargs)  # type: ignore[arg-type]
         shallow.write_text(f"{base_commit}\n", encoding="ascii")
 
-    monkeypatch.setattr(collect, "_add_branch_blob_context", add_shallow_inside_collector)
+    monkeypatch.setattr(collect.tasks, "_add_branch_blob_context", add_shallow_inside_collector)
     with pytest.raises(
         security.RunnerError,
         match=f"^{git.GIT_SHALLOW_REFUSED_ERROR}$",
     ):
-        runner._prepare_snapshot("branch-review", "feature/example", target, "/usr/bin/git")
+        application._prepare_snapshot("branch-review", "feature/example", target, "/usr/bin/git")
     _assert_state_has_no_marker_or_final_snapshot(state, base_commit)
     assert not list(state.rglob(".staging-*"))
     assert not (state / "snapshot-runner" / "runs").exists()
@@ -3288,7 +3305,7 @@ def test_shallow_created_after_collector_is_detected_without_artifact(
         security.RunnerError,
         match=f"^{git.GIT_SHALLOW_REFUSED_ERROR}$",
     ):
-        runner._prepare_snapshot("repo-status", None, target_repository, "/usr/bin/git")
+        application._prepare_snapshot("repo-status", None, target_repository, "/usr/bin/git")
     _assert_state_has_no_marker_or_final_snapshot(private_state, marker)
     assert not list(private_state.rglob(".staging-*"))
     assert not (private_state / "snapshot-runner" / "runs").exists()
@@ -3301,23 +3318,23 @@ def test_shallow_created_after_staging_validation_is_detected_before_rename(
 ) -> None:
     shallow = target_repository.target_identity.paths.git_common_dir / "shallow"
     marker = "STAGED_SHALLOW_BODY_MUST_NOT_PUBLISH"
-    original_load = artifact_module._load_snapshot_directory
+    original_load = store_module._load_snapshot_directory
     monkeypatch.setattr(collect, "collect_repo_status", lambda *_args, **_kwargs: _safe_snapshot())
 
     def load_then_add_shallow(
         snapshot_id: str,
         directory: Path,
-    ) -> artifact_module.SnapshotArtifact:
+    ) -> model.SnapshotArtifact:
         artifact = original_load(snapshot_id, directory)
         shallow.write_text(f"{marker}\n", encoding="utf-8")
         return artifact
 
-    monkeypatch.setattr(artifact_module, "_load_snapshot_directory", load_then_add_shallow)
+    monkeypatch.setattr(store_module, "_load_snapshot_directory", load_then_add_shallow)
     with pytest.raises(
         security.RunnerError,
         match=f"^{git.GIT_SHALLOW_REFUSED_ERROR}$",
     ):
-        runner._prepare_snapshot("repo-status", None, target_repository, "/usr/bin/git")
+        application._prepare_snapshot("repo-status", None, target_repository, "/usr/bin/git")
     _assert_state_has_no_marker_or_final_snapshot(private_state, marker)
     assert not list(private_state.rglob(".staging-*"))
     assert not (private_state / "snapshot-runner" / "runs").exists()
@@ -3330,12 +3347,12 @@ def _prepare_conversion_snapshot(
     *,
     task: str = "diff-audit",
     task_argument: str | None = None,
-) -> tuple[artifact_module.SnapshotArtifact, dict[str, object]]:
+) -> tuple[model.SnapshotArtifact, dict[str, object]]:
     state.mkdir(mode=0o700)
     state.chmod(0o700)
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state))
     target = _validated_test_repository(repo)
-    artifact = runner._prepare_snapshot(task, task_argument, target, "/usr/bin/git")
+    artifact = application._prepare_snapshot(task, task_argument, target, "/usr/bin/git")
     return artifact, json.loads(artifact.snapshot_bytes)
 
 
@@ -4088,7 +4105,7 @@ def test_prepare_refuses_yaml_workspace_changes_before_diff_or_file_content_read
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state))
     target = _validated_test_repository(repo)
     with pytest.raises(security.RunnerError, match=f"^{security.YAML_CONTENT_REFUSED}$"):
-        runner._prepare_snapshot(task, None, target, "/usr/bin/git")
+        application._prepare_snapshot(task, None, target, "/usr/bin/git")
     assert observed_git_argv
     assert all(
         arguments[0] != "diff" or "--name-only" in arguments for arguments in observed_git_argv
@@ -4157,7 +4174,7 @@ def test_unified_diff_malformed_or_unprovable_inputs_fail_at_every_boundary(
     snapshot = _snapshot_with_diff(raw)
     monkeypatch.setattr(collect, "collect_diff_audit", lambda *_args, **_kwargs: snapshot)
     with pytest.raises(runner.RunnerError) as raised:
-        runner._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
+        application._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
     assert C01_MARKER not in str(raised.value)
     assert not list(private_state.rglob(".staging-*"))
     for path in private_state.rglob("*"):
@@ -4179,7 +4196,7 @@ def test_prepare_rejects_collector_and_schema_scan_manifest_mismatch(
     )
     monkeypatch.setattr(collect, "collect_repo_status", lambda *_args, **_kwargs: snapshot)
     with pytest.raises(runner.RunnerError, match="manifest"):
-        runner._prepare_snapshot("repo-status", None, target_repository, "/usr/bin/git")
+        application._prepare_snapshot("repo-status", None, target_repository, "/usr/bin/git")
     assert not list(private_state.rglob(".staging-*"))
 
 
@@ -4232,7 +4249,7 @@ def test_isolated_pem_and_credential_like_examples_are_plain_text(raw: str) -> N
 def test_pem_detection_literal_is_preserved_in_file_context_and_unified_diff() -> None:
     literal = "private_key_re='-----BEGIN ([A-Z0-9]+[[:space:]]+)*PRIVATE KEY-----'"
     snapshot = _snapshot_with_file_context(literal, "scanner.py")
-    envelope = artifact_module._sanitize_validate_snapshot(
+    envelope = store_module._sanitize_validate_snapshot(
         snapshot.as_envelope(),
         PROJECT_ROOT,
         expected_scan_manifest=snapshot.scan_manifest,
@@ -4403,7 +4420,7 @@ def test_diff_audit_accepts_safe_gitattributes_text(
     repo, _state, target = _bounded_text_diff_target(monkeypatch, tmp_path)
     (repo / ".gitattributes").write_text("*.md text\n*.csv -text\n", encoding="utf-8")
 
-    artifact = runner._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
+    artifact = application._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
 
     payload = json.loads(artifact.snapshot_bytes)
     unstaged = payload["data"]["unstaged_diff"]
@@ -4433,7 +4450,7 @@ def test_diff_audit_rejects_unsafe_gitattributes_content(
         security.RunnerError,
         match="sanitize unstaged-diff|Git conversion attribute inspection failed closed",
     ):
-        runner._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
+        application._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
 
     assert not (state / "snapshot-runner").exists()
 
@@ -4449,7 +4466,7 @@ def test_diff_audit_accepts_safe_csv_text(
     if staged:
         _run_test_git(repo, "add", "--", "audit.csv")
 
-    artifact = runner._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
+    artifact = application._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
 
     payload = json.loads(artifact.snapshot_bytes)
     diff_name = "staged_diff" if staged else "unstaged_diff"
@@ -4473,7 +4490,7 @@ def test_csv_diff_redacts_credentials_and_paths_without_snapshot_leakage(
     )
     _run_test_git(repo, "add", "--", "audit.csv")
 
-    artifact = runner._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
+    artifact = application._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
 
     assert token.encode() not in artifact.snapshot_bytes
     assert absolute_path.encode() not in artifact.snapshot_bytes
@@ -4499,7 +4516,7 @@ def test_csv_diff_private_key_fails_closed_without_snapshot_leakage(
     _run_test_git(repo, "add", "--", "audit.csv")
 
     with pytest.raises(security.RunnerError, match="sanitize staged-diff"):
-        runner._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
+        application._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
 
     assert marker.encode() not in b"".join(
         path.read_bytes() for path in state.rglob("*") if path.is_file()
@@ -4525,7 +4542,7 @@ def test_diff_audit_rejects_unsafe_csv_content(
     (repo / "audit.csv").write_bytes(raw)
 
     with pytest.raises(security.RunnerError, match="sanitize unstaged-diff"):
-        runner._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
+        application._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
 
     assert not (state / "snapshot-runner").exists()
 
@@ -4547,7 +4564,7 @@ def test_diff_audit_rejects_symlinks_for_new_bounded_text_paths(
         else "sanitize unstaged-diff"
     )
     with pytest.raises(security.RunnerError, match=expected_error):
-        runner._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
+        application._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
 
     assert not (state / "snapshot-runner").exists()
 
@@ -4568,7 +4585,7 @@ def test_csv_diff_keeps_high_risk_path_refusal(
     sensitive_csv.write_text("name,value\nnew,2\n", encoding="utf-8")
 
     with pytest.raises(security.RunnerError, match="sanitize unstaged-diff"):
-        runner._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
+        application._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
 
     assert not (state / "snapshot-runner").exists()
 
@@ -4584,7 +4601,7 @@ def test_diff_audit_accepts_safe_extensionless_text_and_structured_signature(
         encoding="utf-8",
     )
 
-    artifact = runner._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
+    artifact = application._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
 
     payload = json.loads(artifact.snapshot_bytes)
     unstaged = payload["data"]["unstaged_diff"]
@@ -4611,7 +4628,7 @@ def test_diff_audit_rejects_unsafe_extensionless_content(
     repo, state, target = _extensionless_diff_target(monkeypatch, tmp_path)
     (repo / "CURRENT").write_bytes(raw)
 
-    artifact = runner._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
+    artifact = application._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
 
     payload = json.loads(artifact.snapshot_bytes)
     expected_gap = (
@@ -4642,7 +4659,7 @@ def test_diff_audit_rejects_non_regular_extensionless_paths(
     else:
         current.mkdir()
 
-    artifact = runner._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
+    artifact = application._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
 
     payload = json.loads(artifact.snapshot_bytes)
     assert "CURRENT" in payload["data"]["status_short"]
@@ -4680,7 +4697,7 @@ def test_signature_private_key_fails_closed_without_artifact_leakage(
     )
 
     with pytest.raises(security.RunnerError, match="sanitize unstaged-diff"):
-        runner._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
+        application._prepare_snapshot("diff-audit", None, target, "/usr/bin/git")
 
     assert marker.encode() not in b"".join(
         path.read_bytes() for path in state.rglob("*") if path.is_file()
@@ -4798,29 +4815,29 @@ def test_active_repository_root_lifecycle_and_sequential_isolation(
     repo_b.mkdir()
 
     # Initial state must be clean
-    assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() is None
+    assert store_module._ACTIVE_REPOSITORY_ROOT.get() is None
 
     # Normal context manager usage restores None
-    with artifact_module.active_repository_root(repo_a):
-        assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() == repo_a
-    assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() is None
+    with store_module.active_repository_root(repo_a):
+        assert store_module._ACTIVE_REPOSITORY_ROOT.get() == repo_a
+    assert store_module._ACTIVE_REPOSITORY_ROOT.get() is None
 
     # Failure inside context manager restores None
     with (
         pytest.raises(RuntimeError, match="synthetic failure"),
-        artifact_module.active_repository_root(repo_a),
+        store_module.active_repository_root(repo_a),
     ):
-        assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() == repo_a
+        assert store_module._ACTIVE_REPOSITORY_ROOT.get() == repo_a
         raise RuntimeError("synthetic failure")
-    assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() is None
+    assert store_module._ACTIVE_REPOSITORY_ROOT.get() is None
 
     # Nested context managers restore outer context properly
-    with artifact_module.active_repository_root(repo_a):
-        assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() == repo_a
-        with artifact_module.active_repository_root(repo_b):
-            assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() == repo_b
-        assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() == repo_a
-    assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() is None
+    with store_module.active_repository_root(repo_a):
+        assert store_module._ACTIVE_REPOSITORY_ROOT.get() == repo_a
+        with store_module.active_repository_root(repo_b):
+            assert store_module._ACTIVE_REPOSITORY_ROOT.get() == repo_b
+        assert store_module._ACTIVE_REPOSITORY_ROOT.get() == repo_a
+    assert store_module._ACTIVE_REPOSITORY_ROOT.get() is None
 
 
 @pytest.mark.parametrize(
@@ -4848,7 +4865,7 @@ def test_unknown_task_data_fields_fail_schema_validation(task: str, bad_value: o
     with pytest.raises(
         runner.RunnerError, match="snapshot task data schema is invalid"
     ) as exc_info:
-        artifact_module._validate_snapshot_envelope(envelope)
+        legacy_v2._validate_snapshot_envelope(envelope)
     assert exc_info.value.code == security.ARTIFACT_VALIDATION_FAILED
 
 
@@ -4856,14 +4873,14 @@ def test_cli_main_sequential_calls_and_early_failures_do_not_leak_context(
     tmp_path: Path,
 ) -> None:
     """Sequential runner.main calls in the same process must never leak repository context."""
-    assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() is None
+    assert store_module._ACTIVE_REPOSITORY_ROOT.get() is None
 
     # Call 1: Early failure (nonexistent repo path)
     code = runner.main(["repo-status", "--repo", str(tmp_path / "nonexistent")])
     assert code != 0
-    assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() is None
+    assert store_module._ACTIVE_REPOSITORY_ROOT.get() is None
 
     # Call 2: Early argument syntax failure
     code = runner.main(["diff-audit", "--unexpected-flag-xyz"])
     assert code != 0
-    assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() is None
+    assert store_module._ACTIVE_REPOSITORY_ROOT.get() is None

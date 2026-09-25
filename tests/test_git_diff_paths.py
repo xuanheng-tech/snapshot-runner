@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from snapshot_runner import artifact, git, security
+from snapshot_runner import application, git, model, security, store
 from snapshot_runner import cli as runner
 
 GIT = "/usr/bin/git"
@@ -74,20 +74,22 @@ def _prepare(
     repo: Path,
     task: str = "diff-audit",
     argument: str | None = None,
-) -> artifact.SnapshotArtifact:
-    target_path, target_name, runner_path = runner._validate_target_repository_path(os.fspath(repo))
+) -> model.SnapshotArtifact:
+    target_path, target_name, runner_path = application._validate_target_repository_path(
+        os.fspath(repo)
+    )
     target = git._validate_target_repository_context(
         target_path,
         target_name,
         runner_path,
-        artifact._state_home(target_path),
+        store._state_home(target_path),
         GIT,
         task,
     )
-    return runner._prepare_snapshot(task, argument, target, GIT)
+    return application._prepare_snapshot(task, argument, target, GIT)
 
 
-def _payload(snapshot: artifact.SnapshotArtifact) -> dict[str, object]:
+def _payload(snapshot: model.SnapshotArtifact) -> dict[str, object]:
     return json.loads(snapshot.snapshot_bytes)
 
 

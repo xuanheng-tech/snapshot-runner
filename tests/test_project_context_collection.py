@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from snapshot_runner import artifact, collect, security
+from snapshot_runner import collect, security, views
 
 
 def _diff_audit_builder(repo: Path, status: str) -> collect.SnapshotBuilder:
@@ -39,7 +39,7 @@ def test_collects_extensionless_context_entry_without_evidence_gap(tmp_path: Pat
     envelope = builder.finish().as_envelope()
 
     context = envelope["data"]["file_context"][0]
-    preview = artifact._build_preview_summary("a" * 64, envelope)
+    preview = views._build_preview_summary("a" * 64, envelope)
     assert not security.is_relevant_text_path(relative)
     assert security.is_extensionless_text_candidate(relative)
     assert relative not in security.ALLOWED_EXTENSIONLESS_NAMES
@@ -111,7 +111,7 @@ def test_keeps_similarly_named_large_lockfile_at_ordinary_limit(tmp_path: Path) 
 
     collect._add_context(builder, [relative])
     envelope = builder.finish().as_envelope()
-    preview = artifact._build_preview_summary("a" * 64, envelope)
+    preview = views._build_preview_summary("a" * 64, envelope)
 
     assert envelope["data"]["file_context"] == [
         {"path": relative, "content": content[: collect.MAX_FILE_BYTES]}
@@ -136,7 +136,7 @@ def test_keeps_uv_lock_over_four_mib_incomplete(tmp_path: Path) -> None:
 
     collect._add_context(builder, [relative])
     envelope = builder.finish().as_envelope()
-    preview = artifact._build_preview_summary("a" * 64, envelope)
+    preview = views._build_preview_summary("a" * 64, envelope)
 
     assert envelope["data"]["file_context"] == [
         {"path": relative, "content": content[: collect.UV_LOCK_MAX_FILE_BYTES]}
@@ -175,7 +175,7 @@ def test_keeps_unknown_extension_context_refused(tmp_path: Path, relative: str) 
     collect._add_context(builder, [relative])
     envelope = builder.finish().as_envelope()
 
-    preview = artifact._build_preview_summary("a" * 64, envelope)
+    preview = views._build_preview_summary("a" * 64, envelope)
     assert not security.is_relevant_text_path(relative)
     assert not security.is_extensionless_text_candidate(relative)
     assert envelope["data"]["file_context"] == []

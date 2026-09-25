@@ -11,7 +11,7 @@ import pytest
 import snapshot_runner as runner_namespace
 from snapshot_runner import artifact as artifact_module
 from snapshot_runner import cli as runner
-from snapshot_runner import collect, git
+from snapshot_runner import collect, git, model, views
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SUMMARY_KEYS = [
@@ -114,13 +114,11 @@ def _safe_snapshot(task: str) -> collect.Snapshot:
     return collect.Snapshot(task, PROJECT_ROOT.name, data, manifest)
 
 
-def _summary_artifact(
-    snapshot: collect.Snapshot, directory: Path
-) -> artifact_module.SnapshotArtifact:
+def _summary_artifact(snapshot: collect.Snapshot, directory: Path) -> model.SnapshotArtifact:
     envelope = snapshot.as_envelope()
     snapshot_bytes = artifact_module._serialize_snapshot(envelope)
     snapshot_id = hashlib.sha256(snapshot_bytes).hexdigest()
-    return artifact_module.SnapshotArtifact(
+    return model.SnapshotArtifact(
         snapshot_id,
         snapshot.task,
         snapshot_bytes,
@@ -237,13 +235,13 @@ def test_summary_public_entry_emits_bounded_json_for_all_four_commands(
     assert captured.err == ""
     assert captured.out.endswith("\n")
     assert captured.out.count("\n") == 1
-    assert len(captured.out.encode("utf-8")) <= artifact_module.MAX_SUMMARY_BYTES
+    assert len(captured.out.encode("utf-8")) <= model.MAX_SUMMARY_BYTES
     for excluded in ("SUMMARY_DIFF_BODY", "SUMMARY_COMPLETE_LOG_BODY", "BASELINE_COMMIT_BODY"):
         assert excluded not in captured.out
 
     summary = json.loads(captured.out)
     assert list(summary) == SUMMARY_KEYS
-    assert summary["summary_schema_version"] == artifact_module.SUMMARY_SCHEMA_VERSION == 2
+    assert summary["summary_schema_version"] == model.SUMMARY_SCHEMA_VERSION == 2
     assert summary["runner_version"] == runner_namespace.__version__ == "2.3.2"
     assert summary["command"] == task
     assert summary["repository"] == repo.name
@@ -283,8 +281,8 @@ def test_summary_serialization_is_deterministic_and_does_not_mutate_artifact(
     original_snapshot_bytes = artifact.snapshot_bytes
     original_envelope_bytes = artifact_module._serialize_snapshot(artifact.envelope)
 
-    first = artifact_module._build_summary_output(artifact, runner_namespace.__version__)
-    second = artifact_module._build_summary_output(artifact, runner_namespace.__version__)
+    first = views._build_summary_output(artifact, runner_namespace.__version__)
+    second = views._build_summary_output(artifact, runner_namespace.__version__)
 
     assert first == second
     assert first.endswith(b"\n")
@@ -298,25 +296,23 @@ def test_summary_serialization_is_deterministic_and_does_not_mutate_artifact(
 
 def test_summary_warnings_are_bounded_and_surface_truncation(tmp_path: Path) -> None:
     snapshot = _safe_snapshot("diff-audit")
-    gap_count = artifact_module.SUMMARY_WARNING_LIMIT + 3
+    gap_count = model.SUMMARY_WARNING_LIMIT + 3
     snapshot.evidence_gaps = [
         collect.EvidenceGap("file_limit", f"safe-{index}.txt", "bounded evidence omitted", index)
         for index in range(gap_count)
     ]
     artifact = _summary_artifact(snapshot, tmp_path)
 
-    summary = json.loads(
-        artifact_module._build_summary_output(artifact, runner_namespace.__version__)
-    )
+    summary = json.loads(views._build_summary_output(artifact, runner_namespace.__version__))
 
     assert summary["status"] == "partial"
     assert summary["next_action"] == "open_artifact"
     assert summary["truncated"] is True
     assert summary["evidence_gap"] is True
-    assert len(summary["warnings"]) == artifact_module.SUMMARY_WARNING_LIMIT
+    assert len(summary["warnings"]) == model.SUMMARY_WARNING_LIMIT
     assert summary["warnings_omitted"] == 3
     assert [warning["subject"] for warning in summary["warnings"]] == [
-        f"safe-{index}.txt" for index in range(artifact_module.SUMMARY_WARNING_LIMIT)
+        f"safe-{index}.txt" for index in range(model.SUMMARY_WARNING_LIMIT)
     ]
 
 
@@ -328,7 +324,7 @@ def test_summary_collapses_exact_path_scope_without_exposing_path_list(tmp_path:
     }
     artifact = _summary_artifact(snapshot, tmp_path)
 
-    output = artifact_module._build_summary_output(artifact, runner_namespace.__version__)
+    output = views._build_summary_output(artifact, runner_namespace.__version__)
     summary = json.loads(output)
 
     assert summary["scope"] == {"kind": "exact-paths", "path_count": 2}
@@ -338,15 +334,15 @@ def test_summary_collapses_exact_path_scope_without_exposing_path_list(tmp_path:
 
 def test_summary_bounds_long_scope_text_with_explicit_omission_count(tmp_path: Path) -> None:
     snapshot = _safe_snapshot("repo-status")
-    branch = "refs/heads/" + "a" * (artifact_module.SUMMARY_TEXT_LIMIT + 20)
+    branch = "refs/heads/" + "a" * (model.SUMMARY_TEXT_LIMIT + 20)
     snapshot.data["current_branch"] = branch
     artifact = _summary_artifact(snapshot, tmp_path)
 
-    output = artifact_module._build_summary_output(artifact, runner_namespace.__version__)
+    output = views._build_summary_output(artifact, runner_namespace.__version__)
     summary = json.loads(output)
 
     assert summary["scope"]["branch"] == {
-        "prefix": branch[: artifact_module.SUMMARY_TEXT_LIMIT],
+        "prefix": branch[: model.SUMMARY_TEXT_LIMIT],
         "omitted_characters": 31,
     }
     assert branch.encode() not in output

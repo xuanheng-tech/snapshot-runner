@@ -8,8 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from snapshot_runner import artifact, collect, git, security
-from snapshot_runner import cli as runner
+from snapshot_runner import application, collect, git, model, security, store
 
 GIT = "/usr/bin/git"
 MAX_COMMAND_BYTES = git.MAX_GIT_OUTPUT_BYTES
@@ -62,36 +61,38 @@ def _repository(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     return repo
 
 
-def _prepare(repo: Path) -> artifact.SnapshotArtifact:
-    target_path, target_name, runner_path = runner._validate_target_repository_path(os.fspath(repo))
+def _prepare(repo: Path) -> model.SnapshotArtifact:
+    target_path, target_name, runner_path = application._validate_target_repository_path(
+        os.fspath(repo)
+    )
     target = git._validate_target_repository_context(
         target_path,
         target_name,
         runner_path,
-        artifact._state_home(target_path),
+        store._state_home(target_path),
         GIT,
         "diff-audit",
     )
-    return runner._prepare_snapshot("diff-audit", None, target, GIT)
+    return application._prepare_snapshot("diff-audit", None, target, GIT)
 
 
-def _payload(snapshot: artifact.SnapshotArtifact) -> dict[str, object]:
+def _payload(snapshot: model.SnapshotArtifact) -> dict[str, object]:
     payload = json.loads(snapshot.snapshot_bytes)
     assert isinstance(payload["data"], dict)
     return payload
 
 
-def _gap_kinds(snapshot: artifact.SnapshotArtifact) -> list[str]:
+def _gap_kinds(snapshot: model.SnapshotArtifact) -> list[str]:
     return [gap["kind"] for gap in _gaps(snapshot)]
 
 
-def _gaps(snapshot: artifact.SnapshotArtifact) -> list[dict[str, str]]:
+def _gaps(snapshot: model.SnapshotArtifact) -> list[dict[str, str]]:
     gaps = json.loads(snapshot.snapshot_bytes)["evidence_gaps"]
     assert isinstance(gaps, list)
     return [gap for gap in gaps if isinstance(gap, dict)]
 
 
-def _field(snapshot: artifact.SnapshotArtifact, key: str) -> str:
+def _field(snapshot: model.SnapshotArtifact, key: str) -> str:
     value = _payload(snapshot)["data"][key]
     assert isinstance(value, str)
     return value

@@ -13,7 +13,7 @@ import pytest
 import snapshot_runner as runner_namespace
 from snapshot_runner import artifact as artifact_module
 from snapshot_runner import cli as runner
-from snapshot_runner import collect, git, security
+from snapshot_runner import collect, git, model, security, views
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE_KEYS = [
@@ -136,13 +136,11 @@ def _safe_snapshot(task: str) -> collect.Snapshot:
     return collect.Snapshot(task, PROJECT_ROOT.name, data, manifest)
 
 
-def _evidence_artifact(
-    snapshot: collect.Snapshot, directory: Path
-) -> artifact_module.SnapshotArtifact:
+def _evidence_artifact(snapshot: collect.Snapshot, directory: Path) -> model.SnapshotArtifact:
     envelope = snapshot.as_envelope()
     snapshot_bytes = artifact_module._serialize_snapshot(envelope)
     snapshot_id = hashlib.sha256(snapshot_bytes).hexdigest()
-    return artifact_module.SnapshotArtifact(
+    return model.SnapshotArtifact(
         snapshot_id,
         snapshot.task,
         snapshot_bytes,
@@ -195,11 +193,11 @@ def test_summary_to_targeted_read_covers_index_field_and_path(
     exit_code, out, err = _read_output(repo, snapshot_id, capsys)
     assert (exit_code, err) == (0, "")
     assert out.count("\n") == 1
-    assert len(out.encode("utf-8")) <= artifact_module.MAX_EVIDENCE_BYTES
+    assert len(out.encode("utf-8")) <= model.MAX_EVIDENCE_BYTES
     assert os.fspath(repo) not in out
     index = json.loads(out)
     assert list(index) == EVIDENCE_KEYS
-    assert index["evidence_schema_version"] == artifact_module.EVIDENCE_SCHEMA_VERSION == 1
+    assert index["evidence_schema_version"] == model.EVIDENCE_SCHEMA_VERSION == 1
     assert index["runner_version"] == runner_namespace.__version__
     assert index["command"] == "diff-audit"
     assert index["snapshot_id"] == snapshot_id
@@ -350,7 +348,7 @@ def test_evidence_partial_status_surfaces_gaps_without_failing(
     artifact = _evidence_artifact(snapshot, tmp_path)
 
     index = json.loads(
-        artifact_module._build_evidence_output(
+        views._build_evidence_output(
             artifact, runner_namespace.__version__, repository_root=tmp_path
         )
     )
@@ -360,7 +358,7 @@ def test_evidence_partial_status_surfaces_gaps_without_failing(
     assert index["evidence"]["evidence_gaps"] == snapshot.as_envelope()["evidence_gaps"]
 
     targeted = json.loads(
-        artifact_module._build_evidence_output(
+        views._build_evidence_output(
             artifact,
             runner_namespace.__version__,
             repository_root=tmp_path,
@@ -371,7 +369,7 @@ def test_evidence_partial_status_surfaces_gaps_without_failing(
     assert [gap["subject"] for gap in targeted["evidence"]["evidence_gaps"]] == ["missing.py"]
 
     unrelated = json.loads(
-        artifact_module._build_evidence_output(
+        views._build_evidence_output(
             artifact,
             runner_namespace.__version__,
             repository_root=tmp_path,
@@ -399,7 +397,7 @@ def test_path_attribution_follows_rename_metadata(tmp_path: Path) -> None:
     artifact = _evidence_artifact(snapshot, tmp_path)
 
     index = json.loads(
-        artifact_module._build_evidence_output(
+        views._build_evidence_output(
             artifact, runner_namespace.__version__, repository_root=tmp_path
         )
     )
@@ -407,7 +405,7 @@ def test_path_attribution_follows_rename_metadata(tmp_path: Path) -> None:
 
     for target in ("old.py", "new.py"):
         targeted = json.loads(
-            artifact_module._build_evidence_output(
+            views._build_evidence_output(
                 artifact,
                 runner_namespace.__version__,
                 repository_root=tmp_path,
@@ -421,7 +419,7 @@ def test_path_attribution_follows_rename_metadata(tmp_path: Path) -> None:
         assert sections["sections"][0].startswith("diff --git a/old.py b/new.py\n")
 
     unrelated = json.loads(
-        artifact_module._build_evidence_output(
+        views._build_evidence_output(
             artifact,
             runner_namespace.__version__,
             repository_root=tmp_path,
@@ -437,13 +435,13 @@ def test_field_mode_is_verbatim_deterministic_and_non_mutating(tmp_path: Path) -
     artifact = _evidence_artifact(snapshot, tmp_path)
     original_bytes = artifact.snapshot_bytes
 
-    first = artifact_module._build_evidence_output(
+    first = views._build_evidence_output(
         artifact,
         runner_namespace.__version__,
         repository_root=tmp_path,
         field="file_context",
     )
-    second = artifact_module._build_evidence_output(
+    second = views._build_evidence_output(
         artifact,
         runner_namespace.__version__,
         repository_root=tmp_path,
@@ -455,16 +453,16 @@ def test_field_mode_is_verbatim_deterministic_and_non_mutating(tmp_path: Path) -
     assert artifact.snapshot_bytes == original_bytes
 
     with pytest.raises(runner.RunnerError) as excinfo:
-        artifact_module._build_evidence_output(
+        views._build_evidence_output(
             artifact,
             runner_namespace.__version__,
             repository_root=tmp_path,
             field="absent",
         )
-    assert excinfo.value.code == artifact_module.ARTIFACT_VALIDATION_FAILED
+    assert excinfo.value.code == security.ARTIFACT_VALIDATION_FAILED
 
 
-@pytest.mark.parametrize("task", sorted(artifact_module.TASKS))
+@pytest.mark.parametrize("task", sorted(model.TASKS))
 def test_index_fields_match_every_task_data_field(
     tmp_path: Path,
     task: str,
@@ -473,7 +471,7 @@ def test_index_fields_match_every_task_data_field(
     artifact = _evidence_artifact(snapshot, tmp_path)
 
     index = json.loads(
-        artifact_module._build_evidence_output(
+        views._build_evidence_output(
             artifact, runner_namespace.__version__, repository_root=tmp_path
         )
     )
@@ -485,7 +483,7 @@ def test_path_mode_finds_nothing_for_log_only_tasks(tmp_path: Path) -> None:
     artifact = _evidence_artifact(snapshot, tmp_path)
 
     targeted = json.loads(
-        artifact_module._build_evidence_output(
+        views._build_evidence_output(
             artifact,
             runner_namespace.__version__,
             repository_root=tmp_path,
@@ -577,12 +575,12 @@ def test_read_never_needs_git_after_snapshot_publication(
 
 
 def _path_diff_sections(
-    artifact: artifact_module.SnapshotArtifact,
+    artifact: model.SnapshotArtifact,
     tmp_path: Path,
     target: str,
 ) -> dict[str, object]:
     payload = json.loads(
-        artifact_module._build_evidence_output(
+        views._build_evidence_output(
             artifact,
             runner_namespace.__version__,
             repository_root=tmp_path,
@@ -602,7 +600,7 @@ def test_path_attribution_follows_copy_metadata_without_duplication(
     artifact = _evidence_artifact(snapshot, tmp_path)
 
     index = json.loads(
-        artifact_module._build_evidence_output(
+        views._build_evidence_output(
             artifact, runner_namespace.__version__, repository_root=tmp_path
         )
     )
@@ -710,7 +708,7 @@ def test_field_mode_returns_verbatim_diff_and_caps_fail_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert artifact_module.MAX_EVIDENCE_BYTES == 8 * 1024 * 1024
+    assert model.MAX_EVIDENCE_BYTES == 8 * 1024 * 1024
 
     verbatim = (
         "diff --git a/large.py b/large.py\n"
@@ -725,7 +723,7 @@ def test_field_mode_returns_verbatim_diff_and_caps_fail_closed(
     artifact = _evidence_artifact(snapshot, tmp_path)
 
     field = json.loads(
-        artifact_module._build_evidence_output(
+        views._build_evidence_output(
             artifact,
             runner_namespace.__version__,
             repository_root=tmp_path,
@@ -734,15 +732,15 @@ def test_field_mode_returns_verbatim_diff_and_caps_fail_closed(
     )
     assert field["evidence"] == {"field": "staged_diff", "value": verbatim}
 
-    monkeypatch.setattr(artifact_module, "MAX_EVIDENCE_BYTES", 16)
+    monkeypatch.setattr(views, "MAX_EVIDENCE_BYTES", 16)
     with pytest.raises(runner.RunnerError) as excinfo:
-        artifact_module._build_evidence_output(
+        views._build_evidence_output(
             artifact,
             runner_namespace.__version__,
             repository_root=tmp_path,
             field="staged_diff",
         )
-    assert excinfo.value.code == artifact_module.ARTIFACT_VALIDATION_FAILED
+    assert excinfo.value.code == security.ARTIFACT_VALIDATION_FAILED
     assert "hard output limit exceeded: evidence" in str(excinfo.value)
 
 
@@ -895,7 +893,7 @@ def test_complete_evidence_recommends_targeted_read_on_a_tiny_snapshot(
     (repo / "safe.py").write_text("VALUE = 2\n", encoding="utf-8")
 
     summary = _prepare_summary(repo, capsys)
-    assert summary["summary_schema_version"] == artifact_module.SUMMARY_SCHEMA_VERSION == 2
+    assert summary["summary_schema_version"] == model.SUMMARY_SCHEMA_VERSION == 2
     assert summary["status"] == "complete"
     assert summary["evidence_gap"] is False
     assert summary["result"]["changed_files"] == 1

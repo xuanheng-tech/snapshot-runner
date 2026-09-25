@@ -9,8 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from snapshot_runner import artifact, collect, git, security
-from snapshot_runner import cli as runner
+from snapshot_runner import application, collect, git, model, security, store
 
 GIT = "/usr/bin/git"
 
@@ -89,12 +88,14 @@ def _private_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 
 def _validated_repository(repo: Path, task: str) -> git.ValidatedTargetRepository:
-    target_path, target_name, runner_path = runner._validate_target_repository_path(os.fspath(repo))
+    target_path, target_name, runner_path = application._validate_target_repository_path(
+        os.fspath(repo)
+    )
     return git._validate_target_repository_context(
         target_path,
         target_name,
         runner_path,
-        artifact._state_home(target_path),
+        store._state_home(target_path),
         GIT,
         task,
     )
@@ -104,9 +105,9 @@ def _prepare(
     repo: Path,
     task: str,
     task_argument: str | None = None,
-) -> artifact.SnapshotArtifact:
+) -> model.SnapshotArtifact:
     target = _validated_repository(repo, task)
-    return runner._prepare_snapshot(task, task_argument, target, GIT)
+    return application._prepare_snapshot(task, task_argument, target, GIT)
 
 
 def _admin_manifest(repo: Path) -> tuple[tuple[str, str, int, str], ...]:
@@ -132,7 +133,7 @@ def _readonly_state(repo: Path) -> tuple[bytes, tuple[tuple[str, str, int, str],
     return porcelain, _admin_manifest(repo)
 
 
-def _payload(snapshot: artifact.SnapshotArtifact) -> dict[str, object]:
+def _payload(snapshot: model.SnapshotArtifact) -> dict[str, object]:
     return json.loads(snapshot.snapshot_bytes)
 
 
@@ -157,7 +158,7 @@ def _repeated_repo_status(repo: Path) -> dict[str, object]:
     before = _readonly_state(repo)
     first = _prepare(repo, "repo-status")
     first_files = {
-        name: (first.directory / name).read_bytes() for name in artifact.SNAPSHOT_FILE_NAMES
+        name: (first.directory / name).read_bytes() for name in model.SNAPSHOT_FILE_NAMES
     }
     second = _prepare(repo, "repo-status")
     payload = _payload(first)
@@ -168,7 +169,7 @@ def _repeated_repo_status(repo: Path) -> dict[str, object]:
     assert first.snapshot_id == second.snapshot_id
     assert first.directory == second.directory
     assert first_files == {
-        name: (second.directory / name).read_bytes() for name in artifact.SNAPSHOT_FILE_NAMES
+        name: (second.directory / name).read_bytes() for name in model.SNAPSHOT_FILE_NAMES
     }
     assert "evidence_gaps=0 truncated=no incomplete=no" in (
         first.directory / "preview.txt"
@@ -201,7 +202,7 @@ def test_unborn_empty_repo_status_is_complete_deterministic_and_read_only(
     assert hashlib.sha256(first.snapshot_bytes).hexdigest() == first.snapshot_id
     assert len(first.snapshot_bytes) <= collect.MAX_SNAPSHOT_BYTES
     assert stat.S_IMODE(first.directory.lstat().st_mode) == 0o700
-    for name in artifact.SNAPSHOT_FILE_NAMES:
+    for name in model.SNAPSHOT_FILE_NAMES:
         assert stat.S_IMODE((first.directory / name).lstat().st_mode) == 0o600
     preview = (first.directory / "preview.txt").read_text(encoding="utf-8")
     assert "git: branch=new-project head=unborn" in preview
@@ -520,7 +521,7 @@ def test_branch_review_rejects_unborn_before_collection(
         security.RunnerError,
         match="branch-review requires a target branch with at least one commit",
     ):
-        runner._prepare_snapshot("branch-review", "main", target, GIT)
+        application._prepare_snapshot("branch-review", "main", target, GIT)
     assert collected is False
     assert not (state / "snapshot-runner").exists()
 

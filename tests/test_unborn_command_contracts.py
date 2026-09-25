@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 import snapshot_runner
-from snapshot_runner import artifact, collect, git, security
+from snapshot_runner import application, collect, git, model, security, store
 from snapshot_runner import cli as runner
 
 GIT = "/usr/bin/git"
@@ -62,17 +62,19 @@ def _prepare(
     repo: Path,
     task: str,
     task_argument: str | None = None,
-) -> artifact.SnapshotArtifact:
-    target_path, target_name, runner_path = runner._validate_target_repository_path(os.fspath(repo))
+) -> model.SnapshotArtifact:
+    target_path, target_name, runner_path = application._validate_target_repository_path(
+        os.fspath(repo)
+    )
     target = git._validate_target_repository_context(
         target_path,
         target_name,
         runner_path,
-        artifact._state_home(target_path),
+        store._state_home(target_path),
         GIT,
         task,
     )
-    return runner._prepare_snapshot(task, task_argument, target, GIT)
+    return application._prepare_snapshot(task, task_argument, target, GIT)
 
 
 def _git_manifest(repo: Path) -> tuple[tuple[str, str, int, str], ...]:
@@ -103,7 +105,7 @@ def _readonly_state(repo: Path) -> tuple[bytes, tuple[tuple[str, str, int, str],
     return status, _git_manifest(repo)
 
 
-def _payload(result: artifact.SnapshotArtifact) -> dict[str, object]:
+def _payload(result: model.SnapshotArtifact) -> dict[str, object]:
     return json.loads(result.snapshot_bytes)
 
 
@@ -128,7 +130,7 @@ def test_unborn_branch_review_uses_frozen_error_before_collection(
     assert result == 2
     assert captured.out == ""
     assert captured.err == (
-        f"workflow_failed: SNAPSHOT_COLLECTION_FAILED: {runner.BRANCH_REVIEW_UNBORN_ERROR}\n"
+        f"workflow_failed: SNAPSHOT_COLLECTION_FAILED: {application.BRANCH_REVIEW_UNBORN_ERROR}\n"
     )
     assert not (state / "snapshot-runner").exists()
     assert _readonly_state(repo) == before
@@ -196,7 +198,7 @@ def test_unborn_commands_combine_empty_tree_and_extensionless_evidence(
     assert hashlib.sha256(first.snapshot_bytes).hexdigest() == first.snapshot_id
     assert len(first.snapshot_bytes) <= collect.MAX_SNAPSHOT_BYTES
     assert stat.S_IMODE(first.directory.lstat().st_mode) == 0o700
-    for name in artifact.SNAPSHOT_FILE_NAMES:
+    for name in model.SNAPSHOT_FILE_NAMES:
         assert stat.S_IMODE((first.directory / name).lstat().st_mode) == 0o600
     assert _readonly_state(repo) == before
 
@@ -237,13 +239,13 @@ def test_installed_runner_boundary_keeps_target_validation_and_collection(
         repo,
         repo.name,
         installed_root,
-        artifact._state_home(repo),
+        store._state_home(repo),
         GIT,
         "repo-status",
         allow_installed_runner=True,
     )
 
-    result = runner._prepare_snapshot("repo-status", None, target, GIT)
+    result = application._prepare_snapshot("repo-status", None, target, GIT)
     payload = _payload(result)
 
     assert target.runner_root == installed_root

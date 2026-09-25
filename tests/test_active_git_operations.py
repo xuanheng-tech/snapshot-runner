@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from snapshot_runner import artifact, security
 from snapshot_runner import cli as runner
+from snapshot_runner import legacy_v2, security
 
 GIT = "/usr/bin/git"
 
@@ -612,28 +612,28 @@ def test_unsafe_symlinks_rejected(
 def test_artifact_schema_validation_rejects_invalid_active_operation() -> None:
     # Unknown type
     with pytest.raises(security.RunnerError, match="snapshot active-operation schema is invalid"):
-        artifact._validate_active_operation({"type": "magic_rebase"})
+        legacy_v2._validate_active_operation({"type": "magic_rebase"})
 
     # Missing required keys
     with pytest.raises(security.RunnerError, match="snapshot active-operation schema is invalid"):
-        artifact._validate_active_operation({"type": "merge"})
+        legacy_v2._validate_active_operation({"type": "merge"})
 
     # Invalid heads
     with pytest.raises(security.RunnerError, match="snapshot active-operation schema is invalid"):
-        artifact._validate_active_operation({"type": "merge", "heads": []})
+        legacy_v2._validate_active_operation({"type": "merge", "heads": []})
 
     with pytest.raises(security.RunnerError, match="snapshot active-operation schema is invalid"):
-        artifact._validate_active_operation({"type": "merge", "heads": ["invalid-oid"]})
+        legacy_v2._validate_active_operation({"type": "merge", "heads": ["invalid-oid"]})
 
     # Extra keys
     with pytest.raises(security.RunnerError, match="snapshot active-operation schema is invalid"):
-        artifact._validate_active_operation(
+        legacy_v2._validate_active_operation(
             {"type": "merge", "heads": ["a" * 40], "unauthorized": True}
         )
 
     # Invalid rebase keys
     with pytest.raises(security.RunnerError, match="snapshot active-operation schema is invalid"):
-        artifact._validate_active_operation(
+        legacy_v2._validate_active_operation(
             {
                 "type": "rebase",
                 "head_name": "refs/heads/main",
@@ -644,7 +644,7 @@ def test_artifact_schema_validation_rejects_invalid_active_operation() -> None:
         )
 
     with pytest.raises(security.RunnerError, match="snapshot active-operation schema is invalid"):
-        artifact._validate_active_operation(
+        legacy_v2._validate_active_operation(
             {
                 "type": "rebase",
                 "head_name": "refs/heads/main",

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from snapshot_runner import artifact, collect, git, security
+from snapshot_runner import application, collect, git, model, security, store
 from snapshot_runner import cli as runner
 
 GIT = "/usr/bin/git"
@@ -41,17 +41,19 @@ def _prepare(
     *,
     initial: bool = True,
     generated_trees: tuple[str, ...] = ("generated",),
-) -> artifact.SnapshotArtifact:
-    target_path, target_name, runner_path = runner._validate_target_repository_path(os.fspath(repo))
+) -> model.SnapshotArtifact:
+    target_path, target_name, runner_path = application._validate_target_repository_path(
+        os.fspath(repo)
+    )
     target = git._validate_target_repository_context(
         target_path,
         target_name,
         runner_path,
-        artifact._state_home(target_path),
+        store._state_home(target_path),
         GIT,
         "diff-audit",
     )
-    return runner._prepare_snapshot(
+    return application._prepare_snapshot(
         "diff-audit",
         None,
         target,
@@ -102,7 +104,7 @@ def _write_generated_tree(
     )
 
 
-def _payload(result: artifact.SnapshotArtifact) -> dict[str, object]:
+def _payload(result: model.SnapshotArtifact) -> dict[str, object]:
     return json.loads(result.snapshot_bytes)
 
 

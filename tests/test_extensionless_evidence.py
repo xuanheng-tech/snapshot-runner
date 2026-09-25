@@ -9,8 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from snapshot_runner import artifact, collect, git
-from snapshot_runner import cli as runner
+from snapshot_runner import application, collect, git, model, store
 
 GIT = "/usr/bin/git"
 
@@ -68,20 +67,22 @@ def _prepare(
     repo: Path,
     task: str = "diff-audit",
     task_argument: str | None = None,
-) -> artifact.SnapshotArtifact:
-    target_path, target_name, runner_path = runner._validate_target_repository_path(os.fspath(repo))
+) -> model.SnapshotArtifact:
+    target_path, target_name, runner_path = application._validate_target_repository_path(
+        os.fspath(repo)
+    )
     target = git._validate_target_repository_context(
         target_path,
         target_name,
         runner_path,
-        artifact._state_home(target_path),
+        store._state_home(target_path),
         GIT,
         task,
     )
-    return runner._prepare_snapshot(task, task_argument, target, GIT)
+    return application._prepare_snapshot(task, task_argument, target, GIT)
 
 
-def _payload(result: artifact.SnapshotArtifact) -> dict[str, object]:
+def _payload(result: model.SnapshotArtifact) -> dict[str, object]:
     return json.loads(result.snapshot_bytes)
 
 
@@ -227,7 +228,7 @@ def test_staged_and_worktree_extensionless_versions_are_distinct_and_read_only(
     assert hashlib.sha256(first.snapshot_bytes).hexdigest() == first.snapshot_id
     assert len(first.snapshot_bytes) <= collect.MAX_SNAPSHOT_BYTES
     assert stat.S_IMODE(first.directory.lstat().st_mode) == 0o700
-    for name in artifact.SNAPSHOT_FILE_NAMES:
+    for name in model.SNAPSHOT_FILE_NAMES:
         assert stat.S_IMODE((first.directory / name).lstat().st_mode) == 0o600
     assert _readonly_state(repo) == before
 
