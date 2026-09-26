@@ -416,3 +416,34 @@ def test_no_sanitizer_rule_is_read_bypassing_the_era_policy() -> None:
             if isinstance(inner, ast.Name) and inner.id in RULE_CONSTANT_NAMES:
                 offenders.append(f"{node.name}:{inner.lineno} {inner.id}")
     assert offenders == []
+
+
+def test_writing_stops_when_the_release_rules_leave_the_registered_era(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tightened rule with no registered era must not publish evidence that only looks scrubbed.
+
+    The damage would be permanent: the artifact carries this release's declarations while having been
+    scanned with the previous rules, and the raw text sits in the caller's own state directory. Reads
+    of a registered era must not depend on this at all.
+    """
+    monkeypatch.setattr(
+        security_module,
+        "CURRENT_RULES",
+        replace(
+            security_module.CURRENT_RULES,
+            token_patterns=(
+                *security_module.CURRENT_RULES.token_patterns,
+                ("GITHUB_TOKEN", re.compile(r"\bzombie-token\b")),
+            ),
+        ),
+    )
+
+    with pytest.raises(artifact_module.RunnerError) as stopped:
+        artifact_module._sanitize_validate_snapshot(dict(_MINIMAL_ENVELOPE), Path("/tmp"))
+    assert str(stopped.value) == verifiers.CURRENT_RULE_MISMATCH_ERROR
+
+    named = artifact_module._sanitize_validate_snapshot(
+        dict(_MINIMAL_ENVELOPE), Path("/tmp"), verifier=verifiers.CURRENT_VERIFIER
+    )
+    assert named["task"] == "test-triage"

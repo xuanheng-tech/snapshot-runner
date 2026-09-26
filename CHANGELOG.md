@@ -89,7 +89,12 @@ public source baseline; it was not tagged or published to PyPI.
   reads the live constants, while `SCAN_RULES_V2` holds the era-4 values as its own literals: the two
   are deliberately *not* one object, because an era that reads the live constants moves with them and
   is not frozen at all. `tests/test_verifier_registry.py` compares them by value, so tightening a rule
-  without registering the era that replaces it fails there. A read installs its era's rules with
+  without registering the era that replaces it fails there, and `resolve_verifier` refuses to write in
+  that state at all -- publishing would otherwise stamp a new artifact with this release's declarations
+  while scanning it with the previous rules, leaving raw text in the caller's own store. A read that
+  names its era is unaffected. Measured: with one pattern added and no era registered, publishing
+  stops with `SNAPSHOT_COLLECTION_FAILED`, zero artifacts are written, and an already-published
+  artifact still reads. A read installs its era's rules with
   `security.era_rules()` for the duration of re-scanning that artifact, and the targeted-evidence
   route uses the same era as the load that validated the bytes, so attributing a stored diff no longer
   answers differently depending on which release is installed.
@@ -101,8 +106,8 @@ public source baseline; it was not tagged or published to PyPI.
   ten artifacts refusing their own canonical bytes with the whole test suite passing; with them
   separated, all ten read byte-exactly and the registry test fails until an era is registered.
   Across the whole store, every artifact loaded under released 2.3.2 and under this code with
-  unchanged bytes and an identical parsed envelope -- 559 directories at the time of writing, which is
-  a growing number, not a constant. The envelope claim is not independent of the load claim: the
+  unchanged bytes and an identical parsed envelope -- 597 directories at the last run, which is a
+  growing number, not a constant. The envelope claim is not independent of the load claim: the
   loader refuses unless the canonical serialization reproduces the stored bytes, so a successful load
   already entails it.
 - Preserved: what pinning rules does not touch. Identity validation is not era-relative and was not
