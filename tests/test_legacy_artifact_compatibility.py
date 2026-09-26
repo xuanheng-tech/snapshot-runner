@@ -10,7 +10,10 @@ from pathlib import Path
 
 import pytest
 
+from snapshot_runner import artifact as artifact_module
 from snapshot_runner import cli as runner
+from snapshot_runner import collect as collect_module
+from snapshot_runner import security as security_module
 
 SNAPSHOT_ID = "1da3b7c99b425b2a087554fc9ccb0b372fc0aaae40eda09b00c352f780642869"
 _META_SHA256 = "4c2979e3a10792f366ffd8f9a7f5a927dc358b22d1c8b8067ef45ea54f8af312"
@@ -116,14 +119,9 @@ def _read(
     return exit_code, captured.out, captured.err
 
 
-def test_artifact_published_by_2_3_1_still_reads_by_index_field_and_path(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    state = tmp_path / "state"
-    state.mkdir(mode=0o700)
-    monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state))
+def _install_artifact(state: Path) -> tuple[Path, dict[str, bytes]]:
+    """Write the published fixture bytes into a private store exactly as the tool stores them."""
+
     directory = state / "snapshot-runner" / "snapshots" / SNAPSHOT_ID
     # The store rejects a group-readable path, so the fixture mirrors the tool's own modes.
     for level in (directory.parent.parent, directory.parent, directory):
@@ -133,6 +131,18 @@ def test_artifact_published_by_2_3_1_still_reads_by_index_field_and_path(
         artifact_file = directory / name
         artifact_file.write_bytes(payload)
         artifact_file.chmod(0o600)
+    return directory, fixtures
+
+
+def test_artifact_published_by_2_3_1_still_reads_by_index_field_and_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state))
+    directory, fixtures = _install_artifact(state)
     repo = _repository(tmp_path)
 
     exit_code, out, err = _read(repo, SNAPSHOT_ID, capsys)
@@ -170,15 +180,7 @@ def test_tampering_with_a_historical_artifact_still_fails_closed(
     state = tmp_path / "state"
     state.mkdir(mode=0o700)
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state))
-    directory = state / "snapshot-runner" / "snapshots" / SNAPSHOT_ID
-    # The store rejects a group-readable path, so the fixture mirrors the tool's own modes.
-    for level in (directory.parent.parent, directory.parent, directory):
-        level.mkdir(mode=0o700)
-    fixtures = _fixture_files()
-    for name, payload in fixtures.items():
-        artifact_file = directory / name
-        artifact_file.write_bytes(payload)
-        artifact_file.chmod(0o600)
+    directory, fixtures = _install_artifact(state)
     repo = _repository(tmp_path)
 
     tampered = fixtures["snapshot.json"].replace(b'"VALUE = 5\\n"', b'"VALUE = 6\\n"')
@@ -191,3 +193,34 @@ def test_tampering_with_a_historical_artifact_still_fails_closed(
     assert out == ""
     assert err.startswith("workflow_failed: ARTIFACT_VALIDATION_FAILED:")
     assert {path.name: path.read_bytes() for path in directory.iterdir()} != fixtures
+
+
+def test_a_historical_read_does_not_depend_on_todays_classifier_constants(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The next classifier bump must not silently orphan the artifacts the last one wrote.
+
+    ``security_notice`` embeds ``SCAN_CLASSIFIER_VERSION``, so raising the version changes the
+    declaration every release writes. Reading history through a live constant turns that routine
+    producer-side change into a store-wide outage, which is why the load path resolves a verifier
+    from the versions the artifact itself declares instead.
+    """
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state))
+    directory, fixtures = _install_artifact(state)
+    repo = _repository(tmp_path)
+
+    bumped_notice = collect_module.SECURITY_NOTICE.replace("version: 2.", "version: 3.")
+    assert bumped_notice != collect_module.SECURITY_NOTICE
+    monkeypatch.setattr(security_module, "SCAN_CLASSIFIER_VERSION", 3)
+    monkeypatch.setattr(security_module, "SUPPORTED_SCAN_CLASSIFIER_VERSIONS", frozenset({2, 3}))
+    monkeypatch.setattr(collect_module, "SECURITY_NOTICE", bumped_notice)
+    monkeypatch.setattr(artifact_module, "SECURITY_NOTICE", bumped_notice)
+
+    exit_code, out, err = _read(repo, SNAPSHOT_ID, capsys)
+    assert (exit_code, err) == (0, ""), out + err
+    assert json.loads(out)["snapshot_id"] == SNAPSHOT_ID
+    assert {path.name: path.read_bytes() for path in directory.iterdir()} == fixtures

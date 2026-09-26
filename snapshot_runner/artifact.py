@@ -24,7 +24,6 @@ from .collect import (
     MAX_SNAPSHOT_BYTES,
     PRODUCER_SECURITY_EPOCH,
     SECURITY_NOTICE,
-    SNAPSHOT_SCHEMA_VERSION,
     TRUST_BOUNDARY,
     _publication_workspace_sha256,
 )
@@ -33,7 +32,6 @@ from .security import (
     ARTIFACT_PUBLISH_FAILED,
     ARTIFACT_VALIDATION_FAILED,
     REPOSITORY_VALIDATION_FAILED,
-    SCAN_CLASSIFIER_VERSION,
     YAML_CONTENT_REFUSED,
     RunnerError,
     ScanMode,
@@ -56,10 +54,10 @@ from .security import (
 from .security import (
     validate_no_symlink_ancestors as _validate_no_symlink_ancestors,
 )
+from .verifiers import CURRENT_VERIFIER, ArtifactVerifier, verifier_for
 
 SNAPSHOT_PUBLISH_DURABILITY_ERROR = "snapshot published but snapshot-store durability sync failed"
 STATE_HOME_MISSING_ERROR = "state home must already exist as a private directory"
-SNAPSHOT_SECURITY_EPOCH_ERROR = "snapshot producer security epoch is not current"
 MAX_META_BYTES = 64 * 1024
 MAX_PREVIEW_BYTES = 16 * 1024 * 1024
 MAX_SUMMARY_BYTES = 64 * 1024
@@ -323,7 +321,9 @@ def _require_exact_keys(
     return value
 
 
-def _validate_snapshot_meta_schema(value: object) -> dict[str, object]:
+def _validate_snapshot_meta_schema(
+    value: object, verifier: ArtifactVerifier = CURRENT_VERIFIER
+) -> dict[str, object]:
     keys = {
         "schema_version",
         "producer_security_epoch",
@@ -337,8 +337,10 @@ def _validate_snapshot_meta_schema(value: object) -> dict[str, object]:
     }
     meta = _require_exact_keys(value, keys, description="snapshot meta")
     if (
-        not _is_exact_version(meta.get("schema_version"), SNAPSHOT_META_SCHEMA_VERSION)
-        or not _is_exact_version(meta.get("producer_security_epoch"), PRODUCER_SECURITY_EPOCH)
+        not _is_exact_version(meta.get("schema_version"), verifier.meta_schema_version)
+        or not _is_exact_version(
+            meta.get("producer_security_epoch"), verifier.producer_security_epoch
+        )
         or meta.get("task") not in TASKS
         or not _is_safe_repository_name(meta.get("repository"))
         or not isinstance(meta.get("snapshot_id"), str)
@@ -935,7 +937,9 @@ def _collect_string_modes(
                 _collect_string_modes(item, bindings, (*path, key))
 
 
-def _snapshot_data_scan_manifest(envelope: dict[str, object]) -> ScanModeManifest:
+def _snapshot_data_scan_manifest(
+    envelope: dict[str, object], verifier: ArtifactVerifier = CURRENT_VERIFIER
+) -> ScanModeManifest:
     data = envelope["data"]
     task = str(envelope["task"])
     assert isinstance(data, dict)
@@ -1011,7 +1015,7 @@ def _snapshot_data_scan_manifest(envelope: dict[str, object]) -> ScanModeManifes
             ARTIFACT_VALIDATION_FAILED, "snapshot scan manifest does not exactly cover task data"
         )
     return ScanModeManifest(
-        SCAN_CLASSIFIER_VERSION,
+        verifier.scan_classifier_version,
         tuple(
             ScanModeBinding(path, mode)
             for path, mode in sorted(bindings.items(), key=lambda item: repr(item[0]))
@@ -1019,14 +1023,16 @@ def _snapshot_data_scan_manifest(envelope: dict[str, object]) -> ScanModeManifes
     )
 
 
-def _snapshot_scan_manifest(value: dict[str, object]) -> ScanModeManifest:
+def _snapshot_scan_manifest(
+    value: dict[str, object], verifier: ArtifactVerifier = CURRENT_VERIFIER
+) -> ScanModeManifest:
     bindings: dict[tuple[str | int, ...], ScanMode] = {}
     _collect_string_modes(value, bindings)
-    data_manifest = _snapshot_data_scan_manifest(value)
+    data_manifest = _snapshot_data_scan_manifest(value, verifier)
     for binding in data_manifest.bindings:
         bindings[("data", *binding.path)] = binding.mode
     return ScanModeManifest(
-        SCAN_CLASSIFIER_VERSION,
+        verifier.scan_classifier_version,
         tuple(
             ScanModeBinding(path, mode)
             for path, mode in sorted(bindings.items(), key=lambda item: repr(item[0]))
@@ -1041,10 +1047,11 @@ def _sanitize_validate_snapshot(
     extra_paths: tuple[Path, ...] = (),
     expected_scan_manifest: ScanModeManifest | None = None,
     verify_live_diff_text: bool = True,
+    verifier: ArtifactVerifier = CURRENT_VERIFIER,
 ) -> dict[str, object]:
-    envelope = _validate_snapshot_envelope(payload)
+    envelope = _validate_snapshot_envelope(payload, verifier)
     try:
-        derived_snapshot_manifest = _snapshot_data_scan_manifest(envelope)
+        derived_snapshot_manifest = _snapshot_data_scan_manifest(envelope, verifier)
     except SecurityError as exc:
         raise _runner_security_error(exc, "snapshot scan classifier invariant failed") from exc
     if expected_scan_manifest is not None and (
@@ -1057,7 +1064,7 @@ def _sanitize_validate_snapshot(
         )
     protected, redactions = _protect_snapshot_redactions(envelope)
     try:
-        scan_manifest = _snapshot_scan_manifest(protected)
+        scan_manifest = _snapshot_scan_manifest(protected, verifier)
     except SecurityError as exc:
         raise _runner_security_error(
             exc, "artifact scan classifier manifest validation failed"
@@ -1073,7 +1080,9 @@ def _sanitize_validate_snapshot(
         )
     except SecurityError as exc:
         raise _runner_security_error(exc, "artifact sanitization failed closed") from exc
-    normalized = _validate_snapshot_envelope(_restore_snapshot_redactions(normalized, redactions))
+    normalized = _validate_snapshot_envelope(
+        _restore_snapshot_redactions(normalized, redactions), verifier
+    )
 
     invariant_input, invariant_redactions = _protect_snapshot_redactions(normalized)
     try:
@@ -1661,7 +1670,9 @@ def _validate_initial_publication(
         )
 
 
-def _validate_snapshot_envelope(value: object) -> dict[str, object]:
+def _validate_snapshot_envelope(
+    value: object, verifier: ArtifactVerifier = CURRENT_VERIFIER
+) -> dict[str, object]:
     if not isinstance(value, dict):
         raise RunnerError(ARTIFACT_VALIDATION_FAILED, "snapshot schema requires a JSON object")
     expected_keys = {
@@ -1678,8 +1689,10 @@ def _validate_snapshot_envelope(value: object) -> dict[str, object]:
     }
     if (
         set(value) != expected_keys
-        or not _is_exact_version(value.get("schema_version"), SNAPSHOT_SCHEMA_VERSION)
-        or not _is_exact_version(value.get("producer_security_epoch"), PRODUCER_SECURITY_EPOCH)
+        or not _is_exact_version(value.get("schema_version"), verifier.schema_version)
+        or not _is_exact_version(
+            value.get("producer_security_epoch"), verifier.producer_security_epoch
+        )
     ):
         raise RunnerError(ARTIFACT_VALIDATION_FAILED, "snapshot envelope schema is invalid")
     task = value.get("task")
@@ -1690,8 +1703,8 @@ def _validate_snapshot_envelope(value: object) -> dict[str, object]:
     if task not in TASKS or not _is_safe_repository_name(repository):
         raise RunnerError(ARTIFACT_VALIDATION_FAILED, "snapshot task or repository is invalid")
     if (
-        value.get("trust_boundary") != TRUST_BOUNDARY
-        or value.get("security_notice") != SECURITY_NOTICE
+        value.get("trust_boundary") != verifier.trust_boundary
+        or value.get("security_notice") != verifier.security_notice
     ):
         raise RunnerError(
             ARTIFACT_VALIDATION_FAILED, "snapshot threat-model declarations are invalid"
@@ -1972,11 +1985,10 @@ def _load_snapshot_directory(
         meta = json.loads(meta_bytes)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise RunnerError(ARTIFACT_PUBLISH_FAILED, "snapshot meta is not valid UTF-8 JSON") from exc
-    if not isinstance(meta, dict) or not _is_exact_version(
-        meta.get("producer_security_epoch"), PRODUCER_SECURITY_EPOCH
-    ):
-        raise RunnerError(ARTIFACT_PUBLISH_FAILED, SNAPSHOT_SECURITY_EPOCH_ERROR)
-    meta = _validate_snapshot_meta_schema(meta)
+    if not isinstance(meta, dict):
+        raise RunnerError(ARTIFACT_PUBLISH_FAILED, "snapshot meta is not a JSON object")
+    verifier = verifier_for(meta.get("schema_version"), meta.get("producer_security_epoch"))
+    meta = _validate_snapshot_meta_schema(meta, verifier)
     if _serialize_snapshot_meta(meta) != meta_bytes:
         raise RunnerError(
             ARTIFACT_PUBLISH_FAILED, "snapshot meta canonical artifact validation failed"
@@ -2005,6 +2017,7 @@ def _load_snapshot_directory(
         active_root if active_root is not None else REPOSITORY_ROOT,
         extra_paths=(directory,),
         verify_live_diff_text=False,
+        verifier=verifier,
     )
     if _serialize_snapshot(envelope) != snapshot_bytes:
         raise RunnerError(
@@ -2012,10 +2025,14 @@ def _load_snapshot_directory(
         )
     task = envelope["task"]
     if (
-        not _is_exact_version(meta.get("schema_version"), SNAPSHOT_META_SCHEMA_VERSION)
-        or not _is_exact_version(envelope.get("schema_version"), SNAPSHOT_SCHEMA_VERSION)
-        or not _is_exact_version(meta.get("producer_security_epoch"), PRODUCER_SECURITY_EPOCH)
-        or not _is_exact_version(envelope.get("producer_security_epoch"), PRODUCER_SECURITY_EPOCH)
+        not _is_exact_version(meta.get("schema_version"), verifier.meta_schema_version)
+        or not _is_exact_version(envelope.get("schema_version"), verifier.schema_version)
+        or not _is_exact_version(
+            meta.get("producer_security_epoch"), verifier.producer_security_epoch
+        )
+        or not _is_exact_version(
+            envelope.get("producer_security_epoch"), verifier.producer_security_epoch
+        )
         or meta.get("producer_security_epoch") != envelope.get("producer_security_epoch")
         or meta.get("task") != task
         or meta.get("repository") != envelope.get("repository")

@@ -994,17 +994,31 @@ def test_snapshot_reload_rebuilds_manifest_with_same_fixed_classifier_after_vali
     assert loaded.directory.is_relative_to(private_state)
 
 
-def test_snapshot_reload_rejects_scan_classifier_version_drift(
+def test_snapshot_reload_follows_the_registered_era_not_the_live_classifier_version(
     monkeypatch: pytest.MonkeyPatch,
     private_state: Path,
     target_repository: git.ValidatedTargetRepository,
 ) -> None:
+    """A stored snapshot is read under the rules of the era that wrote it.
+
+    Raising a release's classifier version must not decide whether the previous release's
+    artifacts stay readable, so the load path takes that version from the registered verifier
+    instead of the live constant. What still has to fail closed is an era the sanitizer will not
+    run at all.
+    """
     snapshot = _snapshot_with_file_context("token: str\n", "safe.py")
     monkeypatch.setattr(collect, "collect_diff_audit", lambda *_args, **_kwargs: snapshot)
     artifact = runner._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
-    monkeypatch.setattr(
-        artifact_module, "SCAN_CLASSIFIER_VERSION", security.SCAN_CLASSIFIER_VERSION + 1
-    )
+    before = {path.name: path.read_bytes() for path in artifact.directory.iterdir()}
+    bumped = security.SCAN_CLASSIFIER_VERSION + 1
+    monkeypatch.setattr(security, "SCAN_CLASSIFIER_VERSION", bumped)
+    monkeypatch.setattr(artifact_module, "SECURITY_NOTICE", f"bumped notice {bumped}")
+
+    loaded = artifact_module._load_snapshot(artifact.snapshot_id)
+    assert loaded.snapshot_id == artifact.snapshot_id
+    assert {path.name: path.read_bytes() for path in artifact.directory.iterdir()} == before
+
+    monkeypatch.setattr(security, "SUPPORTED_SCAN_CLASSIFIER_VERSIONS", frozenset())
     with pytest.raises(runner.RunnerError, match="classifier"):
         artifact_module._load_snapshot(artifact.snapshot_id)
     assert artifact.directory.is_relative_to(private_state)

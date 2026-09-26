@@ -166,6 +166,12 @@ Artifact directories have mode `0700`; these three files have mode `0600`. The s
 ID is the SHA-256 of the canonical `snapshot.json` bytes. Writes use private staging,
 hash/size revalidation, and atomic publication.
 
+A read resolves the declarations a snapshot was written under — its threat-model text and
+scan classifier version — from the versions recorded in its own `meta.json`, so raising a
+producer-side constant in a later release keeps the artifacts of a registered era readable.
+An artifact declaring an era this build has not registered is refused before its bytes are
+hashed or sanitized, and no stored artifact is ever rewritten or migrated.
+
 With the same Runner version, command/options, collected repository state and contents,
 and path-sanitization context, canonical evidence and snapshot IDs are deterministic.
 This is a local evidence property: changes to refs, configuration, working files, logs,

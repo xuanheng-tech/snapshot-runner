@@ -47,6 +47,9 @@ MAX_SANITIZE_ELEMENTS = 10_000
 MAX_DIFF_PATH_CANDIDATES = 128
 MAX_EXTENSIONLESS_TEXT_BYTES = 64 * 1024
 SCAN_CLASSIFIER_VERSION = 2
+# Every classifier version a supported artifact era may declare. A manifest naming a version
+# outside this set is still refused, so widening it only ever admits a registered artifact era.
+SUPPORTED_SCAN_CLASSIFIER_VERSIONS = frozenset({SCAN_CLASSIFIER_VERSION})
 YAML_CONTENT_REFUSED = "yaml_content_refused"
 
 PEM_PRIVATE_KEY_BOUNDARY_RE = re.compile(
@@ -171,7 +174,7 @@ class ScanModeManifest:
     bindings: tuple[ScanModeBinding, ...]
 
     def __post_init__(self) -> None:
-        if self.classifier_version != SCAN_CLASSIFIER_VERSION:
+        if self.classifier_version not in SUPPORTED_SCAN_CLASSIFIER_VERSIONS:
             raise SecurityError("scan mode classifier version is invalid")
         seen: set[tuple[str | int, ...]] = set()
         for binding in self.bindings:

@@ -52,6 +52,37 @@ public source baseline; it was not tagged or published to PyPI.
   a repository never reached it because its whole-tree command was refused for truncating first.
   Either way no artifact was published before or is published now. Aligning that cut to a complete
   diff entry is separate work.
+- Added: a version-pinned artifact verifier registry, `snapshot_runner/verifiers.py`. Reading a
+  stored snapshot now resolves the rules it was written under from the versions that snapshot
+  declares in its own `meta.json` (`schema_version` and `producer_security_epoch`) instead of
+  comparing them against the constants of whichever release happens to be running. The row supplies
+  `trust_boundary`, `security_notice`, the scan classifier version and both schema versions, and an
+  unregistered version is refused with `ARTIFACT_PUBLISH_FAILED` and
+  `snapshot declares an unsupported artifact version` before the snapshot bytes are hashed,
+  sanitized or trusted. Nothing was migrated and no artifact was rewritten: the one era in
+  existence -- schema 2, meta schema 2, epoch 4, classifier 2, declared by all 549 snapshots in this
+  machine's private store -- is registered as `CURRENT_VERIFIER` with its declarations copied as
+  literals, so every one of those 549 still loads with an identical re-derived envelope, measured by
+  loading each artifact under the previous code and the current one.
+- Changed: the reversed half of that guarantee. `test_snapshot_reload_rejects_scan_classifier_version_drift`
+  asserted that raising `SCAN_CLASSIFIER_VERSION` makes a stored snapshot unreadable, and it was
+  true: with the constant bumped to 3, four sampled real artifacts each failed with
+  `snapshot scan classifier invariant failed`, and editing only the notice text that embeds that
+  version failed the same four with `snapshot threat-model declarations are invalid`, because
+  `security_notice` is compared literally while `SECURITY_NOTICE` interpolates the classifier
+  version. The same bump now leaves those reads intact, which is what makes a future classifier
+  change possible without orphaning the store. Refusal is kept where it belongs: an era the
+  sanitizer will not run at all is still refused, an unregistered version is refused, and
+  `tests/test_verifier_registry.py` pins that `CURRENT_VERIFIER` still equals what this release
+  writes, so a bump must register the era it replaces instead of silently reinterpreting history.
+- Boundary of this change, stated because it is not the whole problem: the registry pins
+  *declarations*, not the sanitizer. Current redaction rules still run over historical bodies, so a
+  newly added token pattern that matches text an old artifact already contains makes that artifact
+  fail its canonical re-serialization -- measured as two of four sampled artifacts refusing with
+  `snapshot hash or canonical artifact validation failed` after one extra pattern was registered.
+  Pinning the pattern set, the task tables and the budget limits per era is the remaining work, and
+  whether a stricter current rule *should* keep old artifacts readable is a product decision about
+  secret exposure, not something this entry decides.
 
 ## 2.3.2 - 2026-09-25
 
