@@ -390,6 +390,7 @@ def _prepare_snapshot_guarded(
             staged_artifact.snapshot_bytes,
             staged_artifact.envelope,
             destination,
+            staged_artifact.verifier,
         )
         try:
             artifact_module._fsync_directory(root)

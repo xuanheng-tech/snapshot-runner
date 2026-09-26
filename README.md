@@ -169,7 +169,8 @@ hash/size revalidation, and atomic publication.
 A read resolves the era a snapshot was written under — its threat-model text, its scan
 classifier version, and the sanitizer rules that redacted and path-normalized its body — from
 the versions recorded in its own `meta.json`, so raising a producer-side constant or tightening a
-redaction pattern in a later release keeps the artifacts of a registered era readable. An artifact
+redaction pattern in a later release keeps the artifacts of a registered era readable. Targeted
+evidence questions about a stored artifact are answered under that same era. An artifact
 declaring an era this build has not registered is refused before its bytes are hashed or
 sanitized, and no stored artifact is ever rewritten or migrated. Identity checks are not
 era-relative: hash, canonical serialization, file set and modes are validated the same way for

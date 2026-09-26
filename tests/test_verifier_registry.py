@@ -8,6 +8,8 @@ envelope validator follows the row it is given rather than the live producer con
 
 from __future__ import annotations
 
+import ast
+import inspect
 import os
 import re
 from dataclasses import replace
@@ -104,32 +106,54 @@ def test_a_registered_classifier_version_is_one_the_sanitizer_accepts() -> None:
 def test_the_current_rules_are_exactly_the_sanitizer_s_live_constants() -> None:
     """The forcing check for a rule edit, as distinct from a declaration edit.
 
-    Every value the sanitizer consults while re-deriving a body is asserted here against the
-    constant in use. Changing a pattern, a suffix set or a limit without registering the era that
-    replaces it fails this test, which is the point: the alternative is that the edit silently
-    reinterprets every artifact published before it.
+    The era row and the live sanitizer constants are written independently, and this compares them
+    by value: two equal compiled patterns are not one object, so identity checks would prove
+    nothing. Tightening a pattern, a suffix set or a limit without registering the era that replaces
+    it fails here -- which is the only thing standing between a rule edit and two different silent
+    failures: every older artifact failing its canonical re-serialization, or new artifacts being
+    written under superseded rules.
     """
-    rules = verifiers.CURRENT_VERIFIER.rules
+    current = verifiers.CURRENT_VERIFIER.rules
 
-    assert rules is security_module.CURRENT_RULES
-    assert rules.classifier_version == security_module.SCAN_CLASSIFIER_VERSION
-    assert rules.token_patterns == security_module.KNOWN_TOKEN_PATTERNS
-    assert rules.auth_header_re is security_module.AUTH_HEADER_RE
-    assert rules.bearer_re is security_module.BEARER_RE
-    assert rules.pem_boundary_re is security_module.PEM_PRIVATE_KEY_BOUNDARY_RE
-    assert rules.file_uri_re is security_module.FILE_URI_RE
-    assert rules.absolute_path_re is security_module.ABSOLUTE_PATH_RE
-    assert rules.sensitive_file_suffixes == security_module.SENSITIVE_FILE_SUFFIXES
-    assert rules.sensitive_exact_file_names == security_module.SENSITIVE_EXACT_FILE_NAMES
-    assert rules.allowed_text_suffixes == security_module.ALLOWED_TEXT_SUFFIXES
-    assert rules.allowed_extensionless_names == security_module.ALLOWED_EXTENSIONLESS_NAMES
-    assert rules.yaml_text_suffixes == security_module.YAML_TEXT_SUFFIXES
-    assert dict(rules.raster_image_media_types) == security_module.RASTER_IMAGE_MEDIA_TYPES
-    assert rules.raster_image_evidence_re is security_module.RASTER_IMAGE_EVIDENCE_RE
-    assert rules.max_depth == security_module.MAX_SANITIZE_DEPTH
-    assert rules.max_elements == security_module.MAX_SANITIZE_ELEMENTS
-    assert rules.max_diff_path_candidates == security_module.MAX_DIFF_PATH_CANDIDATES
-    assert rules.max_extensionless_text_bytes == security_module.MAX_EXTENSIONLESS_TEXT_BYTES
+    assert current is security_module.CURRENT_RULES or current.descriptor() == (
+        security_module.CURRENT_RULES.descriptor()
+    )
+    assert security_module.SCAN_RULES_V2.descriptor() == current.descriptor(), (
+        "the live sanitizer rules moved but no era was registered for them"
+    )
+
+
+def test_a_frozen_era_does_not_read_the_live_constants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Editing a rule in place must not move an era, at import time or afterwards.
+
+    The shape of the failure this pins was measured: adding one token pattern to
+    ``KNOWN_TOKEN_PATTERNS`` makes every stored artifact containing matching text fail its own
+    canonical re-serialization, while the test suite stays green -- unless the era's rule data is
+    its own copy.
+    """
+    frozen = security_module.SCAN_RULES_V2
+    assert frozen.token_patterns is not security_module.KNOWN_TOKEN_PATTERNS
+    assert frozen.absolute_path_re.pattern == security_module.ABSOLUTE_PATH_RE.pattern
+    assert frozen.yaml_text_suffixes is not security_module.YAML_TEXT_SUFFIXES
+
+    monkeypatch.setattr(
+        security_module,
+        "KNOWN_TOKEN_PATTERNS",
+        (*security_module.KNOWN_TOKEN_PATTERNS, ("X", re.compile("x"))),
+    )
+    monkeypatch.setattr(
+        security_module,
+        "ABSOLUTE_PATH_RE",
+        re.compile(r"(?<![\w+.:/~-])/(?!/)(?:[^\s]+/)*[^\s]*"),
+    )
+    monkeypatch.setattr(
+        security_module, "YAML_TEXT_SUFFIXES", frozenset({".yaml", ".yml", ".conf"})
+    )
+    assert security_module.SCAN_RULES_V2.descriptor() == frozen.descriptor()
+    assert len(security_module.SCAN_RULES_V2.token_patterns) == 4
+    assert len(security_module.SCAN_RULES_V2.yaml_text_suffixes) == 2
 
 
 def test_verifier_for_resolves_the_registered_era() -> None:
@@ -186,8 +210,12 @@ def test_the_envelope_validator_follows_the_row_it_is_given(
     with pytest.raises(artifact_module.RunnerError):
         artifact_module._validate_snapshot_envelope(_MINIMAL_ENVELOPE, legacy)
 
-    bumped = collect_module.SECURITY_NOTICE.replace("version: 2.", "version: 3.")
-    monkeypatch.setattr(artifact_module, "SECURITY_NOTICE", bumped)
+    # A release that reworded its notice no longer changes what a stored artifact must say.
+    monkeypatch.setattr(
+        collect_module,
+        "SECURITY_NOTICE",
+        collect_module.SECURITY_NOTICE.replace("version: 2.", "version: 3."),
+    )
     assert artifact_module._validate_snapshot_envelope(
         dict(_MINIMAL_ENVELOPE), verifiers.CURRENT_VERIFIER
     )
@@ -261,3 +289,130 @@ def test_the_sanitizer_reuses_the_rules_of_the_era_being_read(
     assert under_later != published, (
         "the later rules rewrite the body, so reading it under them is what refused the artifact"
     )
+
+
+_TWO_FILE_DIFF = (
+    "diff --git a/one.py b/one.py\n"
+    "index 1111111..2222222 100644\n"
+    "--- a/one.py\n+++ b/one.py\n@@ -1 +1 @@\n-a\n+b\n"
+    "diff --git a/two.py b/two.py\n"
+    "index 3333333..4444444 100644\n"
+    "--- a/two.py\n+++ b/two.py\n@@ -1 +1 @@\n-c\n+d\n"
+)
+_PEM_BLOCK = (
+    "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+    "b3BlbnNzaC1rZXktdjEAAAAABgAAAAgAAAA=\n"
+    "-----END OPENSSH PRIVATE KEY-----\n"
+)
+
+
+def _diff_audit_envelope(verifier: verifiers.ArtifactVerifier, content: str) -> dict[str, object]:
+    return {
+        "schema_version": 2,
+        "producer_security_epoch": verifier.producer_security_epoch,
+        "task": "diff-audit",
+        "repository": "target-repo",
+        "data": {
+            "status_short": " M one.py\n",
+            "staged_diff": "",
+            "unstaged_diff": _TWO_FILE_DIFF,
+            "file_context": [{"path": "one.py", "content": content}],
+        },
+        "truncated": False,
+        "evidence_gaps": [],
+        "redactions": {},
+        "trust_boundary": verifier.trust_boundary,
+        "security_notice": verifier.security_notice,
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "probe", "era_outcome"),
+    [
+        ("file_uri_re", r"(?!x)x", "see file:///srv/secrets/x for details\n", "accepted"),
+        ("absolute_path_re", r"(?!x)x", "/srv/data/one.txt\n", "accepted"),
+        # A complete key block is refused by the shipped rules; the inert pattern accepts it raw.
+        ("pem_boundary_re", r"(?!x)x", _PEM_BLOCK, "refused"),
+        ("allowed_text_suffixes", frozenset(), "value = 2\n", "accepted"),
+        ("yaml_text_suffixes", frozenset({".yaml", ".yml", ".py"}), "value = 2\n", "accepted"),
+        ("sensitive_file_suffixes", frozenset({".py"}), "value = 2\n", "accepted"),
+        ("max_elements", 1, "value = 2\n", "accepted"),
+    ],
+)
+def test_each_pinned_rule_field_is_actually_era_dependent(
+    field: str, replacement: object, probe: str, era_outcome: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every site the era can change must consult the era, not the live constant.
+
+    One inert pattern, one emptied eligibility set, one halved limit: wired to the era, the later
+    rules answer differently from the rules that wrote the body. A site still reading a module global
+    would pass for every other field and fail for its own, which is the gap that left ten of the read
+    sites revertable to the live constant with a green suite.
+    """
+    era_4 = verifiers.CURRENT_VERIFIER
+    # Admit the later classifier version first, so the only difference left between the two eras is
+    # the field under test.
+    monkeypatch.setattr(security_module, "SUPPORTED_SCAN_CLASSIFIER_VERSIONS", frozenset({2, 3}))
+    value = re.compile(replacement) if isinstance(replacement, str) else replacement
+    later_rules = replace(era_4.rules, classifier_version=3, **{field: value})
+    later = replace(
+        era_4,
+        producer_security_epoch=5,
+        rules=later_rules,
+        security_notice=era_4.security_notice.replace("version: 2.", "version: 3."),
+    )
+
+    def outcome(verifier: verifiers.ArtifactVerifier) -> tuple[str, str]:
+        try:
+            normalized = artifact_module._sanitize_validate_snapshot(
+                _diff_audit_envelope(verifier, probe), Path("/tmp"), verifier=verifier
+            )
+        except artifact_module.RunnerError as exc:
+            return ("refused", str(exc))
+        return ("accepted", str(normalized["data"]))
+
+    under_era = outcome(era_4)
+    assert under_era[0] == era_outcome, under_era[1]
+    assert outcome(later) != under_era, f"{field} is not read from the era"
+
+
+RULE_CONSTANT_NAMES = frozenset(
+    {
+        "KNOWN_TOKEN_PATTERNS",
+        "AUTH_HEADER_RE",
+        "BEARER_RE",
+        "PEM_PRIVATE_KEY_BOUNDARY_RE",
+        "FILE_URI_RE",
+        "ABSOLUTE_PATH_RE",
+        "SENSITIVE_FILE_SUFFIXES",
+        "SENSITIVE_EXACT_FILE_NAMES",
+        "ALLOWED_TEXT_SUFFIXES",
+        "ALLOWED_EXTENSIONLESS_NAMES",
+        "YAML_TEXT_SUFFIXES",
+        "RASTER_IMAGE_MEDIA_TYPES",
+        "RASTER_IMAGE_EVIDENCE_RE",
+        "MAX_SANITIZE_DEPTH",
+        "MAX_SANITIZE_ELEMENTS",
+        "MAX_DIFF_PATH_CANDIDATES",
+        "MAX_EXTENSIONLESS_TEXT_BYTES",
+    }
+)
+
+
+def test_no_sanitizer_rule_is_read_bypassing_the_era_policy() -> None:
+    """A rule reached without ``active_rules()`` is a rule a later release applies to history.
+
+    Behavioural checks can only cover the fields a test happens to perturb; this covers all of them
+    and every field added later, by reading the module. The constants above are the definition of the
+    rule sets and may be named there, but no function body may consult one directly.
+    """
+    path = Path(inspect.getsourcefile(security_module) or "")
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            continue
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.Name) and inner.id in RULE_CONSTANT_NAMES:
+                offenders.append(f"{node.name}:{inner.lineno} {inner.id}")
+    assert offenders == []

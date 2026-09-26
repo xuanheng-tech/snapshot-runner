@@ -23,8 +23,6 @@ from .collect import (
     MAX_INITIAL_CONTEXT_FILES,
     MAX_SNAPSHOT_BYTES,
     PRODUCER_SECURITY_EPOCH,
-    SECURITY_NOTICE,
-    TRUST_BOUNDARY,
     _publication_workspace_sha256,
 )
 from .isolation import MAX_SCOPE_PATHS, REVIEW_SCOPE_MODE
@@ -104,6 +102,10 @@ class SnapshotArtifact:
     snapshot_bytes: bytes
     envelope: dict[str, object]
     directory: Path
+    #: The era this artifact was resolved to and validated under. Later work on its stored bytes --
+    #: targeted evidence attribution above all -- has to use the same rules, or the same artifact
+    #: answers differently depending on which release happens to be installed.
+    verifier: ArtifactVerifier
 
 
 def _state_home(target_repo: Path | None = None) -> Path:
@@ -864,59 +866,66 @@ def _build_evidence_output(
     field: str | None = None,
     path: str | None = None,
 ) -> bytes:
-    envelope = artifact.envelope
-    task = envelope.get("task")
-    data = envelope.get("data")
-    repository = envelope.get("repository")
-    gaps = envelope.get("evidence_gaps")
-    if (
-        task != artifact.task
-        or task not in TASKS
-        or not isinstance(data, dict)
-        or not isinstance(repository, str)
-        or not isinstance(gaps, list)
-        or (field is not None and path is not None)
-    ):
-        raise RunnerError(ARTIFACT_VALIDATION_FAILED, "evidence source artifact is invalid")
-    truncated = envelope.get("truncated") is True
-    conversion = data.get("conversion_safety")
-    initial_publication = data.get("initial_publication")
-    incomplete = (
-        truncated
-        or (isinstance(conversion, dict) and conversion.get("content_diff_complete") is False)
-        or (isinstance(initial_publication, dict) and initial_publication.get("complete") is False)
-    )
-    if field is not None:
-        if field not in data:
-            raise RunnerError(
-                ARTIFACT_VALIDATION_FAILED, "evidence field selector does not match snapshot data"
+    # The stored body is already loaded and validated; attributing it still runs the diff and path
+    # rules over those bytes, so it must run under the same era that was used to validate them.
+    with era_rules(artifact.verifier.rules):
+        envelope = artifact.envelope
+        task = envelope.get("task")
+        data = envelope.get("data")
+        repository = envelope.get("repository")
+        gaps = envelope.get("evidence_gaps")
+        if (
+            task != artifact.task
+            or task not in TASKS
+            or not isinstance(data, dict)
+            or not isinstance(repository, str)
+            or not isinstance(gaps, list)
+            or (field is not None and path is not None)
+        ):
+            raise RunnerError(ARTIFACT_VALIDATION_FAILED, "evidence source artifact is invalid")
+        truncated = envelope.get("truncated") is True
+        conversion = data.get("conversion_safety")
+        initial_publication = data.get("initial_publication")
+        incomplete = (
+            truncated
+            or (isinstance(conversion, dict) and conversion.get("content_diff_complete") is False)
+            or (
+                isinstance(initial_publication, dict)
+                and initial_publication.get("complete") is False
             )
-        selector: dict[str, object] = {"kind": "field", "value": field}
-        evidence: dict[str, object] = {"field": field, "value": data[field]}
-        found = True
-    elif path is not None:
-        selector = {"kind": "path", "value": path}
-        evidence, found = _evidence_for_path(data, gaps, path, repository_root)
-    else:
-        selector = {"kind": "index"}
-        evidence = _evidence_index(data, gaps)
-        found = True
-    output: dict[str, object] = {
-        "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
-        "runner_version": runner_version,
-        "command": task,
-        "snapshot_id": artifact.snapshot_id,
-        "repository": repository,
-        "artifact": os.fspath(artifact.directory / "snapshot.json"),
-        "selector": selector,
-        "status": "partial" if incomplete else "complete",
-        "truncated": truncated,
-        "evidence_gap": bool(gaps),
-        "found": found,
-        "evidence": evidence,
-        "trust_boundary": TRUST_BOUNDARY,
-        "security_notice": SECURITY_NOTICE,
-    }
+        )
+        if field is not None:
+            if field not in data:
+                raise RunnerError(
+                    ARTIFACT_VALIDATION_FAILED,
+                    "evidence field selector does not match snapshot data",
+                )
+            selector: dict[str, object] = {"kind": "field", "value": field}
+            evidence: dict[str, object] = {"field": field, "value": data[field]}
+            found = True
+        elif path is not None:
+            selector = {"kind": "path", "value": path}
+            evidence, found = _evidence_for_path(data, gaps, path, repository_root)
+        else:
+            selector = {"kind": "index"}
+            evidence = _evidence_index(data, gaps)
+            found = True
+        output: dict[str, object] = {
+            "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
+            "runner_version": runner_version,
+            "command": task,
+            "snapshot_id": artifact.snapshot_id,
+            "repository": repository,
+            "artifact": os.fspath(artifact.directory / "snapshot.json"),
+            "selector": selector,
+            "status": "partial" if incomplete else "complete",
+            "truncated": truncated,
+            "evidence_gap": bool(gaps),
+            "found": found,
+            "evidence": evidence,
+            "trust_boundary": artifact.verifier.trust_boundary,
+            "security_notice": artifact.verifier.security_notice,
+        }
     encoded = json.dumps(output, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
     if len(encoded) > MAX_EVIDENCE_BYTES:
         raise RunnerError(ARTIFACT_VALIDATION_FAILED, "hard output limit exceeded: evidence")
@@ -2058,7 +2067,7 @@ def _load_snapshot_directory(
         raise RunnerError(
             ARTIFACT_PUBLISH_FAILED, "snapshot hash, identity, or size validation failed"
         )
-    return SnapshotArtifact(snapshot_id, str(task), snapshot_bytes, envelope, directory)
+    return SnapshotArtifact(snapshot_id, str(task), snapshot_bytes, envelope, directory, verifier)
 
 
 def _atomic_write(path: Path, content: bytes, maximum: int) -> None:

@@ -1015,7 +1015,6 @@ def test_snapshot_reload_follows_the_registered_era_not_the_live_classifier_vers
     before = {path.name: path.read_bytes() for path in artifact.directory.iterdir()}
     bumped = security.SCAN_CLASSIFIER_VERSION + 1
     monkeypatch.setattr(security, "SCAN_CLASSIFIER_VERSION", bumped)
-    monkeypatch.setattr(artifact_module, "SECURITY_NOTICE", f"bumped notice {bumped}")
 
     loaded = artifact_module._load_snapshot(artifact.snapshot_id)
     assert loaded.snapshot_id == artifact.snapshot_id
@@ -1062,8 +1061,60 @@ def _register_tightened_release(
     # `artifact` binds the producer constants by value, as any released build does at import.
     monkeypatch.setattr(artifact_module, "PRODUCER_SECURITY_EPOCH", later.producer_security_epoch)
     monkeypatch.setattr(collect, "SECURITY_NOTICE", later.security_notice)
-    monkeypatch.setattr(artifact_module, "SECURITY_NOTICE", later.security_notice)
     return later
+
+
+def test_targeted_evidence_attribution_uses_the_era_that_wrote_the_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+    private_state: Path,
+    target_repository: git.ValidatedTargetRepository,
+) -> None:
+    """Attributing a stored diff runs the rule engine over stored bytes, so it needs the era too.
+
+    Validating an artifact under its own era and then answering a targeted question about it under
+    today's rules was enough to refuse a historical artifact: the same stored diff answered
+    differently depending on which release happened to be installed.
+    """
+    probe_path = "PROBE_TOKEN.py"
+    diff = (
+        f"diff --git a/{probe_path} b/{probe_path}\n"
+        "index 1111111..2222222 100644\n"
+        f"--- a/{probe_path}\n+++ b/{probe_path}\n@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 5\n"
+    )
+    data: dict[str, object] = {
+        "status_short": f" M {probe_path}\n",
+        "staged_diff": "",
+        "unstaged_diff": diff,
+        "file_context": [{"path": probe_path, "content": "VALUE = 5\n"}],
+    }
+    manifest = artifact_module._snapshot_data_scan_manifest({"task": "diff-audit", "data": data})
+    snapshot = collect.Snapshot("diff-audit", target_repository.name, data, manifest)
+    monkeypatch.setattr(collect, "collect_diff_audit", lambda *_args, **_kwargs: snapshot)
+    artifact = runner._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
+
+    _register_tightened_release(monkeypatch, "GITHUB_TOKEN", r"\bPROBE_TOKEN\b")
+
+    observed: list[security.SanitizerRules] = []
+    real_active_rules = security.active_rules
+
+    def record_active_rules() -> security.SanitizerRules:
+        rules = real_active_rules()
+        observed.append(rules)
+        return rules
+
+    monkeypatch.setattr(security, "active_rules", record_active_rules)
+    output = json.loads(
+        artifact_module._build_evidence_output(
+            artifact, "0.0.0-test", repository_root=target_repository.path, path=probe_path
+        )
+    )
+
+    assert observed, "attribution must consult the sanitizer rules at all"
+    assert all(rules is security.SCAN_RULES_V2 for rules in observed)
+    assert security.SCAN_RULES_V2 is not security.CURRENT_RULES
+    assert output["found"] is True
+    assert output["evidence"]["diff_sections"]["unstaged_diff"]["matched"] == 1
+    assert output["security_notice"].endswith("Scan classifier version: 2.")
 
 
 def test_a_tightened_sanitizer_keeps_the_older_era_readable_and_redacts_new_writes(

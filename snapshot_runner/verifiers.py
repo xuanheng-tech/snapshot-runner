@@ -27,11 +27,14 @@ superseded rules, and ``preview.txt`` still requires human review before any upl
 
 Two boundaries are worth naming, because both are easy to mistake for this one. What the task-data
 validators accept -- the per-task required fields, the evidence-gap key sets, the redaction
-categories and the size budgets -- is still read from this release's tables, so a schema-era split of
-those tables is separate work from pinning sanitizer rules; the module that holds the schema-2 data
-validator on the refactor branch is a *format* validator for the only persisted schema, not an era
-reader, and when the two lines of work meet it should take its classifier version from the resolved
-verifier rather than from the live constant.
+categories, the size budgets and the two shapes a read also matches a name against
+(``REPOSITORY_NAME_RE`` and ``SNAPSHOT_GIT_OID_RE``) -- is still read from this release's tables, so
+a schema-era split of those is separate work from pinning sanitizer rules. Some rule values are
+inline literals inside the sanitizer -- a ``.env.`` prefix, a ``.gitattributes`` name, the basename
+substitution and its bound -- and cannot be pinned until they become data. The module that holds the
+schema-2 data validator on the refactor branch is a *format* validator for the only persisted schema,
+not an era reader, and when the two lines of work meet it should take its classifier version from the
+resolved verifier rather than from the live constant.
 """
 
 from __future__ import annotations

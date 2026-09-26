@@ -10,10 +10,10 @@ from pathlib import Path
 
 import pytest
 
-from snapshot_runner import artifact as artifact_module
 from snapshot_runner import cli as runner
 from snapshot_runner import collect as collect_module
 from snapshot_runner import security as security_module
+from snapshot_runner import verifiers
 
 SNAPSHOT_ID = "1da3b7c99b425b2a087554fc9ccb0b372fc0aaae40eda09b00c352f780642869"
 _META_SHA256 = "4c2979e3a10792f366ffd8f9a7f5a927dc358b22d1c8b8067ef45ea54f8af312"
@@ -218,7 +218,6 @@ def test_a_historical_read_does_not_depend_on_todays_classifier_constants(
     monkeypatch.setattr(security_module, "SCAN_CLASSIFIER_VERSION", 3)
     monkeypatch.setattr(security_module, "SUPPORTED_SCAN_CLASSIFIER_VERSIONS", frozenset({2, 3}))
     monkeypatch.setattr(collect_module, "SECURITY_NOTICE", bumped_notice)
-    monkeypatch.setattr(artifact_module, "SECURITY_NOTICE", bumped_notice)
 
     exit_code, out, err = _read(repo, SNAPSHOT_ID, capsys)
     assert (exit_code, err) == (0, ""), out + err
@@ -227,20 +226,28 @@ def test_a_historical_read_does_not_depend_on_todays_classifier_constants(
 
 
 @pytest.mark.parametrize(
-    "mutation",
-    ["loosened mode", "extra file", "missing file", "preview rewritten", "byte appended", "epoch"],
+    ("mutation", "reason"),
+    [
+        ("loosened mode", "must have mode 0600"),
+        ("extra file", "invalid file manifest"),
+        ("missing file", "invalid file manifest"),
+        ("preview rewritten", "hash, identity, or size validation failed"),
+        ("byte appended", "hash, identity, or size validation failed"),
+        ("epoch", verifiers.UNSUPPORTED_ARTIFACT_VERSION_ERROR),
+    ],
 )
 def test_identity_guards_are_not_part_of_the_era_dispatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     mutation: str,
+    reason: str,
 ) -> None:
     """Pinning an era's rules changes what the sanitizer does, never what has to match.
 
     Each mutation breaks one identity fact: bytes that no longer hash to the snapshot id, a file set
-    that is not the three published names, or a mode the private store refuses. Registering the
-    artifact's era must not talk its way past any of them.
+    that is not the three published names, or a mode the private store refuses. The reason is
+    asserted too, so a case cannot pass by tripping some unrelated check.
     """
     state = tmp_path / "state"
     state.mkdir(mode=0o700)
@@ -268,4 +275,4 @@ def test_identity_guards_are_not_part_of_the_era_dispatch(
     exit_code, out, err = _read(repo, SNAPSHOT_ID, capsys)
     assert exit_code != 0
     assert out == ""
-    assert err != ""
+    assert reason in err, err

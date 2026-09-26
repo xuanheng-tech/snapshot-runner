@@ -13,7 +13,7 @@ import pytest
 import snapshot_runner as runner_namespace
 from snapshot_runner import artifact as artifact_module
 from snapshot_runner import cli as runner
-from snapshot_runner import collect, git, security
+from snapshot_runner import collect, git, security, verifiers
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE_KEYS = [
@@ -148,6 +148,7 @@ def _evidence_artifact(
         snapshot_bytes,
         envelope,
         directory / snapshot_id,
+        verifiers.CURRENT_VERIFIER,
     )
 
 

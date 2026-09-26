@@ -159,17 +159,24 @@ REPOSITORY_NAME_RE = re.compile(r"[A-Za-z0-9._][A-Za-z0-9._-]{0,127}")
 class SanitizerRules:
     """One release's sanitization rule data, kept so an era stays re-readable.
 
-    Every field here is consulted while a stored artifact is being read: a body is re-redacted,
-    re-classified and re-serialized, and the artifact is refused unless the result reproduces its
-    own bytes. Editing the live constants above would therefore let a later release decide whether
-    an earlier artifact exists at all -- adding one token pattern that matches text an old body
-    already contains is enough to make it fail its canonical check. An artifact era is bound to a
-    frozen instance of this class instead, and :func:`era_rules` installs it for the duration of
-    one read.
+    A read re-redacts, re-classifies and re-serializes a stored body and refuses the artifact
+    unless the result reproduces its own bytes, so every value that reaches that scan decides
+    whether an older artifact exists at all: adding one token pattern matching text an old body
+    already contains is enough to make it fail its canonical check. ``CURRENT_RULES`` reads the
+    live constants above, while :data:`SCAN_RULES_V2` is an independent copy of the values held by
+    the releases that published schema 2 / epoch 4 / classifier 2, so the two separate the moment a
+    rule is edited. :func:`era_rules` installs the resolved era for the duration of one read.
 
-    Adding a rule is a release-side change with a forced companion: create a new `_RULES_Vn`,
-    repoint ``CURRENT_RULES``, and register the era that writes it. The previous instance stays
-    referenced by the era that was published under it.
+    Not every field is consulted by a read today: the raster fields and
+    ``max_extensionless_text_bytes`` belong to collecting and to live-worktree validation, and a
+    read passes ``verify_live_diff_text=False``. They are pinned regardless, because the property
+    that matters is that nothing a read consults comes from a later release.
+
+    Tightening a rule is a two-step change: edit the constants above, then add a ``SCAN_RULES_V3``
+    and the era row that writes it. ``SCAN_RULES_V2`` has to stay exactly as it is, since that
+    object is what the artifacts published under it mean; ``tests/test_verifier_registry.py``
+    compares the live rules against the registered current era by value, so only doing the first
+    half of the change fails there.
     """
 
     classifier_version: int
@@ -191,8 +198,133 @@ class SanitizerRules:
     max_diff_path_candidates: int
     max_extensionless_text_bytes: int
 
+    @staticmethod
+    def _pattern(pattern: re.Pattern[str]) -> str:
+        return f"{pattern.flags:#x}:{pattern.pattern}"
 
+    def descriptor(self) -> tuple[object, ...]:
+        """Compare two rule sets by value, since equal compiled patterns are not one object."""
+        return (
+            self.classifier_version,
+            tuple((category, self._pattern(pattern)) for category, pattern in self.token_patterns),
+            self._pattern(self.auth_header_re),
+            self._pattern(self.bearer_re),
+            self._pattern(self.pem_boundary_re),
+            self._pattern(self.file_uri_re),
+            self._pattern(self.absolute_path_re),
+            self._pattern(self.raster_image_evidence_re),
+            tuple(sorted(self.sensitive_file_suffixes)),
+            tuple(sorted(self.sensitive_exact_file_names)),
+            tuple(sorted(self.allowed_text_suffixes)),
+            tuple(sorted(self.allowed_extensionless_names)),
+            tuple(sorted(self.yaml_text_suffixes)),
+            tuple(sorted(dict(self.raster_image_media_types).items())),
+            self.max_depth,
+            self.max_elements,
+            self.max_diff_path_candidates,
+            self.max_extensionless_text_bytes,
+        )
+
+
+#: The rules as published by every release that wrote schema 2 / security epoch 4 / classifier 2.
+#: Deliberately a copy rather than a reference to the constants above: reading history has to keep
+#: working after those move, and this object is what "after" means for that era.
 SCAN_RULES_V2 = SanitizerRules(
+    classifier_version=2,
+    token_patterns=(
+        ("OPENAI_TOKEN", re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{16,}\b")),
+        ("GITHUB_TOKEN", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b")),
+        ("AWS_ACCESS_KEY", re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")),
+        ("GOOGLE_API_KEY", re.compile(r"\bAIza[A-Za-z0-9_-]{20,}\b")),
+    ),
+    auth_header_re=re.compile(
+        r"(?i)(?P<prefix>\b(?:proxy-)?authorization\s*[:=]\s*)(?P<value>[^\r\n]*)"
+    ),
+    bearer_re=re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}"),
+    pem_boundary_re=re.compile(
+        r"-{5}(?P<kind>BEGIN|END)[ \t]+"
+        r"(?P<label>PRIVATE[ \t]+KEY|ENCRYPTED[ \t]+PRIVATE[ \t]+KEY|"
+        r"RSA[ \t]+PRIVATE[ \t]+KEY|DSA[ \t]+PRIVATE[ \t]+KEY|"
+        r"EC[ \t]+PRIVATE[ \t]+KEY|OPENSSH[ \t]+PRIVATE[ \t]+KEY)[ \t]*-{5}",
+        re.IGNORECASE,
+    ),
+    file_uri_re=re.compile(r"(?i)\bfile://(?:localhost)?/(?:[^\s\x00\"'<>\\]|\\(?![\"']))+"),
+    absolute_path_re=re.compile(
+        r"(?<![\w+.:/~-])/(?!/)"
+        r"(?:(?:[^\s\x00\"'<>|\\]|\\(?![\"']))+/)*"
+        r"(?:[^\s\x00\"'<>|,;:)\\]|\\(?![\"']))*"
+    ),
+    sensitive_file_suffixes=frozenset({".pem", ".key", ".p12", ".pfx"}),
+    sensitive_exact_file_names=frozenset(
+        {".env", ".netrc", "id_rsa", "id_ed25519", "credentials", "secrets"}
+    ),
+    allowed_text_suffixes=frozenset(
+        {
+            ".py",
+            ".pyi",
+            ".md",
+            ".rst",
+            ".txt",
+            ".toml",
+            ".json",
+            ".jsonl",
+            ".sh",
+            ".bash",
+            ".sql",
+            ".ini",
+            ".cfg",
+            ".conf",
+            ".xml",
+            ".html",
+            ".css",
+            ".js",
+            ".mjs",
+            ".cjs",
+            ".ts",
+            ".mts",
+            ".cts",
+            ".tsx",
+            ".jsx",
+            ".lock",
+            ".mako",
+        }
+    ),
+    allowed_extensionless_names=frozenset(
+        {
+            "justfile",
+            "makefile",
+            "dockerfile",
+            ".gitignore",
+            ".python-version",
+            ".editorconfig",
+            ".gitkeep",
+        }
+    ),
+    yaml_text_suffixes=frozenset({".yaml", ".yml"}),
+    raster_image_media_types=MappingProxyType(
+        {
+            ".jpeg": "image/jpeg",
+            ".jpg": "image/jpeg",
+            ".png": "image/png",
+            ".webp": "image/webp",
+        }
+    ),
+    raster_image_evidence_re=re.compile(
+        r"binary image evidence\n"
+        r"media_type: (?P<media_type>image/(?:jpeg|png|webp))\n"
+        r"byte_size: (?P<byte_size>0|[1-9][0-9]*)\n"
+        r"sha256: (?P<sha256>[0-9a-f]{64})\n"
+    ),
+    max_depth=32,
+    max_elements=10_000,
+    max_diff_path_candidates=128,
+    max_extensionless_text_bytes=64 * 1024,
+)
+
+#: The rules this release writes new artifacts under, read from the live constants, so a rule edit
+#: above shows up here immediately and no longer moves any registered era. A read with no installed
+#: era uses these, which is the safe direction: newest rules, never an older set by accident.
+CURRENT_RULES = SanitizerRules(
     classifier_version=SCAN_CLASSIFIER_VERSION,
     token_patterns=KNOWN_TOKEN_PATTERNS,
     auth_header_re=AUTH_HEADER_RE,
@@ -212,11 +344,6 @@ SCAN_RULES_V2 = SanitizerRules(
     max_diff_path_candidates=MAX_DIFF_PATH_CANDIDATES,
     max_extensionless_text_bytes=MAX_EXTENSIONLESS_TEXT_BYTES,
 )
-
-#: The rules this release writes new artifacts under. A read with no installed era uses these.
-#: A future rule change adds a `SCAN_RULES_V3`, repoints this name, and registers the era that
-#: writes it; `SCAN_RULES_V2` stays referenced by the era published under it.
-CURRENT_RULES = SCAN_RULES_V2
 
 _ACTIVE_RULES: contextvars.ContextVar[SanitizerRules | None] = contextvars.ContextVar(
     "_ACTIVE_RULES", default=None

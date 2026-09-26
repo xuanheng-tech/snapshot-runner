@@ -59,52 +59,76 @@ public source baseline; it was not tagged or published to PyPI.
   `trust_boundary`, `security_notice`, the scan classifier version and both schema versions, and an
   unregistered version is refused with `ARTIFACT_PUBLISH_FAILED` and
   `snapshot declares an unsupported artifact version` before the snapshot bytes are hashed,
-  sanitized or trusted. Nothing was migrated and no artifact was rewritten: the one era in
-  existence -- schema 2, meta schema 2, epoch 4, classifier 2, declared by all 549 snapshots in this
-  machine's private store -- is registered as `CURRENT_VERIFIER` with its declarations copied as
-  literals, so every one of those 549 still loads with an identical re-derived envelope, measured by
-  loading each artifact under the previous code and the current one.
-- Changed: the reversed half of that guarantee. `test_snapshot_reload_rejects_scan_classifier_version_drift`
-  asserted that raising `SCAN_CLASSIFIER_VERSION` makes a stored snapshot unreadable, and it was
-  true: with the constant bumped to 3, four sampled real artifacts each failed with
-  `snapshot scan classifier invariant failed`, and editing only the notice text that embeds that
-  version failed the same four with `snapshot threat-model declarations are invalid`, because
-  `security_notice` is compared literally while `SECURITY_NOTICE` interpolates the classifier
-  version. The same bump now leaves those reads intact, which is what makes a future classifier
-  change possible without orphaning the store. Refusal is kept where it belongs: an era the
-  sanitizer will not run at all is still refused, an unregistered version is refused, and
-  `tests/test_verifier_registry.py` pins that `CURRENT_VERIFIER` still equals what this release
-  writes, so a bump must register the era it replaces instead of silently reinterpreting history.
+  sanitized or trusted. Nothing was migrated and no artifact was rewritten: one era exists today --
+  schema 2, meta schema 2, epoch 4, classifier 2 -- and a census of this machine's private store
+  found every one of its directories declaring exactly that tuple, with the three published file
+  names, mode `0600` and a self-consistent hash. The full-store measurement is given once, in the
+  next-but-one entry.
+- Changed: the reversed half of that guarantee. The test that stood here before,
+  `test_snapshot_reload_rejects_scan_classifier_version_drift`, asserted that raising
+  `SCAN_CLASSIFIER_VERSION` makes a stored snapshot unreadable, and the store-wide effect was real:
+  bumping the version to 3 on a released tree refused **all 559** artifacts, because `SECURITY_NOTICE`
+  interpolates the classifier version, `security_notice` is compared literally, and that comparison
+  runs before the scan manifest is ever built -- so every read failed with `snapshot threat-model
+  declarations are invalid`, not with a classifier error. (The classifier invariant is the reason only
+  when the two are perturbed separately, which is what that old test did by patching one module's
+  copy; the wording here said "four sampled artifacts failed with the classifier invariant" and that
+  was not a measurement any release path produces.) The same bump now leaves those reads intact,
+  which is what makes a future classifier change possible without orphaning the store. Refusal is kept
+  where it belongs: an era the sanitizer will not run at all is still refused, an unregistered version
+  is refused before the snapshot bytes are hashed or sanitized (at the module boundary as
+  `ARTIFACT_PUBLISH_FAILED`; the `read` route re-maps it to `ARTIFACT_VALIDATION_FAILED` as it does
+  for other artifact refusals), and `tests/test_verifier_registry.py` pins that `CURRENT_VERIFIER`
+  still equals what this release writes, so a bump must register the era it replaces instead of
+  silently reinterpreting history.
 - Added: the era now pins the sanitizer as well as the declarations. Each registered era carries a
-  frozen `security.SanitizerRules` -- the token patterns, the authorization/bearer/PEM/file-URI and
+  `security.SanitizerRules` -- the token patterns, the authorization/bearer/PEM/file-URI and
   absolute-path expressions, the sensitive suffix and exact-name sets, the text-eligibility and YAML
-  refusal sets, the raster image types and their evidence grammar, the recursion, element, diff-path
-  and extensionless-text limits, and the classifier version that goes on those values. `CURRENT_RULES`
-  is this release's instance; `SCAN_RULES_V2` is the era schema 2 / epoch 4 was published under, and
-  the two are the same object today, which `tests/test_verifier_registry.py` checks value by value
-  against the live constants so a rule edit must register the era that replaces it. A read installs its
-  era's rules with `security.era_rules()` for the duration of re-scanning that artifact, so widening a
-  pattern no longer rewrites history out of existence: publishing a body that matches nothing today,
-  then adding a pattern for it, leaves the older artifact readable byte for byte while a new write
-  under the later era redacts the same text -- both in one process, `test_a_tightened_sanitizer_...`.
-  Measured on this machine's store, all 559 published artifacts read with identical bytes and
-  identical re-derived envelopes under released 2.3.2 and under this code.
+  refusal sets, the raster image types and their evidence grammar, the recursion, element and
+  diff-path candidate limits, and the classifier version that goes with those values. `CURRENT_RULES`
+  reads the live constants, while `SCAN_RULES_V2` holds the era-4 values as its own literals: the two
+  are deliberately *not* one object, because an era that reads the live constants moves with them and
+  is not frozen at all. `tests/test_verifier_registry.py` compares them by value, so tightening a rule
+  without registering the era that replaces it fails there. A read installs its era's rules with
+  `security.era_rules()` for the duration of re-scanning that artifact, and the targeted-evidence
+  route uses the same era as the load that validated the bytes, so attributing a stored diff no longer
+  answers differently depending on which release is installed.
+  Measured: publishing a body whose text matches nothing today and then adding a pattern for it leaves
+  the older artifact readable byte for byte while a new write under the later era redacts the same
+  text, both in one process (`test_a_tightened_sanitizer_...`,
+  `test_targeted_evidence_attribution_uses_the_era_that_wrote_the_artifact`). Before the literals
+  were separated, that same single-pattern edit was reproduced against this machine's real store as
+  ten artifacts refusing their own canonical bytes with the whole test suite passing; with them
+  separated, all ten read byte-exactly and the registry test fails until an era is registered.
+  Across the whole store, every artifact loaded under released 2.3.2 and under this code with
+  unchanged bytes and an identical parsed envelope -- 559 directories at the time of writing, which is
+  a growing number, not a constant. The envelope claim is not independent of the load claim: the
+  loader refuses unless the canonical serialization reproduces the stored bytes, so a successful load
+  already entails it.
 - Preserved: what pinning rules does not touch. Identity validation is not era-relative and was not
   relaxed to accommodate history -- the snapshot id must still equal the SHA-256 of the stored bytes,
   `meta.json` must still serialize canonically, the directory must still hold exactly the three
   published names with mode `0600` inside a `0700` tree with no symlink ancestor, and the sanitizer
-  still runs on every read; only *which* rules run changed. `test_identity_guards_are_not_part_of_the_era_dispatch`
-  refuses loosened modes, an extra file, a missing file, a rewritten preview, an appended byte and an
-  unregistered epoch. An era whose classifier the sanitizer has not been told to support is still
+  still runs on every read; only *which* rules run changed.
+  `test_identity_guards_are_not_part_of_the_era_dispatch` refuses a loosened mode, an extra file, a
+  missing file, a rewritten preview, an appended byte and an unregistered epoch, asserting the reason
+  as well as the refusal. An era whose classifier the sanitizer has not been told to support is still
   refused, so a half-finished bump fails closed instead of scanning old bodies under the wrong rules.
+  `test_no_sanitizer_rule_is_read_bypassing_the_era_policy` walks the module and rejects any function
+  body that names a rule constant directly, which covers the sites a behavioural test cannot perturb.
 - Chosen, and worth stating plainly: freezing rules means an artifact published before a secret
   pattern existed stays readable with that text intact. That is the same decision as keeping history
   readable, made on the read side only -- writes always use `CURRENT_VERIFIER`, nothing new is
   published under superseded rules, and `preview.txt` still requires human review before any upload.
 - Boundary that remains: the registry pins declarations and sanitizer rules, not the structural
-  tables. The per-task required fields, the evidence-gap key sets, `REDACTION_CATEGORIES` and the
-  size budgets are still read from this release, so a future *tightening* of any of them can still
-  refuse an old artifact. Splitting those needs a schema decision, not just a rule freeze.
+  tables. The per-task required fields, the evidence-gap key sets, `REDACTION_CATEGORIES`, the size
+  budgets and the two acceptance shapes a read also applies -- `REPOSITORY_NAME_RE`, which bounds the
+  recorded repository name, and `SNAPSHOT_GIT_OID_RE`, which accepts the 40-hex object ids stored in
+  `base_commit`, `target_head`, `merge_base_commit`, `head` and deleted-file blobs -- are still read
+  from this release, so a future *tightening* of any of them can still refuse an old artifact. Some
+  rule values are inline literals in the sanitizer (the `.env.` prefix, `.gitattributes`, the
+  basename substitution and its 64-character bound) and cannot be pinned without becoming data.
+  Splitting any of this needs a schema decision, not just a rule freeze.
 
 ## 2.3.2 - 2026-09-25
 
