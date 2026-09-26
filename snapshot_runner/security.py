@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import hashlib
 import math
 import os
 import re
 import stat
 from collections import Counter
+from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 
 
 class SecurityError(RuntimeError):
@@ -152,6 +156,94 @@ REPOSITORY_NAME_RE = re.compile(r"[A-Za-z0-9._][A-Za-z0-9._-]{0,127}")
 
 
 @dataclass(frozen=True, slots=True)
+class SanitizerRules:
+    """One release's sanitization rule data, kept so an era stays re-readable.
+
+    Every field here is consulted while a stored artifact is being read: a body is re-redacted,
+    re-classified and re-serialized, and the artifact is refused unless the result reproduces its
+    own bytes. Editing the live constants above would therefore let a later release decide whether
+    an earlier artifact exists at all -- adding one token pattern that matches text an old body
+    already contains is enough to make it fail its canonical check. An artifact era is bound to a
+    frozen instance of this class instead, and :func:`era_rules` installs it for the duration of
+    one read.
+
+    Adding a rule is a release-side change with a forced companion: create a new `_RULES_Vn`,
+    repoint ``CURRENT_RULES``, and register the era that writes it. The previous instance stays
+    referenced by the era that was published under it.
+    """
+
+    classifier_version: int
+    token_patterns: tuple[tuple[str, re.Pattern[str]], ...]
+    auth_header_re: re.Pattern[str]
+    bearer_re: re.Pattern[str]
+    pem_boundary_re: re.Pattern[str]
+    file_uri_re: re.Pattern[str]
+    absolute_path_re: re.Pattern[str]
+    sensitive_file_suffixes: frozenset[str]
+    sensitive_exact_file_names: frozenset[str]
+    allowed_text_suffixes: frozenset[str]
+    allowed_extensionless_names: frozenset[str]
+    yaml_text_suffixes: frozenset[str]
+    raster_image_media_types: MappingProxyType[str, str]
+    raster_image_evidence_re: re.Pattern[str]
+    max_depth: int
+    max_elements: int
+    max_diff_path_candidates: int
+    max_extensionless_text_bytes: int
+
+
+SCAN_RULES_V2 = SanitizerRules(
+    classifier_version=SCAN_CLASSIFIER_VERSION,
+    token_patterns=KNOWN_TOKEN_PATTERNS,
+    auth_header_re=AUTH_HEADER_RE,
+    bearer_re=BEARER_RE,
+    pem_boundary_re=PEM_PRIVATE_KEY_BOUNDARY_RE,
+    file_uri_re=FILE_URI_RE,
+    absolute_path_re=ABSOLUTE_PATH_RE,
+    sensitive_file_suffixes=SENSITIVE_FILE_SUFFIXES,
+    sensitive_exact_file_names=SENSITIVE_EXACT_FILE_NAMES,
+    allowed_text_suffixes=ALLOWED_TEXT_SUFFIXES,
+    allowed_extensionless_names=ALLOWED_EXTENSIONLESS_NAMES,
+    yaml_text_suffixes=YAML_TEXT_SUFFIXES,
+    raster_image_media_types=MappingProxyType(dict(RASTER_IMAGE_MEDIA_TYPES)),
+    raster_image_evidence_re=RASTER_IMAGE_EVIDENCE_RE,
+    max_depth=MAX_SANITIZE_DEPTH,
+    max_elements=MAX_SANITIZE_ELEMENTS,
+    max_diff_path_candidates=MAX_DIFF_PATH_CANDIDATES,
+    max_extensionless_text_bytes=MAX_EXTENSIONLESS_TEXT_BYTES,
+)
+
+#: The rules this release writes new artifacts under. A read with no installed era uses these.
+#: A future rule change adds a `SCAN_RULES_V3`, repoints this name, and registers the era that
+#: writes it; `SCAN_RULES_V2` stays referenced by the era published under it.
+CURRENT_RULES = SCAN_RULES_V2
+
+_ACTIVE_RULES: contextvars.ContextVar[SanitizerRules | None] = contextvars.ContextVar(
+    "_ACTIVE_RULES", default=None
+)
+
+
+def active_rules() -> SanitizerRules:
+    """Return the rules in force for the current read, defaulting to this release's rules."""
+    rules = _ACTIVE_RULES.get()
+    return CURRENT_RULES if rules is None else rules
+
+
+@contextlib.contextmanager
+def era_rules(rules: SanitizerRules) -> Iterator[SanitizerRules]:
+    """Install one era's rules for everything read while the block runs.
+
+    The binding is task- and thread-local, and it is entered by the loader from the artifact's own
+    registered era, never from anything a stored body says.
+    """
+    token = _ACTIVE_RULES.set(rules)
+    try:
+        yield rules
+    finally:
+        _ACTIVE_RULES.reset(token)
+
+
+@dataclass(frozen=True, slots=True)
 class SanitizedText:
     text: str
     redactions: dict[str, int]
@@ -249,7 +341,7 @@ def _normalize_pem_label(raw: str) -> str:
 
 def _contains_complete_private_key_block(text: str) -> bool:
     open_boundaries: dict[str, int] = {}
-    for boundary in PEM_PRIVATE_KEY_BOUNDARY_RE.finditer(text):
+    for boundary in active_rules().pem_boundary_re.finditer(text):
         label = _normalize_pem_label(boundary.group("label"))
         if boundary.group("kind").upper() == "BEGIN":
             open_boundaries[label] = boundary.end()
@@ -281,18 +373,20 @@ def _is_redacted_value(raw: str) -> bool:
 
 
 def _assert_no_residual_credentials(text: str) -> None:
-    for match in AUTH_HEADER_RE.finditer(text):
+    rules = active_rules()
+    for match in rules.auth_header_re.finditer(text):
         if not _is_redacted_value(match.group("value")):
             raise SecurityError("text contains a residual authorization credential")
-    if BEARER_RE.search(text):
+    if rules.bearer_re.search(text):
         raise SecurityError("text contains a residual bearer credential")
-    for _category, pattern in KNOWN_TOKEN_PATTERNS:
+    for _category, pattern in rules.token_patterns:
         if pattern.search(text):
             raise SecurityError("text contains a residual credential pattern")
 
 
 def _redact_credentials(text: str, counts: Counter[str]) -> str:
     _reject_complete_private_key_block(text)
+    rules = active_rules()
     redacted = text
 
     def authorization(match: re.Match[str]) -> str:
@@ -301,10 +395,10 @@ def _redact_credentials(text: str, counts: Counter[str]) -> str:
         counts["AUTH"] += 1
         return f"{match.group('prefix')}[REDACTED_AUTH]"
 
-    redacted = AUTH_HEADER_RE.sub(authorization, redacted)
-    redacted, replacements = BEARER_RE.subn("Bearer [REDACTED_BEARER]", redacted)
+    redacted = rules.auth_header_re.sub(authorization, redacted)
+    redacted, replacements = rules.bearer_re.subn("Bearer [REDACTED_BEARER]", redacted)
     counts["BEARER"] += replacements
-    for category, pattern in KNOWN_TOKEN_PATTERNS:
+    for category, pattern in rules.token_patterns:
         redacted, replacements = pattern.subn(f"[REDACTED_{category}]", redacted)
         counts[category] += replacements
     _assert_no_residual_credentials(redacted)
@@ -325,11 +419,12 @@ def _component_suffix(component: str) -> str:
 
 
 def _is_sensitive_path_component(component: str) -> bool:
+    rules = active_rules()
     lowered = component.lower()
     return (
-        lowered in SENSITIVE_EXACT_FILE_NAMES
+        lowered in rules.sensitive_exact_file_names
         or lowered.startswith(".env.")
-        or _component_suffix(lowered) in SENSITIVE_FILE_SUFFIXES
+        or _component_suffix(lowered) in rules.sensitive_file_suffixes
     )
 
 
@@ -348,7 +443,7 @@ def _redact_absolute_paths(
     repository_root: Path | None,
     explicit_paths: tuple[Path, ...],
 ) -> str:
-    redacted, file_uri_count = FILE_URI_RE.subn("[REDACTED_FILE_URI]", text)
+    redacted, file_uri_count = active_rules().file_uri_re.subn("[REDACTED_FILE_URI]", text)
     counts["FILE_URI"] += file_uri_count
     # A tuple is (original, replacement, is_security_replacement): removing the
     # repository's own root prefix is deterministic relativization of in-repo
@@ -378,13 +473,13 @@ def _redact_absolute_paths(
 
     if "/" not in redacted:
         return redacted
-    return ABSOLUTE_PATH_RE.sub(generic_path, redacted)
+    return active_rules().absolute_path_re.sub(generic_path, redacted)
 
 
 def is_yaml_content_path(relative_path: str) -> bool:
     """Return whether a repository path has an unsupported YAML suffix."""
     return isinstance(relative_path, str) and (
-        PurePosixPath(relative_path).suffix.lower() in YAML_TEXT_SUFFIXES
+        PurePosixPath(relative_path).suffix.lower() in active_rules().yaml_text_suffixes
     )
 
 
@@ -462,7 +557,7 @@ def _validate_bounded_diff_text(
                 raise SecurityError("extensionless text symlink refused")
             if not stat.S_ISREG(candidate.st_mode):
                 raise SecurityError("extensionless text non-regular file refused")
-            if candidate.st_size > MAX_EXTENSIONLESS_TEXT_BYTES:
+            if candidate.st_size > active_rules().max_extensionless_text_bytes:
                 raise SecurityError("extensionless text exceeds the file size limit")
             file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
             descriptor = os.open(path.parts[-1], file_flags, dir_fd=directory_descriptor)
@@ -475,7 +570,7 @@ def _validate_bounded_diff_text(
         ):
             raise SecurityError("extensionless text changed during safe open")
         chunks: list[bytes] = []
-        remaining = MAX_EXTENSIONLESS_TEXT_BYTES + 1
+        remaining = active_rules().max_extensionless_text_bytes + 1
         while remaining:
             chunk = os.read(descriptor, remaining)
             if not chunk:
@@ -661,7 +756,7 @@ def _diff_git_path_candidates(
                 boundary = raw.find(marker, start)
                 if boundary < 0:
                     break
-                if len(raw_pairs) >= MAX_DIFF_PATH_CANDIDATES:
+                if len(raw_pairs) >= active_rules().max_diff_path_candidates:
                     raise SecurityError("unified diff file boundary has too many candidate paths")
                 raw_pairs.append((raw[:boundary], raw[boundary + 1 :]))
                 start = boundary + 1
@@ -1197,10 +1292,15 @@ def sanitize_json_value(
     scan_manifest: ScanModeManifest | None = None,
     repository_root: Path | None = None,
     explicit_paths: tuple[Path, ...] = (),
-    max_depth: int = MAX_SANITIZE_DEPTH,
-    max_elements: int = MAX_SANITIZE_ELEMENTS,
+    max_depth: int | None = None,
+    max_elements: int | None = None,
     verify_live_diff_text: bool = True,
 ) -> object:
+    rules = active_rules()
+    if max_depth is None:
+        max_depth = rules.max_depth
+    if max_elements is None:
+        max_elements = rules.max_elements
     if max_depth < 0 or max_elements <= 0:
         raise SecurityError("invalid recursive sanitization limits")
     if (scan_mode is None) == (scan_manifest is None):
@@ -1297,10 +1397,11 @@ def is_sensitive_repository_path(relative_path: str) -> bool:
 def is_relevant_text_path(relative_path: str) -> bool:
     if is_sensitive_repository_path(relative_path):
         return False
+    rules = active_rules()
     path = PurePosixPath(relative_path)
     return (
-        path.suffix.lower() in ALLOWED_TEXT_SUFFIXES
-        or path.name.lower() in ALLOWED_EXTENSIONLESS_NAMES
+        path.suffix.lower() in rules.allowed_text_suffixes
+        or path.name.lower() in rules.allowed_extensionless_names
         or path.name == ".gitattributes"
     )
 
@@ -1310,7 +1411,7 @@ def has_supported_raster_image_suffix(relative_path: str) -> bool:
     return (
         isinstance(relative_path, str)
         and bool(relative_path)
-        and PurePosixPath(relative_path).suffix.lower() in RASTER_IMAGE_MEDIA_TYPES
+        and PurePosixPath(relative_path).suffix.lower() in active_rules().raster_image_media_types
     )
 
 
@@ -1326,7 +1427,7 @@ def raster_image_media_type(relative_path: str) -> str | None:
     path = PurePosixPath(relative_path)
     if path.is_absolute() or ".." in path.parts or path.as_posix() != relative_path:
         return None
-    return RASTER_IMAGE_MEDIA_TYPES.get(path.suffix.lower())
+    return active_rules().raster_image_media_types.get(path.suffix.lower())
 
 
 def raster_image_magic_matches(media_type: str, prefix: bytes, byte_size: int) -> bool:
@@ -1350,7 +1451,11 @@ def is_raster_image_evidence(
 ) -> bool:
     """Validate the exact bounded text summary used for raster image evidence."""
     media_type = raster_image_media_type(relative_path)
-    match = RASTER_IMAGE_EVIDENCE_RE.fullmatch(content) if isinstance(content, str) else None
+    match = (
+        active_rules().raster_image_evidence_re.fullmatch(content)
+        if isinstance(content, str)
+        else None
+    )
     if (
         media_type is None
         or match is None

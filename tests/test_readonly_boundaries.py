@@ -8,11 +8,13 @@ import json
 import math
 import os
 import platform
+import re
 import shutil
 import signal
 import stat
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +33,7 @@ from snapshot_runner import (  # noqa: E402
     collect,
     git,
     security,
+    verifiers,
 )
 
 
@@ -1022,6 +1025,82 @@ def test_snapshot_reload_follows_the_registered_era_not_the_live_classifier_vers
     with pytest.raises(runner.RunnerError, match="classifier"):
         artifact_module._load_snapshot(artifact.snapshot_id)
     assert artifact.directory.is_relative_to(private_state)
+
+
+def _register_tightened_release(
+    monkeypatch: pytest.MonkeyPatch, category: str, pattern: str
+) -> verifiers.ArtifactVerifier:
+    """Turn this process into the release that follows a sanitizer tightening.
+
+    A real bump freezes a new rule set, registers the era that writes it, and raises the classifier
+    version the producer stamps into its own manifest. The era before it keeps the rules it
+    published under, which is the point: history stays readable because nothing re-scans it under
+    rules that did not exist when it was written.
+    """
+    previous = security.CURRENT_RULES
+    later_rules = replace(
+        previous,
+        classifier_version=previous.classifier_version + 1,
+        token_patterns=(*previous.token_patterns, (category, re.compile(pattern))),
+    )
+    later = replace(
+        verifiers.CURRENT_VERIFIER,
+        producer_security_epoch=verifiers.CURRENT_VERIFIER.producer_security_epoch + 1,
+        rules=later_rules,
+        security_notice=collect.SECURITY_NOTICE.replace(
+            f"version: {previous.classifier_version}.",
+            f"version: {later_rules.classifier_version}.",
+        ),
+    )
+    monkeypatch.setattr(security, "SCAN_CLASSIFIER_VERSION", later_rules.classifier_version)
+    monkeypatch.setattr(security, "SUPPORTED_SCAN_CLASSIFIER_VERSIONS", frozenset({2, 3}))
+    monkeypatch.setattr(collect, "SCAN_CLASSIFIER_VERSION", later_rules.classifier_version)
+    monkeypatch.setattr(security, "CURRENT_RULES", later_rules)
+    monkeypatch.setattr(verifiers, "CURRENT_VERIFIER", later)
+    monkeypatch.setattr(verifiers, "_VERIFIERS", {**verifiers._VERIFIERS, later.version_key: later})
+    monkeypatch.setattr(collect, "PRODUCER_SECURITY_EPOCH", later.producer_security_epoch)
+    # `artifact` binds the producer constants by value, as any released build does at import.
+    monkeypatch.setattr(artifact_module, "PRODUCER_SECURITY_EPOCH", later.producer_security_epoch)
+    monkeypatch.setattr(collect, "SECURITY_NOTICE", later.security_notice)
+    monkeypatch.setattr(artifact_module, "SECURITY_NOTICE", later.security_notice)
+    return later
+
+
+def test_a_tightened_sanitizer_keeps_the_older_era_readable_and_redacts_new_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    private_state: Path,
+    target_repository: git.ValidatedTargetRepository,
+) -> None:
+    """One text, two eras: published raw under the old rules, redacted under the new ones.
+
+    The text below matches no pattern today. Once a later release adds one, reading the
+    already-published artifact under the later rules would rewrite its body and break its canonical
+    re-serialization -- under current-rule reading that means the artifact stops existing. Both
+    artifacts stay readable in one process because each is scanned under its own era's rules.
+    """
+    snapshot = _snapshot_with_file_context("PROBE_TOKEN = 1\n", "safe.py")
+    monkeypatch.setattr(collect, "collect_diff_audit", lambda *_args, **_kwargs: snapshot)
+    historic = runner._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
+    stored = {path.name: path.read_bytes() for path in historic.directory.iterdir()}
+    assert b"PROBE_TOKEN = 1" in stored["snapshot.json"]
+    assert b"REDACTED" not in stored["snapshot.json"]
+
+    later = _register_tightened_release(monkeypatch, "GITHUB_TOKEN", r"\bPROBE_TOKEN\b")
+
+    reloaded = artifact_module._load_snapshot(historic.snapshot_id)
+    assert reloaded.snapshot_id == historic.snapshot_id
+    assert {path.name: path.read_bytes() for path in historic.directory.iterdir()} == stored
+    assert b"PROBE_TOKEN = 1" in reloaded.snapshot_bytes
+
+    current_snapshot = _snapshot_with_file_context("PROBE_TOKEN = 1\n", "safe.py")
+    monkeypatch.setattr(collect, "collect_diff_audit", lambda *_args, **_kwargs: current_snapshot)
+    current = runner._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
+    fresh = {path.name: path.read_bytes() for path in current.directory.iterdir()}
+    assert b"PROBE_TOKEN" not in fresh["snapshot.json"]
+    assert b"[REDACTED_GITHUB_TOKEN]" in fresh["snapshot.json"]
+    published = json.loads(fresh["snapshot.json"])
+    assert published["producer_security_epoch"] == later.producer_security_epoch
+    assert artifact_module._load_snapshot(current.snapshot_id).snapshot_id == current.snapshot_id
 
 
 def test_snapshot_ancestor_symlink_is_refused(

@@ -75,14 +75,36 @@ public source baseline; it was not tagged or published to PyPI.
   sanitizer will not run at all is still refused, an unregistered version is refused, and
   `tests/test_verifier_registry.py` pins that `CURRENT_VERIFIER` still equals what this release
   writes, so a bump must register the era it replaces instead of silently reinterpreting history.
-- Boundary of this change, stated because it is not the whole problem: the registry pins
-  *declarations*, not the sanitizer. Current redaction rules still run over historical bodies, so a
-  newly added token pattern that matches text an old artifact already contains makes that artifact
-  fail its canonical re-serialization -- measured as two of four sampled artifacts refusing with
-  `snapshot hash or canonical artifact validation failed` after one extra pattern was registered.
-  Pinning the pattern set, the task tables and the budget limits per era is the remaining work, and
-  whether a stricter current rule *should* keep old artifacts readable is a product decision about
-  secret exposure, not something this entry decides.
+- Added: the era now pins the sanitizer as well as the declarations. Each registered era carries a
+  frozen `security.SanitizerRules` -- the token patterns, the authorization/bearer/PEM/file-URI and
+  absolute-path expressions, the sensitive suffix and exact-name sets, the text-eligibility and YAML
+  refusal sets, the raster image types and their evidence grammar, the recursion, element, diff-path
+  and extensionless-text limits, and the classifier version that goes on those values. `CURRENT_RULES`
+  is this release's instance; `SCAN_RULES_V2` is the era schema 2 / epoch 4 was published under, and
+  the two are the same object today, which `tests/test_verifier_registry.py` checks value by value
+  against the live constants so a rule edit must register the era that replaces it. A read installs its
+  era's rules with `security.era_rules()` for the duration of re-scanning that artifact, so widening a
+  pattern no longer rewrites history out of existence: publishing a body that matches nothing today,
+  then adding a pattern for it, leaves the older artifact readable byte for byte while a new write
+  under the later era redacts the same text -- both in one process, `test_a_tightened_sanitizer_...`.
+  Measured on this machine's store, all 559 published artifacts read with identical bytes and
+  identical re-derived envelopes under released 2.3.2 and under this code.
+- Preserved: what pinning rules does not touch. Identity validation is not era-relative and was not
+  relaxed to accommodate history -- the snapshot id must still equal the SHA-256 of the stored bytes,
+  `meta.json` must still serialize canonically, the directory must still hold exactly the three
+  published names with mode `0600` inside a `0700` tree with no symlink ancestor, and the sanitizer
+  still runs on every read; only *which* rules run changed. `test_identity_guards_are_not_part_of_the_era_dispatch`
+  refuses loosened modes, an extra file, a missing file, a rewritten preview, an appended byte and an
+  unregistered epoch. An era whose classifier the sanitizer has not been told to support is still
+  refused, so a half-finished bump fails closed instead of scanning old bodies under the wrong rules.
+- Chosen, and worth stating plainly: freezing rules means an artifact published before a secret
+  pattern existed stays readable with that text intact. That is the same decision as keeping history
+  readable, made on the read side only -- writes always use `CURRENT_VERIFIER`, nothing new is
+  published under superseded rules, and `preview.txt` still requires human review before any upload.
+- Boundary that remains: the registry pins declarations and sanitizer rules, not the structural
+  tables. The per-task required fields, the evidence-gap key sets, `REDACTION_CATEGORIES` and the
+  size budgets are still read from this release, so a future *tightening* of any of them can still
+  refuse an old artifact. Splitting those needs a schema decision, not just a rule freeze.
 
 ## 2.3.2 - 2026-09-25
 

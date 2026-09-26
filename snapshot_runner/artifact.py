@@ -39,6 +39,7 @@ from .security import (
     ScanModeManifest,
     SecurityError,
     classify_scan_mode,
+    era_rules,
     is_extensionless_text_candidate,
     is_raster_image_evidence,
     is_sensitive_repository_path,
@@ -54,7 +55,7 @@ from .security import (
 from .security import (
     validate_no_symlink_ancestors as _validate_no_symlink_ancestors,
 )
-from .verifiers import CURRENT_VERIFIER, ArtifactVerifier, verifier_for
+from .verifiers import ArtifactVerifier, resolve_verifier, verifier_for
 
 SNAPSHOT_PUBLISH_DURABILITY_ERROR = "snapshot published but snapshot-store durability sync failed"
 STATE_HOME_MISSING_ERROR = "state home must already exist as a private directory"
@@ -322,8 +323,9 @@ def _require_exact_keys(
 
 
 def _validate_snapshot_meta_schema(
-    value: object, verifier: ArtifactVerifier = CURRENT_VERIFIER
+    value: object, verifier: ArtifactVerifier | None = None
 ) -> dict[str, object]:
+    verifier = resolve_verifier(verifier)
     keys = {
         "schema_version",
         "producer_security_epoch",
@@ -938,8 +940,9 @@ def _collect_string_modes(
 
 
 def _snapshot_data_scan_manifest(
-    envelope: dict[str, object], verifier: ArtifactVerifier = CURRENT_VERIFIER
+    envelope: dict[str, object], verifier: ArtifactVerifier | None = None
 ) -> ScanModeManifest:
+    verifier = resolve_verifier(verifier)
     data = envelope["data"]
     task = str(envelope["task"])
     assert isinstance(data, dict)
@@ -1024,8 +1027,9 @@ def _snapshot_data_scan_manifest(
 
 
 def _snapshot_scan_manifest(
-    value: dict[str, object], verifier: ArtifactVerifier = CURRENT_VERIFIER
+    value: dict[str, object], verifier: ArtifactVerifier | None = None
 ) -> ScanModeManifest:
+    verifier = resolve_verifier(verifier)
     bindings: dict[tuple[str | int, ...], ScanMode] = {}
     _collect_string_modes(value, bindings)
     data_manifest = _snapshot_data_scan_manifest(value, verifier)
@@ -1047,59 +1051,63 @@ def _sanitize_validate_snapshot(
     extra_paths: tuple[Path, ...] = (),
     expected_scan_manifest: ScanModeManifest | None = None,
     verify_live_diff_text: bool = True,
-    verifier: ArtifactVerifier = CURRENT_VERIFIER,
+    verifier: ArtifactVerifier | None = None,
 ) -> dict[str, object]:
-    envelope = _validate_snapshot_envelope(payload, verifier)
-    try:
-        derived_snapshot_manifest = _snapshot_data_scan_manifest(envelope, verifier)
-    except SecurityError as exc:
-        raise _runner_security_error(exc, "snapshot scan classifier invariant failed") from exc
-    if expected_scan_manifest is not None and (
-        not isinstance(expected_scan_manifest, ScanModeManifest)
-        or expected_scan_manifest != derived_snapshot_manifest
-    ):
-        raise RunnerError(
-            ARTIFACT_VALIDATION_FAILED,
-            "trusted snapshot scan manifest does not match artifact schema",
+    verifier = resolve_verifier(verifier)
+    # Everything below re-derives the artifact's bytes, so every rule it consults must be the one
+    # the artifact's era was written under, not the one this release happens to publish with.
+    with era_rules(verifier.rules):
+        envelope = _validate_snapshot_envelope(payload, verifier)
+        try:
+            derived_snapshot_manifest = _snapshot_data_scan_manifest(envelope, verifier)
+        except SecurityError as exc:
+            raise _runner_security_error(exc, "snapshot scan classifier invariant failed") from exc
+        if expected_scan_manifest is not None and (
+            not isinstance(expected_scan_manifest, ScanModeManifest)
+            or expected_scan_manifest != derived_snapshot_manifest
+        ):
+            raise RunnerError(
+                ARTIFACT_VALIDATION_FAILED,
+                "trusted snapshot scan manifest does not match artifact schema",
+            )
+        protected, redactions = _protect_snapshot_redactions(envelope)
+        try:
+            scan_manifest = _snapshot_scan_manifest(protected, verifier)
+        except SecurityError as exc:
+            raise _runner_security_error(
+                exc, "artifact scan classifier manifest validation failed"
+            ) from exc
+        explicit_paths = _snapshot_sanitization_paths(extra_paths)
+        try:
+            normalized = sanitize_json_value(
+                protected,
+                scan_manifest=scan_manifest,
+                repository_root=repository_root,
+                explicit_paths=explicit_paths,
+                verify_live_diff_text=verify_live_diff_text,
+            )
+        except SecurityError as exc:
+            raise _runner_security_error(exc, "artifact sanitization failed closed") from exc
+        normalized = _validate_snapshot_envelope(
+            _restore_snapshot_redactions(normalized, redactions), verifier
         )
-    protected, redactions = _protect_snapshot_redactions(envelope)
-    try:
-        scan_manifest = _snapshot_scan_manifest(protected, verifier)
-    except SecurityError as exc:
-        raise _runner_security_error(
-            exc, "artifact scan classifier manifest validation failed"
-        ) from exc
-    explicit_paths = _snapshot_sanitization_paths(extra_paths)
-    try:
-        normalized = sanitize_json_value(
-            protected,
-            scan_manifest=scan_manifest,
-            repository_root=repository_root,
-            explicit_paths=explicit_paths,
-            verify_live_diff_text=verify_live_diff_text,
-        )
-    except SecurityError as exc:
-        raise _runner_security_error(exc, "artifact sanitization failed closed") from exc
-    normalized = _validate_snapshot_envelope(
-        _restore_snapshot_redactions(normalized, redactions), verifier
-    )
 
-    invariant_input, invariant_redactions = _protect_snapshot_redactions(normalized)
-    try:
-        invariant_value = sanitize_json_value(
-            invariant_input,
-            scan_manifest=scan_manifest,
-            repository_root=repository_root,
-            explicit_paths=explicit_paths,
-            verify_live_diff_text=verify_live_diff_text,
-        )
-    except SecurityError as exc:
-        raise _runner_security_error(exc, "artifact invariant scan failed closed") from exc
-    invariant_value = _restore_snapshot_redactions(invariant_value, invariant_redactions)
-    if invariant_value != normalized:
-        raise RunnerError(
-            ARTIFACT_VALIDATION_FAILED, "artifact failed final secret or path invariants"
-        )
+        invariant_input, invariant_redactions = _protect_snapshot_redactions(normalized)
+        try:
+            invariant_value = sanitize_json_value(
+                invariant_input,
+                scan_manifest=scan_manifest,
+                repository_root=repository_root,
+                explicit_paths=explicit_paths,
+                verify_live_diff_text=verify_live_diff_text,
+            )
+        except SecurityError as exc:
+            raise _runner_security_error(exc, "artifact invariant scan failed closed") from exc
+        invariant_value = _restore_snapshot_redactions(invariant_value, invariant_redactions)
+        if invariant_value != normalized:
+            raise RunnerError(
+                ARTIFACT_VALIDATION_FAILED, "artifact failed final secret or path invariants"
+            )
     return normalized
 
 
@@ -1671,8 +1679,9 @@ def _validate_initial_publication(
 
 
 def _validate_snapshot_envelope(
-    value: object, verifier: ArtifactVerifier = CURRENT_VERIFIER
+    value: object, verifier: ArtifactVerifier | None = None
 ) -> dict[str, object]:
+    verifier = resolve_verifier(verifier)
     if not isinstance(value, dict):
         raise RunnerError(ARTIFACT_VALIDATION_FAILED, "snapshot schema requires a JSON object")
     expected_keys = {

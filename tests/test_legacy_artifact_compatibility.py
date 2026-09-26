@@ -224,3 +224,48 @@ def test_a_historical_read_does_not_depend_on_todays_classifier_constants(
     assert (exit_code, err) == (0, ""), out + err
     assert json.loads(out)["snapshot_id"] == SNAPSHOT_ID
     assert {path.name: path.read_bytes() for path in directory.iterdir()} == fixtures
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["loosened mode", "extra file", "missing file", "preview rewritten", "byte appended", "epoch"],
+)
+def test_identity_guards_are_not_part_of_the_era_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mutation: str,
+) -> None:
+    """Pinning an era's rules changes what the sanitizer does, never what has to match.
+
+    Each mutation breaks one identity fact: bytes that no longer hash to the snapshot id, a file set
+    that is not the three published names, or a mode the private store refuses. Registering the
+    artifact's era must not talk its way past any of them.
+    """
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state))
+    directory, fixtures = _install_artifact(state)
+    repo = _repository(tmp_path)
+    if mutation == "loosened mode":
+        (directory / "snapshot.json").chmod(0o644)
+    elif mutation == "extra file":
+        (directory / "notes.json").write_text("{}\n", encoding="utf-8")
+        (directory / "notes.json").chmod(0o600)
+    elif mutation == "missing file":
+        (directory / "preview.txt").unlink()
+    elif mutation == "preview rewritten":
+        (directory / "preview.txt").write_bytes(b"rewritten preview\n")
+    elif mutation == "byte appended":
+        (directory / "snapshot.json").write_bytes(fixtures["snapshot.json"] + b"\n")
+    elif mutation == "epoch":
+        (directory / "meta.json").write_bytes(
+            fixtures["meta.json"].replace(
+                b'"producer_security_epoch": 4', b'"producer_security_epoch": 5'
+            )
+        )
+
+    exit_code, out, err = _read(repo, SNAPSHOT_ID, capsys)
+    assert exit_code != 0
+    assert out == ""
+    assert err != ""

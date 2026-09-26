@@ -3,25 +3,47 @@
 A snapshot declares the format it was written in -- ``schema_version`` and
 ``producer_security_epoch`` in both of its JSON files, plus the ``trust_boundary`` and
 ``security_notice`` text its producer released. Those are facts about the artifact. The rules
-that produced them are facts about one release of this package, and ``security_notice`` is where
-the scan classifier version of that release is recorded.
+that produced them -- the classifier version, the sanitizer's secret patterns, its path
+eligibility sets and its recursion limits -- are facts about one release of this package, and
+``security_notice`` is where the classifier version of that release is recorded.
 
 Reading an artifact by comparing it against the constants of whichever release happens to be
-running turns a routine producer-side change into a store-wide outage: every previously published
-snapshot starts failing validation at once. Each row of the registry below therefore pins the
-declarations of one supported artifact version, and ``verifier_for`` resolves a stored snapshot to
-its own row. A version that is not registered fails closed.
+running turns a routine producer-side change into a store-wide outage: a read re-redacts and
+re-serializes the body and refuses the artifact unless the bytes reproduce themselves, so adding
+one token pattern that matches text an old body already contains is enough to make that artifact
+unreadable. Each row of the registry below therefore pins one supported artifact version's
+declarations *and* its :class:`security.SanitizerRules`, and ``verifier_for`` resolves a stored
+snapshot to its own row. A version that is not registered fails closed.
 
-``CURRENT_VERIFIER`` is the row this release writes. It is checked against the live producer
-constants by ``tests/test_verifier_registry.py``, so raising a producer constant without
-registering the era it replaces fails in development instead of silently orphaning history.
+``CURRENT_VERIFIER`` is the row this release writes. ``tests/test_verifier_registry.py`` checks it
+against the live producer constants and the live sanitizer rules, so raising a constant or editing
+a rule without registering the era that replaces it fails in development instead of silently
+orphaning history.
+
+The residual risk of pinning rules is chosen rather than accidental: an artifact published before
+a secret pattern existed stays readable with that text intact, because freezing rules is what keeps
+history readable at all. Writes always use ``CURRENT_VERIFIER``, so nothing new is published under
+superseded rules, and ``preview.txt`` still requires human review before any upload.
+
+Two boundaries are worth naming, because both are easy to mistake for this one. What the task-data
+validators accept -- the per-task required fields, the evidence-gap key sets, the redaction
+categories and the size budgets -- is still read from this release's tables, so a schema-era split of
+those tables is separate work from pinning sanitizer rules; the module that holds the schema-2 data
+validator on the refactor branch is a *format* validator for the only persisted schema, not an era
+reader, and when the two lines of work meet it should take its classifier version from the resolved
+verifier rather than from the live constant.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .security import ARTIFACT_PUBLISH_FAILED, RunnerError
+from .security import (
+    ARTIFACT_PUBLISH_FAILED,
+    SCAN_RULES_V2,
+    RunnerError,
+    SanitizerRules,
+)
 
 UNSUPPORTED_ARTIFACT_VERSION_ERROR = "snapshot declares an unsupported artifact version"
 
@@ -38,28 +60,32 @@ _EPOCH_4_SECURITY_NOTICE = (
 
 @dataclass(frozen=True, slots=True)
 class ArtifactVerifier:
-    """One supported artifact version and the declarations its producer released."""
+    """One supported artifact version: its declarations and the rules that wrote its bytes."""
 
     schema_version: int
     meta_schema_version: int
     producer_security_epoch: int
-    scan_classifier_version: int
     trust_boundary: str
     security_notice: str
+    rules: SanitizerRules
     is_current: bool
 
     @property
     def version_key(self) -> tuple[int, int]:
         return (self.meta_schema_version, self.producer_security_epoch)
 
+    @property
+    def scan_classifier_version(self) -> int:
+        return self.rules.classifier_version
+
 
 _VERIFIER_EPOCH_4 = ArtifactVerifier(
     schema_version=2,
     meta_schema_version=2,
     producer_security_epoch=4,
-    scan_classifier_version=2,
     trust_boundary=_EPOCH_4_TRUST_BOUNDARY,
     security_notice=_EPOCH_4_SECURITY_NOTICE,
+    rules=SCAN_RULES_V2,
     is_current=True,
 )
 
@@ -69,6 +95,16 @@ _VERIFIERS: dict[tuple[int, int], ArtifactVerifier] = {
 }
 
 CURRENT_VERIFIER = _VERIFIER_EPOCH_4
+
+
+def resolve_verifier(verifier: ArtifactVerifier | None) -> ArtifactVerifier:
+    """Return the era a call must use, defaulting to the era this release writes.
+
+    Resolved at call time rather than bound as a default argument, so a release that repoints
+    ``CURRENT_VERIFIER`` starts writing that era immediately instead of the one imported at
+    startup, and a test can simulate the next release without reloading modules.
+    """
+    return CURRENT_VERIFIER if verifier is None else verifier
 
 
 def verifier_for(
