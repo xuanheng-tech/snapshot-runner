@@ -119,6 +119,13 @@ class Snapshot:
         refused files would push the fact that bodies were dropped past the cap and publish evidence
         that looks complete while files had quietly vanished. Refusals of bodies are kept first; the
         remaining slots fill in recording order, so the published list stays ordered either way.
+
+        The protection covers body refusals only, deliberately. A body is the one loss this collector
+        introduced that is otherwise invisible -- the file is named nowhere at all -- whereas
+        `file_limit`, `snapshot_limit` and the path-refusal kinds still leave their subject in the
+        list when they fit, and every evicted gap of any kind is counted by the `gap_limit` entry.
+        Promising more than that would starve the per-file diff refusals that dominate a large
+        branch review, which is a different trade-off and not one made here.
         """
         gaps = self.evidence_gaps
         if len(gaps) <= MAX_EVIDENCE_GAPS:

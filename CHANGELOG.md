@@ -18,8 +18,9 @@ public source baseline; it was not tagged or published to PyPI.
   `redactions` stays `{}` rather than inflating.
 - Fixed: three things an independent review found in the change above. A body that was also
   truncated by the per-file read cap reported one number and lost the other: the refusal returned
-  before the `file_limit` gap was written, so a 360 KiB file whose first 256 KiB held an unusable key
-  said `omitted_bytes: 262144` and stayed silent about the 97 951 bytes the reader never returned.
+  before the `file_limit` gap was written, so a 360 095-byte file whose first 256 KiB held an
+  unusable key said `omitted_bytes: 262144` and stayed silent about the 97 951 bytes the reader
+  never returned.
   The two are now recorded separately and partition the file exactly, because folding them would
   overstate one and hide the other. Body refusals could also be evicted by the existing
   `MAX_EVIDENCE_GAPS` cap -- branch review records its per-file diff refusals *before* it reads any

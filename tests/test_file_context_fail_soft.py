@@ -419,3 +419,69 @@ def test_the_allow_list_and_the_reason_table_cannot_drift() -> None:
         )
         assert stable.text == reason
         assert stable.redactions == {}
+
+
+def _carrier(*gaps: collect.EvidenceGap) -> _GapCarrier:
+    carrier = _GapCarrier()
+    carrier.evidence_gaps = list(gaps)
+    return carrier
+
+
+def _body(index: int) -> collect.EvidenceGap:
+    return collect.EvidenceGap(
+        "file_refused",
+        f"key{index}.txt",
+        f"{collect.BODY_REFUSED_REASON_PREFIX}: private key boundary could not be proven",
+    )
+
+
+def _other(kind: str, index: int) -> collect.EvidenceGap:
+    return collect.EvidenceGap(kind, f"{kind}{index}.txt", "recorded elsewhere")
+
+
+def test_the_free_slots_fill_from_the_earliest_remaining_gap() -> None:
+    """Which non-refusal gaps survive is a decision, not a side effect of the loop.
+
+    Filling from the newest backwards would keep the same number of gaps and still satisfy every
+    other assertion here, so the order is pinned directly.
+    """
+    cap = collect.MAX_EVIDENCE_GAPS
+    refusals = [_body(index) for index in range(4)]
+    noise = [_other("diff_file_refused", index) for index in range(cap)]
+
+    kept = collect.Snapshot._gaps_within_cap(_carrier(*noise, *refusals))
+
+    # Four refusals claim four slots, so only the 124 earliest other gaps keep one each, and the
+    # published list stays in recording order rather than grouping refusals at the front.
+    assert [gap.subject for gap in kept] == [
+        *[gap.subject for gap in noise[: cap - 4]],
+        *[gap.subject for gap in refusals],
+    ]
+
+
+def test_only_body_refusals_are_shielded_from_the_cap() -> None:
+    """The shield is scoped to bodies, and that boundary is asserted rather than assumed.
+
+    Every other per-file loss keeps first-in-first-out behaviour: widening the predicate to all
+    `file_refused` entries would displace the per-file diff refusals that dominate a large branch
+    review, which is a different trade-off and deliberately not taken here.
+    """
+    cap = collect.MAX_EVIDENCE_GAPS
+    path_losses = [
+        collect.EvidenceGap(
+            "file_refused", f"rewritten{index}.txt", collect.REDACTION_REWRITTEN_PATH_REASON
+        )
+        for index in range(20)
+    ]
+    limits = [_other("file_limit", index) for index in range(20)]
+    refusals = [_body(index) for index in range(3)]
+    # The branch-review shape: per-file diff refusals already fill the list before any blob is read,
+    # so everything recorded after them competes for the last slots.
+    noise = [_other("diff_file_refused", index) for index in range(cap - 3)]
+
+    kept = collect.Snapshot._gaps_within_cap(_carrier(*noise, *path_losses, *limits, *refusals))
+
+    assert all(refusal in kept for refusal in refusals)
+    assert not any(gap in kept for gap in [*path_losses, *limits])
+    assert len(kept) == cap
+    assert [gap.subject for gap in kept[: cap - 3]] == [gap.subject for gap in noise]
