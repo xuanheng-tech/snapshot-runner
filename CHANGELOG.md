@@ -7,8 +7,8 @@ public source baseline; it was not tagged or published to PyPI.
 
 - Fixed: one file whose body cannot be sanitized no longer costs the whole snapshot. A
   `file_context` body that the sanitizer cannot prove safe -- a pasted private key block, a
-  byte-order mark outside the start of the text, a NUL byte, or a credential that survived redaction
-  -- aborted `prepare` outright. Measured on a scratch repository holding two healthy evidence files
+  byte-order mark outside the start of the text, or a credential that survived redaction -- aborted
+  `prepare` outright. Measured on a scratch repository holding two healthy evidence files
   plus one untracked `key.txt` containing an OpenSSH key: 2.3.2 refused with
   `unable to sanitize file context; prepare refused` and published **nothing at all** -- no diff, no
   `status_short`, no other file context. It now records one `file_refused` gap naming that path,
@@ -16,6 +16,22 @@ public source baseline; it was not tagged or published to PyPI.
   publishes everything else; `truncated` becomes `true` as it does for any gap. The refused text
   appears nowhere in the artifact, and the drop is not counted as a redaction, so
   `redactions` stays `{}` rather than inflating.
+- Fixed: three things an independent review found in the change above. A body that was also
+  truncated by the per-file read cap reported one number and lost the other: the refusal returned
+  before the `file_limit` gap was written, so a 360 KiB file whose first 256 KiB held an unusable key
+  said `omitted_bytes: 262144` and stayed silent about the 97 951 bytes the reader never returned.
+  The two are now recorded separately and partition the file exactly, because folding them would
+  overstate one and hide the other. Body refusals could also be evicted by the existing
+  `MAX_EVIDENCE_GAPS` cap -- branch review records its per-file diff refusals *before* it reads any
+  blob, so a run with enough of them buried the fact that bodies had been dropped and published
+  evidence that looked complete while files had quietly vanished -- and `Snapshot._gaps_within_cap`
+  now keeps them first, filling the remaining slots in recording order. And the allow-list and the
+  reason table were two structures free to drift: an allowed message with no reason turns the
+  intended refusal into `RUNNER_UNEXPECTED_ERROR: unexpected KeyError during snapshot collection`,
+  so one mapping is now both, and a test asserts every reason survives the sanitizer that publishes
+  it. The two routes sharing the helper were untested -- a mutant special-casing either one kept all
+  693 tests green -- and are covered now: the versioned extensionless route, and branch review's blob
+  route, where a mode-only change carries no content lines at all and still refuses exactly one file.
 - Preserved: every refusal that is not about one body's text. The fail-soft is an explicit allow-list
   of the six messages reachable from a plain-text file body -- every file context is classified
   `PLAIN_TEXT`, so no unified-diff grammar refusal can reach it -- and anything outside that list
@@ -35,8 +51,8 @@ public source baseline; it was not tagged or published to PyPI.
   have published `residual Bearer [REDACTED_BEARER]` as the explanation a reviewer is supposed to
   read. The stored reason is now asserted as it comes back out of the artifact, not as it was built.
 - No artifact schema, security epoch, contract version or CLI surface change: `file_refused` and the
-  `evidence_gaps` entry shape already existed, and the 620 artifacts published before this change
-  still read. 693 tests pass, 16 of them new in `tests/test_file_context_fail_soft.py`.
+  `evidence_gaps` entry shape already existed, and every artifact already published on this machine still
+  reads (a growing count, deliberately not quoted as a constant). 693 tests pass, 16 of them new in `tests/test_file_context_fail_soft.py`.
 
 - Fixed: a wide changeset of non-ASCII or quoted paths no longer prevents a `diff-audit` snapshot
   from existing. Git is queried with `-c core.quotePath=true`, which writes one non-ASCII path byte

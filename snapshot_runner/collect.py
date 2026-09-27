@@ -112,8 +112,27 @@ class Snapshot:
     redactions: dict[str, int] = field(default_factory=dict)
     branch_review_seal: BranchReviewSeal | None = field(default=None, repr=False)
 
+    def _gaps_within_cap(self) -> list[EvidenceGap]:
+        """The first ``MAX_EVIDENCE_GAPS`` gaps, keeping the body refusals come what may.
+
+        Branch review emits its per-file diff refusals before it reads any blob, so a run with enough
+        refused files would push the fact that bodies were dropped past the cap and publish evidence
+        that looks complete while files had quietly vanished. Refusals of bodies are kept first; the
+        remaining slots fill in recording order, so the published list stays ordered either way.
+        """
+        gaps = self.evidence_gaps
+        if len(gaps) <= MAX_EVIDENCE_GAPS:
+            return list(gaps)
+        refusal_indices = [index for index, gap in enumerate(gaps) if _is_body_refusal(gap)]
+        keep = set(refusal_indices[:MAX_EVIDENCE_GAPS])
+        for index in range(len(gaps)):
+            if len(keep) >= MAX_EVIDENCE_GAPS:
+                break
+            keep.add(index)
+        return [gaps[index] for index in sorted(keep)]
+
     def as_envelope(self) -> dict[str, object]:
-        gaps = [gap.as_dict() for gap in self.evidence_gaps[:MAX_EVIDENCE_GAPS]]
+        gaps = [gap.as_dict() for gap in self._gaps_within_cap()]
         if len(self.evidence_gaps) > MAX_EVIDENCE_GAPS:
             gaps.append(
                 EvidenceGap(
@@ -1075,25 +1094,20 @@ def _redaction_stable_path(builder: SnapshotBuilder, relative: str) -> bool:
     return sanitized.text == relative
 
 
-# The body-content refusals that may be recorded as a gap instead of aborting the run. These are the
-# only messages reachable from a plain-text file body (every file context is classified PLAIN_TEXT,
-# so no unified-diff grammar refusal can appear here), and each one describes the text of one file.
-# Anything outside this set still aborts prepare, because those failures say the artifact's shape is
-# wrong rather than that one body was unsafe.
-BODY_SANITIZER_REFUSALS = frozenset(
-    {
-        "NUL byte in text",
-        "PEM credential boundary cannot be proven",
-        "UTF-8 BOM is allowed only once at the beginning",
-        "text contains a residual authorization credential",
-        "text contains a residual bearer credential",
-        "text contains a residual credential pattern",
-    }
-)
-# The refusal is reported in a controlled vocabulary rather than as the exception's own sentence.
-# A gap reason is sanitized like any other evidence text, and the raw message "text contains a
-# residual bearer credential" is itself matched by the bearer pattern -- so quoting the exception
-# would have published "residual Bearer [REDACTED_BEARER]" and made the reason unreadable.
+# The body-content refusals that may be recorded as a gap instead of aborting the run. Every file
+# context is classified PLAIN_TEXT, so no unified-diff grammar refusal can appear here. Anything
+# outside this set still aborts prepare, because those failures say the artifact's shape is wrong
+# rather than that one body was unsafe.
+#
+# This mapping is both the allow-list and the reason text, so the two cannot drift: an entry with no
+# reason would turn a deliberate refusal into an unexpected KeyError mid-collection. The reasons are
+# a controlled vocabulary rather than the exception's own sentence because a gap reason is sanitized
+# like any other evidence text -- the raw message "text contains a residual bearer credential" is
+# itself matched by the bearer pattern, so quoting the exception would have published
+# "residual Bearer [REDACTED_BEARER]" as the explanation a reviewer is supposed to read.
+#
+# "NUL byte in text" is defence in depth rather than a live path: every content source rejects a NUL
+# before the sanitizer sees it, so it reaches here only if a future reader stops doing that.
 BODY_REFUSAL_REASONS = {
     "NUL byte in text": "NUL byte inside the text",
     "PEM credential boundary cannot be proven": "private key boundary could not be proven",
@@ -1102,10 +1116,23 @@ BODY_REFUSAL_REASONS = {
     "text contains a residual bearer credential": "a credential survived redaction",
     "text contains a residual credential pattern": "a credential survived redaction",
 }
+BODY_SANITIZER_REFUSALS = frozenset(BODY_REFUSAL_REASONS)
 # The body of a refused file is dropped entirely: no prefix, no excerpt, no placeholder carrying any
-# of its text. `omitted_bytes` says how much evidence that cost, in the same unit the collector's
-# other refusals use.
+# of its text. `omitted_bytes` counts the bytes that were read and then dropped; bytes the reader
+# never returned are a separate `file_limit` gap, so the two never double-count.
 BODY_REFUSED_REASON_PREFIX = "file body could not be safely redacted"
+
+
+def _truncation_reason(relative: str) -> str:
+    return (
+        "file context truncated at 4 MiB"
+        if _file_context_limit(relative) == UV_LOCK_MAX_FILE_BYTES
+        else "file context truncated at 256 KiB"
+    )
+
+
+def _is_body_refusal(gap: EvidenceGap) -> bool:
+    return gap.kind == "file_refused" and gap.reason.startswith(BODY_REFUSED_REASON_PREFIX)
 
 
 def _append_context(
@@ -1159,6 +1186,11 @@ def _append_context(
         # swallow -- every other refusal, including the path-classification refusals and every
         # unified-diff grammar refusal, still aborts the prepare exactly as it did before, because
         # those say the artifact's shape is wrong, not that one file's text was unsafe.
+        # The refusal costs two separate counts and both are recorded: the bytes that were read and
+        # then dropped, and any bytes the reader never returned because of the per-file cap. Folding
+        # them into one number would understate the loss and hide the truncation event.
+        if omitted:
+            builder.gap("file_limit", relative, _truncation_reason(relative), omitted)
         builder.gap(
             "file_refused",
             relative,
@@ -1188,12 +1220,7 @@ def _append_context(
         builder._bind_mode(("file_context", context_index, "source"), ScanMode.PLAIN_TEXT)
     builder.content_bytes += encoded_length + path_overhead
     if omitted:
-        reason = (
-            "file context truncated at 4 MiB"
-            if _file_context_limit(relative) == UV_LOCK_MAX_FILE_BYTES
-            else "file context truncated at 256 KiB"
-        )
-        builder.gap("file_limit", relative, reason, omitted)
+        builder.gap("file_limit", relative, _truncation_reason(relative), omitted)
     if budget_omitted:
         builder.gap(
             "snapshot_limit",

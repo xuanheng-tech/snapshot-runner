@@ -74,7 +74,9 @@ def repository(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     return repo
 
 
-def _prepare(repo: Path) -> artifact.SnapshotArtifact:
+def _prepare(
+    repo: Path, task: str = "diff-audit", argument: str | None = None
+) -> artifact.SnapshotArtifact:
     target_path, target_name, runner_path = runner._validate_target_repository_path(os.fspath(repo))
     target = git._validate_target_repository_context(
         target_path,
@@ -82,9 +84,9 @@ def _prepare(repo: Path) -> artifact.SnapshotArtifact:
         runner_path,
         artifact._state_home(target_path),
         GIT,
-        "diff-audit",
+        task,
     )
-    return runner._prepare_snapshot("diff-audit", None, target, GIT)
+    return runner._prepare_snapshot(task, argument, target, GIT)
 
 
 def _envelope(artifact_value: artifact.SnapshotArtifact) -> dict[str, object]:
@@ -297,3 +299,123 @@ def test_a_fail_soft_artifact_round_trips_and_tampering_is_still_refused(
     original.chmod(0o600)
     with pytest.raises(runner.RunnerError):
         artifact._load_snapshot(published.snapshot_id, repo)
+
+
+def test_the_source_tagged_extensionless_route_fails_soft_too(repository: Path) -> None:
+    """A body reached through the versioned (source-carrying) entries is treated the same way.
+
+    That branch of `_append_context` is a separate call path with its own metadata checks, so
+    sharing the helper does not by itself prove it behaves alike.
+    """
+    repo = repository
+    (repo / "justfile").write_text(f"check:\n\t@echo hi\nkey:\n\t{PRIVATE_KEY}", encoding="utf-8")
+
+    envelope = _envelope(_prepare(repo))
+
+    assert _refused(envelope)["justfile"]["reason"].endswith(
+        "private key boundary could not be proven"
+    )
+    assert KEY_MATERIAL not in json.dumps(envelope)
+
+
+def test_the_branch_review_blob_route_fails_soft_the_same_way(repository: Path) -> None:
+    """Branch review reads a blob for context even when the change carries no content lines.
+
+    A mode-only change yields a diff holding nothing but `old mode` / `new mode`, so the refusal
+    cannot be attributed to the diff route: the run must still publish and name the dropped file.
+    """
+    repo = repository
+    (repo / "key.txt").write_text(PRIVATE_KEY, encoding="utf-8")
+    _commit(repo, "key on main")
+    _git(repo, "checkout", "--quiet", "-b", "feature")
+    os.chmod(repo / "key.txt", 0o755)
+    _commit(repo, "mode only")
+
+    envelope = _envelope(_prepare(repo, "branch-review", "main"))
+
+    assert envelope["truncated"] is True
+    assert "old mode" in envelope["data"]["diff"], "this must really exercise the blob route"
+    assert _refused(envelope)["key.txt"]["reason"].endswith(
+        "private key boundary could not be proven"
+    )
+    assert KEY_MATERIAL not in json.dumps(envelope)
+
+
+def test_a_refused_file_above_the_read_cap_reports_both_losses_separately(
+    repository: Path,
+) -> None:
+    """The bytes never read and the bytes read-then-dropped are two facts, not one number.
+
+    Folding them together would overstate one and hide the other: the per-file cap is a truncation
+    event a reviewer has to see, while the refusal concerns the part actually in hand.
+    """
+    repo = repository
+    body = PRIVATE_KEY + "filler line\n" * 30_000
+    (repo / "big.txt").write_text(body, encoding="utf-8")
+
+    envelope = _envelope(_prepare(repo))
+
+    gaps = {str(gap["kind"]): gap for gap in envelope["evidence_gaps"]}
+    assert gaps["file_refused"]["subject"] == "big.txt"
+    assert gaps["file_refused"]["omitted_bytes"] == 256 * 1024
+    assert gaps["file_limit"]["subject"] == "big.txt"
+    assert gaps["file_limit"]["omitted_bytes"] == len(body.encode("utf-8")) - 256 * 1024
+    assert int(gaps["file_refused"]["omitted_bytes"]) + int(
+        gaps["file_limit"]["omitted_bytes"]
+    ) == len(body.encode("utf-8")), (
+        "the two counts must partition the file without double-counting it"
+    )
+
+
+class _GapCarrier:
+    """Just enough of a builder to exercise the pure gap-selection policy."""
+
+    evidence_gaps: list[collect.EvidenceGap]
+
+
+def test_the_gap_cap_never_evicts_a_body_refusal_first() -> None:
+    """A mass of other refusals must not bury the fact that bodies were dropped.
+
+    Branch review records its per-file diff refusals before it reads any blob, so insertion order
+    alone would let a long run push the body refusals past the hard cap and publish evidence that
+    looks complete while files had quietly vanished.
+    """
+    refusals = [
+        collect.EvidenceGap(
+            "file_refused",
+            f"key{index}.txt",
+            f"{collect.BODY_REFUSED_REASON_PREFIX}: private key boundary could not be proven",
+        )
+        for index in range(10)
+    ]
+    noise = [
+        collect.EvidenceGap("diff_file_refused", f"old{index}.bin", "unsupported")
+        for index in range(collect.MAX_EVIDENCE_GAPS)
+    ]
+    carrier = _GapCarrier()
+    carrier.evidence_gaps = [*noise, *refusals]
+
+    kept = collect.Snapshot._gaps_within_cap(carrier)
+
+    assert len(kept) == collect.MAX_EVIDENCE_GAPS
+    assert all(refusal in kept for refusal in refusals)
+    assert kept[-1].subject == "key9.txt", "kept gaps stay in recording order"
+
+
+def test_the_allow_list_and_the_reason_table_cannot_drift() -> None:
+    """One mapping is both the allow-list and the reason text, and the reason must survive output.
+
+    Two parallel tables would let a message be allowed with no reason, turning a deliberate refusal
+    into an unexpected KeyError mid-collection. And a reason the sanitizer itself rewrites would
+    publish an unreadable explanation -- exactly why the vocabulary is controlled rather than quoted
+    from the exception.
+    """
+    assert frozenset(collect.BODY_REFUSAL_REASONS) == collect.BODY_SANITIZER_REFUSALS
+    assert all(collect.BODY_REFUSAL_REASONS.values())
+    for message in sorted(collect.BODY_SANITIZER_REFUSALS):
+        reason = f"{collect.BODY_REFUSED_REASON_PREFIX}: {collect.BODY_REFUSAL_REASONS[message]}"
+        stable = security.sanitize_text(
+            reason, scan_mode=security.ScanMode.PLAIN_TEXT, repository_root=Path("/tmp")
+        )
+        assert stable.text == reason
+        assert stable.redactions == {}
