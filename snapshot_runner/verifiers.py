@@ -97,10 +97,26 @@ _VERIFIER_EPOCH_4 = ArtifactVerifier(
     is_current=True,
 )
 
-_VERIFIERS: dict[tuple[int, int], ArtifactVerifier] = {
-    (verifier.meta_schema_version, verifier.producer_security_epoch): verifier
-    for verifier in (_VERIFIER_EPOCH_4,)
-}
+
+def _registry(
+    rows: tuple[ArtifactVerifier, ...],
+) -> dict[tuple[int, int], ArtifactVerifier]:
+    """Index the era rows, refusing a build where two rows claim one version pair.
+
+    A dict comprehension would silently keep the last row and drop the other, orphaning every
+    artifact written under the one that vanished while leaving the registry tests green.
+    """
+    table: dict[tuple[int, int], ArtifactVerifier] = {}
+    for row in rows:
+        if row.version_key in table:
+            raise RuntimeError(
+                f"two artifact eras claim version pair {row.version_key} in this build"
+            )
+        table[row.version_key] = row
+    return table
+
+
+_VERIFIERS = _registry((_VERIFIER_EPOCH_4,))
 
 CURRENT_VERIFIER = _VERIFIER_EPOCH_4
 

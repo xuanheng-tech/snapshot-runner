@@ -167,14 +167,16 @@ ID is the SHA-256 of the canonical `snapshot.json` bytes. Writes use private sta
 hash/size revalidation, and atomic publication.
 
 A read resolves the era a snapshot was written under — its threat-model text, its scan
-classifier version, and the sanitizer rules that redacted and path-normalized its body — from
-the versions recorded in its own `meta.json`, so raising a producer-side constant or tightening a
-redaction pattern in a later release keeps the artifacts of a registered era readable. Targeted
-evidence questions about a stored artifact are answered under that same era. An artifact
-declaring an era this build has not registered is refused before its bytes are hashed or
-sanitized, and no stored artifact is ever rewritten or migrated. Identity checks are not
-era-relative: hash, canonical serialization, file set and modes are validated the same way for
-every artifact.
+classifier version, and the sanitizer *rule data* that redacted and path-normalized its body —
+from the versions recorded in its own `meta.json`, so raising a producer-side constant or
+tightening a redaction pattern in a later release keeps the artifacts of a registered era
+readable. The sanitizer's code is shared across eras: changing its classification logic, the
+literal names embedded in it, or the shape of its redaction markers affects stored bodies too,
+and is a schema decision rather than a rule edit. Targeted evidence questions about a stored
+artifact are answered under the same era. An artifact declaring an era this build has not
+registered is refused before its bytes are hashed or sanitized, and no stored artifact is ever
+rewritten or migrated. Identity checks are not era-relative: hash, canonical serialization, file
+set and modes are validated the same way for every artifact.
 
 With the same Runner version, command/options, collected repository state and contents,
 and path-sanitization context, canonical evidence and snapshot IDs are deterministic.

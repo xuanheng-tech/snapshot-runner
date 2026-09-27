@@ -266,10 +266,13 @@ def test_identity_guards_are_not_part_of_the_era_dispatch(
     elif mutation == "byte appended":
         (directory / "snapshot.json").write_bytes(fixtures["snapshot.json"] + b"\n")
     elif mutation == "epoch":
+        # Derived, not hardcoded: the next release registers a new epoch, and this identity guard has
+        # to keep refusing something no era claims.
+        unregistered = str(max(key[1] for key in verifiers._VERIFIERS) + 1).encode()
+        declared = b'"producer_security_epoch": 4'
+        assert declared in fixtures["meta.json"]
         (directory / "meta.json").write_bytes(
-            fixtures["meta.json"].replace(
-                b'"producer_security_epoch": 4', b'"producer_security_epoch": 5'
-            )
+            fixtures["meta.json"].replace(declared, b'"producer_security_epoch": ' + unregistered)
         )
 
     exit_code, out, err = _read(repo, SNAPSHOT_ID, capsys)

@@ -23,6 +23,11 @@ from snapshot_runner import security as security_module
 from snapshot_runner import verifiers
 
 SNAPSHOT_ID = "1da3b7c99b425b2a087554fc9ccb0b372fc0aaae40eda09b00c352f780642869"
+
+# The key the registry is indexed by, plus one epoch no era has ever used and none should claim.
+REGISTRY_KEYS = sorted(verifiers._VERIFIERS)
+CURRENT_KEY = verifiers.CURRENT_VERIFIER.version_key
+UNREGISTERED_EPOCH = max(key[1] for key in REGISTRY_KEYS) + 1
 _MINIMAL_ENVELOPE = {
     "schema_version": 2,
     "producer_security_epoch": 4,
@@ -78,6 +83,10 @@ def _meta(**overrides: object) -> dict[str, object]:
     return meta
 
 
+# A version pair from the pre-2.0 product line, unreadable by design.
+PAST_EPOCH = min(key[1] for key in REGISTRY_KEYS) - 1
+
+
 def test_the_current_row_is_exactly_what_this_release_writes() -> None:
     """Raising a producer constant must register a new era instead of orphaning the old one.
 
@@ -114,11 +123,12 @@ def test_the_current_rules_are_exactly_the_sanitizer_s_live_constants() -> None:
     written under superseded rules.
     """
     current = verifiers.CURRENT_VERIFIER.rules
+    live = security_module.CURRENT_RULES
 
-    assert current is security_module.CURRENT_RULES or current.descriptor() == (
-        security_module.CURRENT_RULES.descriptor()
+    assert current is not live, (
+        "the era row must hold its own rule values, not alias this release's"
     )
-    assert security_module.SCAN_RULES_V2.descriptor() == current.descriptor(), (
+    assert current.descriptor() == live.descriptor(), (
         "the live sanitizer rules moved but no era was registered for them"
     )
 
@@ -157,12 +167,12 @@ def test_a_frozen_era_does_not_read_the_live_constants(
 
 
 def test_verifier_for_resolves_the_registered_era() -> None:
-    assert verifiers.verifier_for(2, 4) is verifiers.CURRENT_VERIFIER
+    assert verifiers.verifier_for(*CURRENT_KEY) is verifiers.CURRENT_VERIFIER
 
 
 @pytest.mark.parametrize(
     ("meta_schema_version", "producer_security_epoch"),
-    [(2, 3), (2, 5), (1, 4), (3, 4), (0, 4), (None, 4), ("2", 4), (2, [4])],
+    [(2, 3), (2, UNREGISTERED_EPOCH), (1, 4), (3, 4), (0, 4), (None, 4), ("2", 4), (2, [4])],
 )
 def test_an_unregistered_or_malformed_version_is_refused(
     meta_schema_version: object, producer_security_epoch: object
@@ -398,23 +408,54 @@ RULE_CONSTANT_NAMES = frozenset(
     }
 )
 
+# The one function allowed to name the live rules object: it is what decides the default.
+ERA_RULES_EXEMPT_FUNCTIONS = frozenset({"active_rules"})
+
+
+def test_two_eras_cannot_claim_one_version_pair() -> None:
+    """A dict comprehension would keep the last row and drop the other without a sound.
+
+    The dropped era would orphan every artifact written under it while the registry checks above all
+    still passed, so the index itself refuses a collision.
+    """
+    duplicate = replace(
+        verifiers.CURRENT_VERIFIER, schema_version=verifiers.CURRENT_VERIFIER.schema_version + 1
+    )
+    with pytest.raises(RuntimeError, match="claim version pair"):
+        verifiers._registry((verifiers.CURRENT_VERIFIER, duplicate))
+
 
 def test_no_sanitizer_rule_is_read_bypassing_the_era_policy() -> None:
     """A rule reached without ``active_rules()`` is a rule a later release applies to history.
 
-    Behavioural checks can only cover the fields a test happens to perturb; this covers all of them
-    and every field added later, by reading the module. The constants above are the definition of the
-    rule sets and may be named there, but no function body may consult one directly.
+    Behavioural checks can only cover the fields a test happens to perturb, and a site can be
+    reverted in two ways: back to a bare constant, or to ``CURRENT_RULES.<field>`` with no value
+    changed at all. The second revert is invisible to every behavioural test in this file and is the
+    one a real release would introduce by mistake, so both are rejected structurally, in every module
+    that sanitizes. Only :func:`security.active_rules` may name the live rules object, because
+    deciding what "live" means is its whole job.
     """
-    path = Path(inspect.getsourcefile(security_module) or "")
-    tree = ast.parse(path.read_text(encoding="utf-8"))
     offenders: list[str] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-            continue
-        for inner in ast.walk(node):
-            if isinstance(inner, ast.Name) and inner.id in RULE_CONSTANT_NAMES:
-                offenders.append(f"{node.name}:{inner.lineno} {inner.id}")
+    for module in (security_module, artifact_module):
+        source = Path(inspect.getsourcefile(module) or "").read_text(encoding="utf-8")
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            if node.name in ERA_RULES_EXEMPT_FUNCTIONS:
+                continue
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Name) and inner.id in RULE_CONSTANT_NAMES | {
+                    "CURRENT_RULES"
+                }:
+                    offenders.append(f"{module.__name__}.{node.name}:{inner.lineno} {inner.id}")
+                elif (
+                    isinstance(inner, ast.Attribute)
+                    and isinstance(inner.value, ast.Name)
+                    and inner.value.id == "CURRENT_RULES"
+                ):
+                    offenders.append(
+                        f"{module.__name__}.{node.name}:{inner.lineno} CURRENT_RULES.{inner.attr}"
+                    )
     assert offenders == []
 
 

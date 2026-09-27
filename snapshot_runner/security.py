@@ -167,10 +167,13 @@ class SanitizerRules:
     the releases that published schema 2 / epoch 4 / classifier 2, so the two separate the moment a
     rule is edited. :func:`era_rules` installs the resolved era for the duration of one read.
 
-    Not every field is consulted by a read today: the raster fields and
-    ``max_extensionless_text_bytes`` belong to collecting and to live-worktree validation, and a
-    read passes ``verify_live_diff_text=False``. They are pinned regardless, because the property
-    that matters is that nothing a read consults comes from a later release.
+    A read consults all of these except ``max_extensionless_text_bytes``, which is gated off by
+    ``verify_live_diff_text=False``; it is pinned anyway so a release that tightens it cannot move a
+    historical body either. What pinning this data does NOT do is freeze the sanitizer's *code*: the
+    classification logic, the inline literals inside it (the ``.env.`` prefix, ``.gitattributes``,
+    the quoted-path escape table) and the shape of its output markers (how many digest characters an
+    ``<ABS_PATH:...>`` replacement carries) are shared by every era. A change to those applies to
+    history whether an era is registered or not, and it has to be judged on its own terms.
 
     Tightening a rule is a two-step change: edit the constants above, then add a ``SCAN_RULES_V3``
     and the era row that writes it. ``SCAN_RULES_V2`` has to stay exactly as it is, since that

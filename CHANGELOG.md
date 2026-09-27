@@ -125,15 +125,35 @@ public source baseline; it was not tagged or published to PyPI.
   pattern existed stays readable with that text intact. That is the same decision as keeping history
   readable, made on the read side only -- writes always use `CURRENT_VERIFIER`, nothing new is
   published under superseded rules, and `preview.txt` still requires human review before any upload.
-- Boundary that remains: the registry pins declarations and sanitizer rules, not the structural
-  tables. The per-task required fields, the evidence-gap key sets, `REDACTION_CATEGORIES`, the size
-  budgets and the two acceptance shapes a read also applies -- `REPOSITORY_NAME_RE`, which bounds the
-  recorded repository name, and `SNAPSHOT_GIT_OID_RE`, which accepts the 40-hex object ids stored in
-  `base_commit`, `target_head`, `merge_base_commit`, `head` and deleted-file blobs -- are still read
-  from this release, so a future *tightening* of any of them can still refuse an old artifact. Some
-  rule values are inline literals in the sanitizer (the `.env.` prefix, `.gitattributes`, the
-  basename substitution and its 64-character bound) and cannot be pinned without becoming data.
-  Splitting any of this needs a schema decision, not just a rule freeze.
+- Boundary that remains: the registry pins declarations and sanitizer *rule data*, not the
+  sanitizer's code and not the structural tables. The per-task required fields, the evidence-gap key
+  sets, `REDACTION_CATEGORIES`, the size budgets and the two shapes a read also matches a name against
+  -- `REPOSITORY_NAME_RE`, which bounds the recorded repository name, and `SNAPSHOT_GIT_OID_RE`, which
+  accepts the 40-hex object ids stored in `base_commit`, `target_head`, `merge_base_commit`, `head`
+  and deleted-file blobs -- are still read from this release, so a future tightening of any of them
+  can still refuse an old artifact. Some rule values are inline literals inside the sanitizer (a
+  `.env.` prefix, a `.gitattributes` name, the basename substitution and its 64-character bound, the
+  quoted-path escape table) and cannot be pinned without becoming data, and the *shape* of what the
+  sanitizer emits -- how many digest characters an `<ABS_PATH:...>` marker carries, for instance -- is
+  code every era shares. Measured both ways: widening that digest from 12 to 20 characters leaves the
+  suite green and the store readable, because an already-redacted body never re-derives a marker,
+  while removing the `.gitattributes` literal refuses an artifact published moments earlier. Treating
+  either as era data would be a schema decision, not a rule edit.
+- Fixed: two gaps an independent review of this seam found, both about what the tests could see. The
+  structural guard rejected a read site reaching a rule through a bare constant but not one reaching
+  it through the live rules *object*, so four sites -- `max_extensionless_text_bytes`,
+  `max_diff_path_candidates` and both raster rules -- could be reverted to this release's values with
+  a fully green suite; the guard now forbids naming the live rules object inside any function of the
+  modules that sanitize, except the one function whose job is to say what "live" means, and it checks
+  `artifact.py` as well as `security.py`. Building the registry was a dict comprehension, so two eras
+  claiming one `(meta schema, epoch)` pair silently dropped the earlier row and orphaned every
+  artifact written under it while the registry checks still passed; the index now refuses a collision.
+  Three assertions were shaped to a single-era world: one let an era row pass by aliasing the live
+  rules -- the exact defect the freeze commit removed -- and two hardcoded epoch `5` as
+  "unregistered", which is the value the next release legitimately claims, disarming an identity guard
+  at the moment it would matter; all three now derive from the registry. Corrected two claims the
+  review disproved: the raster rules *are* consulted on any read carrying image evidence (two
+  artifacts in this store do), and the era pins rule data rather than sanitizer code.
 
 ## 2.3.2 - 2026-09-25
 
