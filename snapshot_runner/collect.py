@@ -1075,6 +1075,39 @@ def _redaction_stable_path(builder: SnapshotBuilder, relative: str) -> bool:
     return sanitized.text == relative
 
 
+# The body-content refusals that may be recorded as a gap instead of aborting the run. These are the
+# only messages reachable from a plain-text file body (every file context is classified PLAIN_TEXT,
+# so no unified-diff grammar refusal can appear here), and each one describes the text of one file.
+# Anything outside this set still aborts prepare, because those failures say the artifact's shape is
+# wrong rather than that one body was unsafe.
+BODY_SANITIZER_REFUSALS = frozenset(
+    {
+        "NUL byte in text",
+        "PEM credential boundary cannot be proven",
+        "UTF-8 BOM is allowed only once at the beginning",
+        "text contains a residual authorization credential",
+        "text contains a residual bearer credential",
+        "text contains a residual credential pattern",
+    }
+)
+# The refusal is reported in a controlled vocabulary rather than as the exception's own sentence.
+# A gap reason is sanitized like any other evidence text, and the raw message "text contains a
+# residual bearer credential" is itself matched by the bearer pattern -- so quoting the exception
+# would have published "residual Bearer [REDACTED_BEARER]" and made the reason unreadable.
+BODY_REFUSAL_REASONS = {
+    "NUL byte in text": "NUL byte inside the text",
+    "PEM credential boundary cannot be proven": "private key boundary could not be proven",
+    "UTF-8 BOM is allowed only once at the beginning": "byte-order mark outside the start of the text",
+    "text contains a residual authorization credential": "a credential survived redaction",
+    "text contains a residual bearer credential": "a credential survived redaction",
+    "text contains a residual credential pattern": "a credential survived redaction",
+}
+# The body of a refused file is dropped entirely: no prefix, no excerpt, no placeholder carrying any
+# of its text. `omitted_bytes` says how much evidence that cost, in the same unit the collector's
+# other refusals use.
+BODY_REFUSED_REASON_PREFIX = "file body could not be safely redacted"
+
+
 def _append_context(
     builder: SnapshotBuilder,
     contexts: list[dict[str, object]],
@@ -1116,9 +1149,23 @@ def _append_context(
             repository_root=builder.repo_root,
         )
     except SecurityError as exc:
-        raise _snapshot_security_error(
-            exc, "unable to sanitize file context; prepare refused"
-        ) from exc
+        reason = str(exc)
+        if reason not in BODY_SANITIZER_REFUSALS:
+            raise _snapshot_security_error(
+                exc, "unable to sanitize file context; prepare refused"
+            ) from exc
+        # One unreadable body must not cost the whole snapshot: this file is recorded as a gap and
+        # the run continues. The allow-list above is what keeps that a decision rather than a
+        # swallow -- every other refusal, including the path-classification refusals and every
+        # unified-diff grammar refusal, still aborts the prepare exactly as it did before, because
+        # those say the artifact's shape is wrong, not that one file's text was unsafe.
+        builder.gap(
+            "file_refused",
+            relative,
+            f"{BODY_REFUSED_REASON_PREFIX}: {BODY_REFUSAL_REASONS[reason]}",
+            len(content.encode("utf-8")),
+        )
+        return
     for category, count in sanitized.redactions.items():
         builder.redactions[category] = builder.redactions.get(category, 0) + count
     path_overhead = len(_json_bytes(relative)) + 32

@@ -5,6 +5,39 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+- Fixed: one file whose body cannot be sanitized no longer costs the whole snapshot. A
+  `file_context` body that the sanitizer cannot prove safe -- a pasted private key block, a
+  byte-order mark outside the start of the text, a NUL byte, or a credential that survived redaction
+  -- aborted `prepare` outright. Measured on a scratch repository holding two healthy evidence files
+  plus one untracked `key.txt` containing an OpenSSH key: 2.3.2 refused with
+  `unable to sanitize file context; prepare refused` and published **nothing at all** -- no diff, no
+  `status_short`, no other file context. It now records one `file_refused` gap naming that path,
+  drops that body completely with no prefix or excerpt, reports its size in `omitted_bytes`, and
+  publishes everything else; `truncated` becomes `true` as it does for any gap. The refused text
+  appears nowhere in the artifact, and the drop is not counted as a redaction, so
+  `redactions` stays `{}` rather than inflating.
+- Preserved: every refusal that is not about one body's text. The fail-soft is an explicit allow-list
+  of the six messages reachable from a plain-text file body -- every file context is classified
+  `PLAIN_TEXT`, so no unified-diff grammar refusal can reach it -- and anything outside that list
+  still aborts the run, because such a failure says the artifact's shape is wrong, not that one file
+  was unsafe. Measured consequences of that boundary: the unified-diff, `status_short` and other
+  top-level fields still go through `add_text` unchanged, so a repository whose *diff* carries the
+  same private key block still publishes nothing (`unable to sanitize unstaged-diff`, store
+  unchanged); generated-tree member scanning still refuses; `yaml_content_refused` still refuses the
+  run; and a sensitive path such as `secret.pem` keeps its existing `sensitive or unsupported file
+  type refused` gap. `read --path` needed no change and behaves exactly as it does for every other
+  `file_refused` gap: the path is `found`, its `file_context` is empty, and the gap carries the
+  reason.
+- Changed: a gap reason is written in a controlled vocabulary instead of quoting the sanitizer's own
+  sentence. This was forced by measurement rather than taste -- the message `text contains a residual
+  bearer credential` is itself matched by the bearer pattern, so the case-insensitive
+  `\bBearer\s+[A-Za-z0-9._~+/=-]{8,}` redacted the reason on its way into the artifact and would
+  have published `residual Bearer [REDACTED_BEARER]` as the explanation a reviewer is supposed to
+  read. The stored reason is now asserted as it comes back out of the artifact, not as it was built.
+- No artifact schema, security epoch, contract version or CLI surface change: `file_refused` and the
+  `evidence_gaps` entry shape already existed, and the 620 artifacts published before this change
+  still read. 693 tests pass, 16 of them new in `tests/test_file_context_fail_soft.py`.
+
 - Fixed: a wide changeset of non-ASCII or quoted paths no longer prevents a `diff-audit` snapshot
   from existing. Git is queried with `-c core.quotePath=true`, which writes one non-ASCII path byte
   as four (`\346`), and `collect_diff_audit` asked for each workspace direction in a single
