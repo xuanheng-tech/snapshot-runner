@@ -31,7 +31,7 @@ public source baseline; it was not tagged or published to PyPI.
   intended refusal into `RUNNER_UNEXPECTED_ERROR: unexpected KeyError during snapshot collection`,
   so one mapping is now both, and a test asserts every reason survives the sanitizer that publishes
   it. The two routes sharing the helper were untested -- a mutant special-casing either one kept all
-  693 tests green -- and are covered now: the versioned extensionless route, and branch review's blob
+  the whole suite green -- and are covered now: the versioned extensionless route, and branch review's blob
   route, where a mode-only change carries no content lines at all and still refuses exactly one file.
 - Preserved: every refusal that is not about one body's text. The fail-soft is an explicit allow-list
   of the six messages reachable from a plain-text file body -- every file context is classified
@@ -53,7 +53,8 @@ public source baseline; it was not tagged or published to PyPI.
   read. The stored reason is now asserted as it comes back out of the artifact, not as it was built.
 - No artifact schema, security epoch, contract version or CLI surface change: `file_refused` and the
   `evidence_gaps` entry shape already existed, and every artifact already published on this machine still
-  reads (a growing count, deliberately not quoted as a constant). 693 tests pass, 16 of them new in `tests/test_file_context_fail_soft.py`.
+  reads (a growing count, deliberately not quoted as a constant). The suite stands at 700 passing, 23 of
+  them in `tests/test_file_context_fail_soft.py`.
 
 - Fixed: a wide changeset of non-ASCII or quoted paths no longer prevents a `diff-audit` snapshot
   from existing. Git is queried with `-c core.quotePath=true`, which writes one non-ASCII path byte
