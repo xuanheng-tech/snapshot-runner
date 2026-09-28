@@ -521,7 +521,7 @@ def _has_unclosed_secret_boundary(text: str) -> bool:
 # An unbounded character run in front of an end anchor costs a backtracking pass per marker candidate
 # in the text: measured on a 750 201-character prefix holding 150 000 ``=AKIA`` candidates the combined
 # pattern took 170 s to answer ``None``, and 27 s at 300 201 characters, while the sanitizer that reads
-# the same bytes takes 0.02 s. Stripping the run and then scanning it once, with no quantifier left to
+# the same bytes takes 0.03 s. Stripping the run and then scanning it once, with no quantifier left to
 # backtrack, keeps the answer identical and the cost linear.
 _CREDENTIAL_RUN_CHARACTERS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~+/=-"
 # The marker alone, no value: the run is found by stripping characters off the end instead, so nothing

@@ -231,8 +231,10 @@ public source baseline; it was not tagged or published to PyPI.
   inventing a second vocabulary for a lost body, which is how the byte-exact readers beside it already
   behave (`_read_complete_regular`, image evidence, publication evidence). Artifact bytes for ordinary
   reads are unaffected: the same scratch repository yields the same snapshot id across this change, and a
-  short read of any kind now costs that file rather than silently shipping half of it. Three tests cover
-  the loop, the gate across a multi-piece cut, and the refusal.
+  short read of any kind now costs that file rather than silently shipping half of it, and the refusal
+  counts the bytes the reader actually had rather than the ones its stat promised -- a file whose
+  size reads 0 while its reads still yield data is refused with 4 096 recorded, not with nothing.
+  Four tests cover the loop, the gate across a multi-piece cut, the refusal, and that count.
 - Added: `security.truncated_secret_boundary()`, asked by the readers of the prefix they are about to
   hand on. A retained body that opens a private key and does not close it, or whose last characters are
   an unbroken credential run reaching the cut at a word boundary, is now withheld **whole** and
@@ -307,7 +309,7 @@ public source baseline; it was not tagged or published to PyPI.
   loaded under both the previous and this code with unchanged bytes and a matching snapshot id, the store
   fingerprint (mode, device, inode, size, mtime, ctime, link count for every file) is unchanged across
   both passes, and tampering is still refused.
-  `tests/test_truncated_secret_boundary.py` adds 47 tests and the suite stands at 747 passing.
+  `tests/test_truncated_secret_boundary.py` adds 48 tests and the suite stands at 748 passing.
 
 ## 2.3.2 - 2026-09-25
 

@@ -645,3 +645,40 @@ def test_a_read_that_stops_short_of_the_stated_size_is_refused(
     assert gap["omitted_bytes"] == len(body.encode("utf-8")), (
         "a body this reader cannot vouch for is lost whole, and the gap says so"
     )
+
+
+class _ProcShapedRead:
+    """An ``os`` proxy for a file whose stat promises nothing while its reads still hand back data."""
+
+    def __init__(self) -> None:
+        self.served = False
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(os, name)
+
+    def read(self, descriptor: int, size: int) -> bytes:
+        data = os.read(descriptor, size)
+        if not data and not self.served:
+            self.served = True
+            return b"x" * min(size, 4096)
+        return data
+
+
+def test_a_file_that_yields_data_beyond_its_stated_size_reports_what_it_had(
+    repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A zero-length stat over a file that produces bytes must not be refused silently.
+
+    The reader cannot vouch for either the size or the content here, so it refuses; the gap has to
+    still say how many bytes went away, which is what was read and not what the stat claimed.
+    """
+    repo = repository
+    (repo / "procish.txt").write_text("", encoding="utf-8")
+    monkeypatch.setattr(collect, "os", _ProcShapedRead())
+
+    envelope = _envelope(_prepare(repo))
+
+    gap = _gaps(envelope, "file_refused").get("procish.txt")
+    assert gap is not None, "a body that disagrees with its own stat is not publishable"
+    assert gap["reason"] == "file changed while reading"
+    assert gap["omitted_bytes"] == 4096

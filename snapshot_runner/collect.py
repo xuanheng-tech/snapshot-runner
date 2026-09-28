@@ -652,7 +652,10 @@ def _read_regular_file(
         os.close(descriptor)
     raw = b"".join(chunks)
     if len(raw) != min(opened.st_size, maximum + 1):
-        return None, opened.st_size, "file changed while reading"
+        # Report what this reader actually had in hand: a file whose stat promises 0 bytes while it
+        # yields data (`/proc`-shaped) would otherwise be refused with no omitted_bytes at all, dropping
+        # a hundred kilobytes of evidence without saying so.
+        return None, max(opened.st_size, len(raw)), "file changed while reading"
     if b"\0" in raw:
         return None, opened.st_size, "binary file refused"
     truncated = max(0, opened.st_size - maximum)
