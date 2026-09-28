@@ -344,6 +344,8 @@ def test_the_sealed_target_blob_route_withholds_a_straddling_blob(repository: Pa
         ("Authorization: Bearer abc", security.CREDENTIAL_CUTOFF),
         ("Authorization: Bearer abc def\n", None),
         ("tasks-skylark\n", None),
+        ("prefixghp_" + "A" * 17, None),
+        ("xAIzaAbcdefghijkl", None),
         ("the file ends normally\n", None),
     ],
 )
@@ -381,6 +383,47 @@ class _GapCarrier:
     """Just enough of a builder to exercise the pure gap-selection policy."""
 
     evidence_gaps: list[collect.EvidenceGap]
+
+
+def test_the_published_reasons_are_these_exact_words() -> None:
+    """Pinned as literals, the way every other published gap reason is pinned here.
+
+    Reading the wording out of the production table would let any rewording pass, and the sentence is
+    what a reviewer of an artifact actually sees -- it has to survive the sanitizer on the way in, so
+    it is worth freezing rather than deriving.
+    """
+    assert CUTOFF_REASON == (
+        "file body could not be safely redacted: a private key boundary was cut off by the read limit"
+    )
+    assert CREDENTIAL_REASON == (
+        "file body could not be safely redacted: a credential was cut off by the read limit"
+    )
+
+
+def test_the_guard_is_asked_only_of_a_body_the_reader_cut(repository: Path) -> None:
+    """The gate is a decision, so it is asserted rather than left to the shape of the code.
+
+    An untruncated body is handed to the sanitizer whole, and what it refuses -- a block it can see
+    closed -- is the existing rule's business. A key opened and never closed in a small file, and a
+    short token that simply ends the file, are therefore published today; both are rule-coverage
+    questions the CHANGELOG records as remaining work, not consequences of the cut. Widening the
+    guard to every body would also make this repository's own documentation, which quotes an opening
+    marker with no closing one, refuse to appear in its evidence.
+    """
+    repo = repository
+    (repo / "opened.txt").write_text(BEGIN + KEY_LINE * 40, encoding="utf-8")
+    (repo / "short_token.txt").write_text("token=ghp_A1b2C3d4E5f6G7h8I9", encoding="utf-8")
+
+    envelope = _envelope(_prepare(repo))
+
+    assert "opened.txt" not in _gaps(envelope, "file_refused")
+    assert "short_token.txt" not in _gaps(envelope, "file_refused")
+    published = {str(c["path"]): str(c["content"]) for c in envelope["data"]["file_context"]}
+    assert KEY_MATERIAL in published["opened.txt"]
+    assert "ghp_A1b2C3d4E5f6G7h8I9" in published["short_token.txt"]
+    assert security.truncated_secret_boundary(BEGIN + KEY_LINE * 40) is not None, (
+        "the withheld shape is identical; only the absence of a cut separates the two"
+    )
 
 
 def test_a_truncation_refusal_is_shielded_from_the_gap_count_cap() -> None:
