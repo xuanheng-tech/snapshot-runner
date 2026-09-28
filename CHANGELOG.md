@@ -246,7 +246,12 @@ public source baseline; it was not tagged or published to PyPI.
   at 750 201 characters, while the sanitizer that reads those same bytes needs 0.02 s -- and a prepare
   asks up to 64 files. The split version answers the same 4 000 201-character, 800 000-candidate prefix
   in 0.015 s, and `tests/test_truncated_secret_boundary.py` keeps a loose time bound on it because the
-  regression it guards is four orders of magnitude, not milliseconds.
+  regression it guards is four orders of magnitude, not milliseconds. The rewrite is also held against
+  the expression it replaced: over 16 544 generated inputs per seed -- every arrangement of prefix,
+  marker, separator and tail plus a seeded fuzz -- the two disagree 63 times, all of them a text ending
+  exactly on a marker where the expression needed at least one value character, and none in the direction
+  of publishing. The old pattern is kept in the test file as that oracle and nowhere else, because
+  nothing in the shipped code should ever run it again.
 - Preserved: everything the guard does not concern. A block that closes inside the retained prefix keeps
   its existing sanitizer refusal (`private key boundary could not be proven`) with the two loss counts
   partitioning the file, an ordinary large file still publishes its 262 144-byte prefix under
@@ -277,11 +282,11 @@ public source baseline; it was not tagged or published to PyPI.
   the gate itself -- that an uncut body is *not* asked -- so widening either half is a decision someone
   has to make on purpose.
 - No artifact schema, security epoch, contract version or CLI surface change. The guard is a write-time
-  decision, and identity validation and read-time sanitization were not touched: every one of the 655
-  artifacts in this machine's private store loaded under both the previous and this code with unchanged
-  bytes and a matching snapshot id, the store fingerprint (mode, device, inode, size, mtime, ctime, link
+  decision, and identity validation and read-time sanitization were not touched: all 656 artifacts in
+  this machine's private store (a growing count, not a constant) loaded under both the previous and
+  this code with unchanged bytes and a matching snapshot id, the store fingerprint (mode, device, inode, size, mtime, ctime, link
   count for every file) is unchanged across both passes, and tampering is still refused.
-  `tests/test_truncated_secret_boundary.py` adds 37 tests and the suite stands at 737 passing.
+  `tests/test_truncated_secret_boundary.py` adds 44 tests and the suite stands at 744 passing.
 
 ## 2.3.2 - 2026-09-25
 
