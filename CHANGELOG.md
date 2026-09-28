@@ -205,6 +205,42 @@ public source baseline; it was not tagged or published to PyPI.
   at the moment it would matter; all three now derive from the registry. Corrected two claims the
   review disproved: the raster rules *are* consulted on any read carrying image evidence (two
   artifacts in this store do), and the era pins rule data rather than sanitizer code.
+- Fixed: a private key that the read budget cut in half is no longer published as ordinary text. Both
+  file-context readers -- the worktree reader and branch review's sealed-target blob reader -- return
+  *only the prefix they kept* to the sanitizer, while the PEM rule refuses a block it can see closed.
+  A key whose closing marker lay in the bytes the reader never returned therefore looked like safe text:
+  measured on a scratch repository, a 379 270-byte file whose `-----BEGIN OPENSSH PRIVATE KEY-----`
+  opened at offset 240 000 published its whole 262 144-byte retained prefix, **22 108 bytes of it key
+  body**, with nothing to show for it but a `file_limit` gap reading "file context truncated at 256
+  KiB". The same shape published 17 characters of a `ghp_` token and 5 of a bearer value from two other
+  files, because a credential cut at the boundary also fails its pattern's own minimum length.
+- Added: `security.truncated_secret_boundary()`, asked by the readers of the prefix they are about to
+  hand on. A retained body that opens a private key and does not close it, or whose last characters are
+  an unbroken credential run reaching the cut, is now withheld **whole** and recorded as one
+  `file_refused` gap carrying the file's full size. Measured on the same three files: no prefix is
+  published, `omitted_bytes` is 379 270 / 262 189 / 262 158, and the key and token markers appear in
+  none of the three stored files. Neither the read budget nor the sanitizer was widened or bypassed --
+  widening the budget would only move the cut, since the secret can as easily start one byte later.
+- Chosen, and stated because it is a judgement: the credential rule tests *reach*, not length. Three of
+  the four token patterns match an unbounded tail and would redact a long slice, but `AKIA`/`ASIA` are
+  a fixed 16 characters behind a word boundary, so a 20-character run that never terminates matches
+  nothing -- measured as `redactions: {}` with the raw slice published. "This run ends where the file
+  was cut" is the whole signal, so a value that happens to complete exactly at the cut is now withheld
+  rather than redacted in place, and prose ending in "… bearer of" is classified as a credential. Both
+  over-refusals need a file already past 256 KiB and are recorded as a gap naming it.
+- Preserved: everything the guard does not concern. A block that closes inside the retained prefix keeps
+  its existing sanitizer refusal (`private key boundary could not be proven`) with the two loss counts
+  partitioning the file, an ordinary large file still publishes its 262 144-byte prefix under
+  `file_limit`, a credential sitting whole in a small file is still redacted with `GITHUB_TOKEN: 1`, the
+  D6 single-file fail-soft still costs one file and not the snapshot, and the truncation gap is filed
+  under the body-refusal prefix so the `MAX_EVIDENCE_GAPS` cap keeps it. The unified diff cannot
+  straddle at all: truncated diff evidence was already refused outright, and that refusal is unchanged.
+- No artifact schema, security epoch, contract version or CLI surface change. The guard is a write-time
+  decision, and identity validation and read-time sanitization were not touched: every one of the 655
+  artifacts in this machine's private store loaded under both the previous and this code with unchanged
+  bytes and a matching snapshot id, the store fingerprint (mode, device, inode, size, mtime, ctime, link
+  count for every file) is unchanged across both passes, and tampering is still refused.
+  `tests/test_truncated_secret_boundary.py` adds 29 tests; the suite stands at 729 passing.
 
 ## 2.3.2 - 2026-09-25
 
