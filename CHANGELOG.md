@@ -53,8 +53,8 @@ public source baseline; it was not tagged or published to PyPI.
   read. The stored reason is now asserted as it comes back out of the artifact, not as it was built.
 - No artifact schema, security epoch, contract version or CLI surface change: `file_refused` and the
   `evidence_gaps` entry shape already existed, and every artifact already published on this machine still
-  reads (a growing count, deliberately not quoted as a constant). The suite stands at 700 passing, 23 of
-  them in `tests/test_file_context_fail_soft.py`.
+  reads (a growing count, deliberately not quoted as a constant). The suite stood at 700 passing when
+  that landed, 23 of them in `tests/test_file_context_fail_soft.py`.
 
 - Fixed: a wide changeset of non-ASCII or quoted paths no longer prevents a `diff-audit` snapshot
   from existing. Git is queried with `-c core.quotePath=true`, which writes one non-ASCII path byte
@@ -189,7 +189,11 @@ public source baseline; it was not tagged or published to PyPI.
   code every era shares. Measured both ways: widening that digest from 12 to 20 characters leaves the
   suite green and the store readable, because an already-redacted body never re-derives a marker,
   while removing the `.gitattributes` literal refuses an artifact published moments earlier. Treating
-  either as era data would be a schema decision, not a rule edit.
+  either as era data would be a schema decision, not a rule edit. The same blindness reaches one shape
+  further: a token the file itself split with a newline -- `ghp_A1b2C3d4E5f6` then a newline then the
+  rest -- is published unredacted by the sanitizer in a three-line file as readily as across a cut
+  (measured: `redactions: {}`), and no rule anchored at the end of a retained prefix can see it; that
+  belongs to the token patterns, not to truncation.
 - Fixed: two gaps an independent review of this seam found, both about what the tests could see. The
   structural guard rejected a read site reaching a rule through a bare constant but not one reaching
   it through the live rules *object*, so four sites -- `max_extensionless_text_bytes`,
@@ -228,7 +232,21 @@ public source baseline; it was not tagged or published to PyPI.
   nothing -- measured as `redactions: {}` with the raw slice published. "This run ends where the file
   was cut" is the whole signal, so a value that happens to complete exactly at the cut is now withheld
   rather than redacted in place, and prose ending in "… bearer of" is classified as a credential. Both
-  over-refusals need a file already past 256 KiB and are recorded as a gap naming it.
+  over-refusals need a file already past 256 KiB and are recorded as a gap naming it. Withholding is not
+  free and the cost is measured too: a 262 333-byte file whose retained prefix carried three complete
+  redactable tokens published **0 characters and `redactions: {}`** with this guard, against 262 093
+  characters and `GITHUB_TOKEN: 3` without it. The file's whole context goes, including the parts that
+  were never sensitive, because the collector cannot tell which half of a body the cut went through
+  without reading more of it than the budget allows.
+- Fixed: the credential test is a strip and one bounded marker scan, not a single expression, after a
+  review found the first version cost a backtracking pass per marker candidate in the text it was
+  handed. The prompt is repository content chosen by whoever is being audited, and the shape that
+  triggers it is one long run of token characters with markers inside it: measured on a 300 201-character
+  prefix carrying 60 000 `=AKIA` candidates the combined pattern needed 27 s to answer `None` and 170 s
+  at 750 201 characters, while the sanitizer that reads those same bytes needs 0.02 s -- and a prepare
+  asks up to 64 files. The split version answers the same 4 000 201-character, 800 000-candidate prefix
+  in 0.015 s, and `tests/test_truncated_secret_boundary.py` keeps a loose time bound on it because the
+  regression it guards is four orders of magnitude, not milliseconds.
 - Preserved: everything the guard does not concern. A block that closes inside the retained prefix keeps
   its existing sanitizer refusal (`private key boundary could not be proven`) with the two loss counts
   partitioning the file, an ordinary large file still publishes its 262 144-byte prefix under
@@ -252,8 +270,10 @@ public source baseline; it was not tagged or published to PyPI.
   probe to every body would additionally make this repository's own `CHANGELOG.md`, which quotes an
   opening marker with no closing one, vanish from its own evidence. And a label the PEM expression does
   not know (`-----BEGIN PGP PRIVATE KEY BLOCK-----`, measured leaking 597 copies across the cut) or raw
-  base64 key material with no envelope at all (2 000 copies, cut or not) is invisible to the old rule
-  and to the new one alike, because both read that rule. `tests/test_truncated_secret_boundary.py` pins
+  base64 key material with no envelope at all) is invisible to the old rule and to the new one alike,
+  because both read that rule; measured 2 000 copies published from a 74 000-byte envelope-less
+  body, whether or not the reader cut it.
+  `tests/test_truncated_secret_boundary.py` pins
   the gate itself -- that an uncut body is *not* asked -- so widening either half is a decision someone
   has to make on purpose.
 - No artifact schema, security epoch, contract version or CLI surface change. The guard is a write-time
@@ -261,7 +281,7 @@ public source baseline; it was not tagged or published to PyPI.
   artifacts in this machine's private store loaded under both the previous and this code with unchanged
   bytes and a matching snapshot id, the store fingerprint (mode, device, inode, size, mtime, ctime, link
   count for every file) is unchanged across both passes, and tampering is still refused.
-  `tests/test_truncated_secret_boundary.py` adds 29 tests; the suite stands at 729 passing.
+  `tests/test_truncated_secret_boundary.py` adds 37 tests and the suite stands at 737 passing.
 
 ## 2.3.2 - 2026-09-25
 
