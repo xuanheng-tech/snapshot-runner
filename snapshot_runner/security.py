@@ -515,9 +515,32 @@ def _has_unclosed_secret_boundary(text: str) -> bool:
 # more satisfies neither that rule nor any length floor -- and "this run reaches the cut" is the whole
 # signal either way. The marker is anchored at a word boundary and matched case-sensitively apart from
 # ``bearer``, so ordinary words that merely spell a prefix cannot trigger it.
-_TRUNCATED_CREDENTIAL_RE = re.compile(
-    r"\b(?:sk-(?:proj-)?|gh[pousr]_|AIza|(?:AKIA|ASIA)|(?i:bearer)\s)[A-Za-z0-9._~+/=-]+\Z"
+#
+# This is written as a strip plus a bounded marker scan rather than as one ``marker run \Z``
+# expression, because it runs over a retained prefix of a file supplied by whoever is being audited.
+# An unbounded character run in front of an end anchor costs a backtracking pass per marker candidate
+# in the text: measured on a 750 201-character prefix holding 150 000 ``=AKIA`` candidates the combined
+# pattern took 170 s to answer ``None``, and 27 s at 300 201 characters, while the sanitizer that reads
+# the same bytes takes 0.02 s. Stripping the run and then looking for a marker that ends where the run
+# begins keeps the answer identical and the cost linear. The window in front of the run is longer than
+# any marker needs, so a boundary the marker pattern reports there is a boundary in the real text.
+_CREDENTIAL_RUN_CHARACTERS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~+/=-"
+_CREDENTIAL_MARKER_RE = re.compile(
+    r"\b(?:sk-(?:proj-)?|gh[pousr]_|AIza|(?:AKIA|ASIA)|(?i:bearer)\s)"
 )
+_CREDENTIAL_MARKER_WINDOW = 64
+
+
+def _ends_in_truncated_credential(text: str) -> bool:
+    """Whether the text's last characters are a credential value that ends where the text does."""
+    cut = len(text.rstrip(_CREDENTIAL_RUN_CHARACTERS))
+    if cut == len(text):
+        return False
+    offset = max(0, cut - _CREDENTIAL_MARKER_WINDOW)
+    return any(
+        marker.end() + offset >= cut for marker in _CREDENTIAL_MARKER_RE.finditer(text[offset:])
+    )
+
 
 # The two shapes a truncated read can cut through, named so a caller can file a refusal without
 # re-deriving the classification. They are exported as constants rather than bare strings because the
@@ -542,7 +565,7 @@ def truncated_secret_boundary(text: str) -> str | None:
     """
     if _has_unclosed_secret_boundary(text):
         return SECRET_BOUNDARY_CUTOFF
-    if _TRUNCATED_CREDENTIAL_RE.search(text):
+    if _ends_in_truncated_credential(text):
         return CREDENTIAL_CUTOFF
     return None
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -346,6 +347,8 @@ def test_the_sealed_target_blob_route_withholds_a_straddling_blob(repository: Pa
         ("tasks-skylark\n", None),
         ("prefixghp_" + "A" * 17, None),
         ("xAIzaAbcdefghijkl", None),
+        ("ghp_" + "A" * 17 + "." + "B" * 30, security.CREDENTIAL_CUTOFF),
+        ("token: ghp_A1b2C3d4E5f6\nG7h8I9J0K1L2M3N4O5P6Q7R8", None),
         ("the file ends normally\n", None),
     ],
 )
@@ -355,9 +358,42 @@ def test_the_probe_names_only_a_structure_the_cut_went_through(
     """What counts as a straddle is a decided list, including the shapes that deliberately do not.
 
     A close-only marker names nothing the reader was mid-way through, and a label outside the private
-    key vocabulary is not a private key: both must leave the body publishable.
+    key vocabulary is not a private key: both must leave the body publishable. A token the file itself
+    split with a newline is not a cut either -- the sanitizer's token patterns miss that shape in a
+    three-line file as well, which is a rule-coverage question recorded in the CHANGELOG, not this one.
     """
     assert security.truncated_secret_boundary(text) == expected
+
+
+def test_the_probe_answers_a_prefix_full_of_marker_candidates_quickly() -> None:
+    """This runs over whatever the audited repository contains, so its cost is a security property.
+
+    One expression combining a marker with an unbounded character run before an end anchor costs a
+    backtracking pass per marker candidate: measured at 27 s for a 300 201-character prefix holding
+    60 000 of them and 170 s at 750 201, against 0.02 s for the sanitizer reading the same bytes. The
+    bound below is deliberately loose -- the shapes that used to cost minutes answer in milliseconds
+    now, and a regression to the backtracking form is what this is watching for.
+    """
+    text = "=AKIA" * 60_000 + "Q" * 200 + "!"
+    assert len(text) == 300_201
+
+    started = time.monotonic()
+    result = security.truncated_secret_boundary(text)
+    elapsed = time.monotonic() - started
+
+    assert result is None, "no marker's value reaches the end here, so nothing is withheld"
+    assert elapsed < 2.0, f"the probe took {elapsed:.3f}s on a {len(text)}-character prefix"
+
+
+def test_a_prefix_cut_through_both_shapes_is_named_as_the_key_it_opens() -> None:
+    """Order matters once both shapes are present, because the published reason says which one it saw.
+
+    Measured: an unclosed key opener followed by a credential run reaching the cut is a key straddle,
+    and naming it a credential would tell a reviewer the wrong thing about what was withheld.
+    """
+    text = BEGIN + KEY_LINE * 40 + "token=ghp_A1b2C3d4E5f6G7h8I9"
+
+    assert security.truncated_secret_boundary(text) == security.SECRET_BOUNDARY_CUTOFF
 
 
 def test_the_truncation_reasons_are_named_by_the_probe_and_survive_publication() -> None:
