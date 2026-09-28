@@ -521,13 +521,19 @@ def _has_unclosed_secret_boundary(text: str) -> bool:
 # An unbounded character run in front of an end anchor costs a backtracking pass per marker candidate
 # in the text: measured on a 750 201-character prefix holding 150 000 ``=AKIA`` candidates the combined
 # pattern took 170 s to answer ``None``, and 27 s at 300 201 characters, while the sanitizer that reads
-# the same bytes takes 0.02 s. Stripping the run and then looking for a marker that ends where the run
-# begins keeps the answer identical and the cost linear. The window in front of the run is longer than
-# any marker needs, so a boundary the marker pattern reports there is a boundary in the real text.
+# the same bytes takes 0.02 s. Stripping the run and then scanning it once, with no quantifier left to
+# backtrack, keeps the answer identical and the cost linear.
 _CREDENTIAL_RUN_CHARACTERS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~+/=-"
+# The marker alone, no value: the run is found by stripping characters off the end instead, so nothing
+# has to be repeated in front of an anchor. A marker is a straddle only when the run that follows it
+# reaches the last character, which is what the bounds on the scan below decide.
 _CREDENTIAL_MARKER_RE = re.compile(
     r"\b(?:sk-(?:proj-)?|gh[pousr]_|AIza|(?:AKIA|ASIA)|(?i:bearer)\s)"
 )
+# Only this much of the text in front of the run is worth looking at: a marker that ends at or after the
+# run starts either sits inside the run or is one of these few characters away from it, and a credential
+# whose value was broken by anything else -- a line wrap, a run of spaces -- is not something the cut
+# went through, and the token patterns' own coverage decides it.
 _CREDENTIAL_MARKER_WINDOW = 64
 
 
@@ -537,6 +543,9 @@ def _ends_in_truncated_credential(text: str) -> bool:
     if cut == len(text):
         return False
     offset = max(0, cut - _CREDENTIAL_MARKER_WINDOW)
+    # A marker whose value is entirely gone -- the cut fell on the character right after it -- counts
+    # too, because the retained text ends where a secret begins and nothing here says how short the
+    # missing value was.
     return any(
         marker.end() + offset >= cut for marker in _CREDENTIAL_MARKER_RE.finditer(text[offset:])
     )

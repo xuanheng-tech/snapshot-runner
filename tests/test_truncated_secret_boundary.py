@@ -10,8 +10,11 @@ credential the redactor already handles.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
+import random
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -349,6 +352,10 @@ def test_the_sealed_target_blob_route_withholds_a_straddling_blob(repository: Pa
         ("xAIzaAbcdefghijkl", None),
         ("ghp_" + "A" * 17 + "." + "B" * 30, security.CREDENTIAL_CUTOFF),
         ("token: ghp_A1b2C3d4E5f6\nG7h8I9J0K1L2M3N4O5P6Q7R8", None),
+        ("x" * 100 + ".ghp_" + "Q" * 50, security.CREDENTIAL_CUTOFF),
+        ("token=ghp_", security.CREDENTIAL_CUTOFF),
+        ("ghp_" + "A" * 14 + " " * 60 + "G7h8I9J0K1", None),
+        ("Authorization: Bearer ", None),
         ("the file ends normally\n", None),
     ],
 )
@@ -485,3 +492,74 @@ def test_a_truncation_refusal_is_shielded_from_the_gap_count_cap() -> None:
     assert len(kept) == cap
     assert all(refusal in kept for refusal in refusals)
     assert collect._is_body_refusal(refusals[0])
+
+
+# The single expression the linear probe replaced, kept here and only here as an oracle. It is right
+# about every shape and costs a backtracking pass per marker candidate in the text, which is why the
+# version that shipped first could not stay.
+_LEGACY_CREDENTIAL_RE = re.compile(
+    r"\b(?:sk-(?:proj-)?|gh[pousr]_|AIza|(?:AKIA|ASIA)|(?i:bearer)\s)[A-Za-z0-9._~+/=-]+\Z"
+)
+_CREDENTIAL_MARKERS = (
+    "sk-proj-",
+    "sk-",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "AIza",
+    "AKIA",
+    "ASIA",
+    "Bearer ",
+    "bearer\t",
+)
+
+
+@pytest.mark.parametrize("seed", [7, 11, 23])
+def test_the_linear_probe_withholds_everything_the_expression_it_replaced_did(seed: int) -> None:
+    """A rewrite that buys milliseconds may not spend them on a wider leak.
+
+    Compared over every arrangement of prefix, marker, separator and tail below, plus a seeded fuzz of
+    short strings drawn from the token alphabet and the punctuation that breaks a value. The probe is
+    allowed to withhold *more*: it does, on text ending exactly on a marker with no value characters
+    after it, where the expression needed at least one. It is never allowed to publish one the
+    expression withheld -- which is what the shape of the difference cannot guarantee on its own.
+    """
+    separators = ["", " ", "\n", "=", ":", ".", ",", '"', "'", "/", "  ", "\n\n", "->", "\t"]
+    tails = ["", "Q", "Q1W2", "a" * 20, "A" * 60, "a.b=c-d_e/f+g", "sk-QQ", "ghp_Q"]
+    prefixes = ["", "\n", "x\n", "config:", BEGIN, "=" * 70, "a" * 300, "z" * 100 + "."]
+    inputs = [
+        prefix + marker + separator + tail
+        for prefix, marker, separator, tail in itertools.product(
+            prefixes, (*_CREDENTIAL_MARKERS, "prefixghp_", "xsk-"), separators, tails
+        )
+    ]
+    rng = random.Random(seed)
+    alphabet = "aBK9_-.:/=\n \tAKIAAIzask-ghp_Bearer"
+    inputs += [
+        "".join(rng.choice(alphabet) for _ in range(size))
+        for size in (0, 3, 12, 40, 200)
+        for _ in range(800)
+    ]
+
+    def withheld_by_probe(text: str) -> bool:
+        return security._ends_in_truncated_credential(text)
+
+    leaked = [
+        text
+        for text in inputs
+        if _LEGACY_CREDENTIAL_RE.search(text) and not withheld_by_probe(text)
+    ]
+    assert leaked == [], [text[:60] for text in leaked[:5]]
+
+    extra = [
+        text
+        for text in inputs
+        if withheld_by_probe(text) and not _LEGACY_CREDENTIAL_RE.search(text)
+    ]
+    assert all(any(text.endswith(marker) for marker in _CREDENTIAL_MARKERS) for text in extra), [
+        text[:60]
+        for text in extra
+        if not any(text.endswith(marker) for marker in _CREDENTIAL_MARKERS)
+    ][:5]
