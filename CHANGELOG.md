@@ -221,10 +221,10 @@ public source baseline; it was not tagged or published to PyPI.
   files, because a credential cut at the boundary also fails its pattern's own minimum length.
 - Added: `security.truncated_secret_boundary()`, asked by the readers of the prefix they are about to
   hand on. A retained body that opens a private key and does not close it, or whose last characters are
-  an unbroken credential run reaching the cut, is now withheld **whole** and recorded as one
-  `file_refused` gap carrying the file's full size. Measured on the same three files: no prefix is
-  published, `omitted_bytes` is 379 270 / 262 189 / 262 158, and the key and token markers appear in
-  none of the three stored files. Neither the read budget nor the sanitizer was widened or bypassed --
+  an unbroken credential run reaching the cut at a word boundary, is now withheld **whole** and
+  recorded as one `file_refused` gap carrying the file's full size. Measured on the same three files:
+  no prefix is published, `omitted_bytes` is 379 270 for the key, 262 189 for the bearer file and
+  262 158 for the `ghp_` one, and the markers appear in none of the three stored files. Neither the read budget nor the sanitizer was widened or bypassed --
   widening the budget would only move the cut, since the secret can as easily start one byte later.
 - Chosen, and stated because it is a judgement: the credential rule tests *reach*, not length. Three of
   the four token patterns match an unbounded tail and would redact a long slice, but `AKIA`/`ASIA` are
@@ -243,7 +243,7 @@ public source baseline; it was not tagged or published to PyPI.
   handed. The prompt is repository content chosen by whoever is being audited, and the shape that
   triggers it is one long run of token characters with markers inside it: measured on a 300 201-character
   prefix carrying 60 000 `=AKIA` candidates the combined pattern needed 27 s to answer `None` and 170 s
-  at 750 201 characters, while the sanitizer that reads those same bytes needs 0.02 s -- and a prepare
+  at 750 201 characters, while the sanitizer that reads those same bytes needs 0.03 s -- and a prepare
   asks up to 64 files. The split version answers the same 4 000 201-character, 800 000-candidate prefix
   in 0.015 s, and `tests/test_truncated_secret_boundary.py` keeps a loose time bound on it because the
   regression it guards is four orders of magnitude, not milliseconds. The rewrite is also held against
@@ -258,9 +258,10 @@ public source baseline; it was not tagged or published to PyPI.
   `file_limit`, a credential sitting whole in a small file is still redacted with `GITHUB_TOKEN: 1`, the
   D6 single-file fail-soft still costs one file and not the snapshot, and the truncation gap is filed
   under the body-refusal prefix so the `MAX_EVIDENCE_GAPS` cap keeps it. The unified diff cannot
-  straddle at all: truncated diff evidence was already refused outright, and that refusal is unchanged.
+  straddle through truncation: truncated diff evidence was already refused outright, and that refusal is
+  unchanged -- a narrower claim than the diff route being safe, which the entry below answers.
 - Boundary that remains, measured on this change so the claim above is read at the right width: the
-  guard is asked of the two `file_context` readers, and only of a body they actually cut. Four shapes
+  guard is asked of the two `file_context` readers, and only of a body they actually cut. Six shapes
   still publish key material, none of them new here and none of them a regression -- each was reproduced
   on `f3fdc12` and on this commit with the same result. A `test-triage` log keeps a head and a tail and
   drops the middle, so a 2 940 072-byte `build.log` published 1 311 copies of a 37-byte key line under a
@@ -274,15 +275,20 @@ public source baseline; it was not tagged or published to PyPI.
   copies with no gap and no redaction -- widening that is a sanitizer rule decision, and applying the
   probe to every body would additionally make this repository's own `CHANGELOG.md`, which quotes an
   opening marker with no closing one, vanish from its own evidence. And a label the PEM expression does
-  not know (`-----BEGIN PGP PRIVATE KEY BLOCK-----`, measured leaking 597 copies across the cut) or raw
-  base64 key material with no envelope at all) is invisible to the old rule and to the new one alike,
-  because both read that rule; measured 2 000 copies published from a 74 000-byte envelope-less
-  body, whether or not the reader cut it.
+  not know (`-----BEGIN PGP PRIVATE KEY BLOCK-----`, measured leaking 597 copies across the cut), raw
+  base64 key material with no envelope at all (measured 2 000 copies from a 74 000-byte body, cut or
+  not), and a value glued to a preceding word character (`…yyghp_MKGLUE…` reaching the last byte), which
+  neither rule sees because both look for a word boundary first -- the same value after ` = ` is
+  withheld, measured. Relaxing that boundary would make `ask-` or `EUROPEASIA` enough to lose a file.
+  The last shape is not about truncation at all: a diff hunk that shows only *interior* lines of a key
+  carries them as context, measured 8 copies of a key line in a 493-character `unstaged_diff` of the
+  very path whose body the guard withheld in the same artifact. Widening the guard's reach is a token
+  and diff rule decision, recorded here rather than made quietly.
   `tests/test_truncated_secret_boundary.py` pins
   the gate itself -- that an uncut body is *not* asked -- so widening either half is a decision someone
   has to make on purpose.
 - No artifact schema, security epoch, contract version or CLI surface change. The guard is a write-time
-  decision, and identity validation and read-time sanitization were not touched: all 656 artifacts in
+  decision, and identity validation and read-time sanitization were not touched: all 659 artifacts in
   this machine's private store (a growing count, not a constant) loaded under both the previous and
   this code with unchanged bytes and a matching snapshot id, the store fingerprint (mode, device, inode, size, mtime, ctime, link
   count for every file) is unchanged across both passes, and tampering is still refused.
