@@ -219,6 +219,20 @@ public source baseline; it was not tagged or published to PyPI.
   body**, with nothing to show for it but a `file_limit` gap reading "file context truncated at 256
   KiB". The same shape published 17 characters of a `ghp_` token and 5 of a bearer value from two other
   files, because a credential cut at the boundary also fails its pattern's own minimum length.
+- Fixed: a file context is now read until the budget is actually reached. One `os.read` was trusted to
+  return the whole 256 KiB, and POSIX leaves it free to hand back less: measured on a 330 000-byte file
+  with reads capped at 4 096 bytes, the artifact published **4 096 bytes**, recorded `file_limit: 67 856`
+  -- the number the *stat* implies -- and left 325 904 bytes unpublished unaccounted for, understating the
+  loss by 258 048. Worse for this change, `truncated` was computed from the file's size rather than from
+  what the reader obtained, so a body cut short by the filesystem reported no gap at all and the
+  secret-boundary gate was never asked: the same shape holding an OpenSSH key published 86 507 of an
+  111 036-byte body with nothing in `evidence_gaps`. The reader now loops to the budget and refuses when
+  the bytes delivered disagree with the size it stat'ed, reusing `file changed while reading` rather than
+  inventing a second vocabulary for a lost body, which is how the byte-exact readers beside it already
+  behave (`_read_complete_regular`, image evidence, publication evidence). Artifact bytes for ordinary
+  reads are unaffected: the same scratch repository yields the same snapshot id across this change, and a
+  short read of any kind now costs that file rather than silently shipping half of it. Three tests cover
+  the loop, the gate across a multi-piece cut, and the refusal.
 - Added: `security.truncated_secret_boundary()`, asked by the readers of the prefix they are about to
   hand on. A retained body that opens a private key and does not close it, or whose last characters are
   an unbroken credential run reaching the cut at a word boundary, is now withheld **whole** and
@@ -288,11 +302,12 @@ public source baseline; it was not tagged or published to PyPI.
   the gate itself -- that an uncut body is *not* asked -- so widening either half is a decision someone
   has to make on purpose.
 - No artifact schema, security epoch, contract version or CLI surface change. The guard is a write-time
-  decision, and identity validation and read-time sanitization were not touched: all 659 artifacts in
-  this machine's private store (a growing count, not a constant) loaded under both the previous and
-  this code with unchanged bytes and a matching snapshot id, the store fingerprint (mode, device, inode, size, mtime, ctime, link
-  count for every file) is unchanged across both passes, and tampering is still refused.
-  `tests/test_truncated_secret_boundary.py` adds 44 tests and the suite stands at 744 passing.
+  decision, and identity validation and read-time sanitization were not touched: every artifact in this
+  machine's private store -- 672 directories at the last pass, a growing count rather than a constant --
+  loaded under both the previous and this code with unchanged bytes and a matching snapshot id, the store
+  fingerprint (mode, device, inode, size, mtime, ctime, link count for every file) is unchanged across
+  both passes, and tampering is still refused.
+  `tests/test_truncated_secret_boundary.py` adds 47 tests and the suite stands at 747 passing.
 
 ## 2.3.2 - 2026-09-25
 
