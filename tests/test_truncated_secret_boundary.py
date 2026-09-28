@@ -563,3 +563,85 @@ def test_the_linear_probe_withholds_everything_the_expression_it_replaced_did(se
         for text in extra
         if not any(text.endswith(marker) for marker in _CREDENTIAL_MARKERS)
     ][:5]
+
+
+class _ChunkedRead:
+    """An ``os`` proxy whose ``read`` hands back at most ``chunk`` bytes, and may claim EOF early.
+
+    A filesystem is free to return a short read, and the reader under test used to trust exactly one
+    call. Everything else still goes to the real module.
+    """
+
+    def __init__(self, chunk: int, stop_early: int | None = None) -> None:
+        self.chunk = chunk
+        self.stop_early = stop_early
+        self.per_descriptor: dict[int, int] = {}
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(os, name)
+
+    def read(self, descriptor: int, size: int) -> bytes:
+        seen = self.per_descriptor.setdefault(descriptor, 0)
+        if self.stop_early is not None and seen >= self.stop_early:
+            return b""
+        data = os.read(descriptor, min(size, self.chunk))
+        self.per_descriptor[descriptor] = seen + len(data)
+        return data
+
+
+def test_a_short_read_still_publishes_the_whole_retained_prefix(
+    repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Chunked reads are not a licence to publish half a file and call it complete."""
+    repo = repository
+    content = "notes line\n" * 30_000
+    (repo / "notes.txt").write_text(content, encoding="utf-8")
+    monkeypatch.setattr(collect, "os", _ChunkedRead(4096))
+
+    envelope = _envelope(_prepare(repo))
+
+    context = next(
+        entry for entry in envelope["data"]["file_context"] if entry["path"] == "notes.txt"
+    )
+    assert len(str(context["content"])) == CAP
+    gap = _gaps(envelope, "file_limit")["notes.txt"]
+    assert gap["omitted_bytes"] == len(content.encode("utf-8")) - CAP
+
+
+def test_a_straddle_reaching_the_cap_in_pieces_is_still_withheld(
+    repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate's precondition is that the retained prefix really is the first CAP bytes."""
+    repo = repository
+    body = "filler line\n" * 20_000 + BEGIN + KEY_LINE * 4_000
+    (repo / "straddle.txt").write_text(body, encoding="utf-8")
+    monkeypatch.setattr(collect, "os", _ChunkedRead(8192))
+
+    published = _prepare(repo)
+
+    assert "straddle.txt" not in _paths(_envelope(published))
+    assert _gaps(_envelope(published), "file_refused")["straddle.txt"]["reason"] == CUTOFF_REASON
+    assert KEY_MATERIAL.encode("utf-8") not in published.snapshot_bytes
+
+
+def test_a_read_that_stops_short_of_the_stated_size_is_refused(
+    repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fewer bytes than the file claims, with no error, is a changed file -- not a whole one.
+
+    Refusing is the only honest answer: the retained text is neither the cap nor the file, so it could
+    end anywhere inside a secret while the artifact reported no gap at all.
+    """
+    repo = repository
+    body = "filler line\n" * 20_000 + BEGIN + KEY_LINE * 4_000
+    (repo / "big.txt").write_text(body, encoding="utf-8")
+    monkeypatch.setattr(collect, "os", _ChunkedRead(8192, stop_early=100_000))
+
+    envelope = _envelope(_prepare(repo))
+
+    assert "big.txt" not in _paths(envelope)
+    gap = _gaps(envelope, "file_refused")["big.txt"]
+    assert gap["reason"] == "file changed while reading"
+    assert gap["omitted_bytes"] == len(body.encode("utf-8")), (
+        "a body this reader cannot vouch for is lost whole, and the gap says so"
+    )

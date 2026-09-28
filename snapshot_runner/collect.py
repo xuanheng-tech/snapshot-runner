@@ -632,12 +632,27 @@ def _read_regular_file(
     assert descriptor is not None
     assert opened is not None
     try:
-        raw = os.read(descriptor, maximum + 1)
+        # A single read may legitimately return fewer bytes than asked: os.read is free to hand back a
+        # short result. Trusting one call would publish a partial body as though it were the whole file
+        # -- truncated stays 0, the secret-boundary gate below is never asked, and not one gap is
+        # recorded -- so this reader loops and checks the total, the way the byte-exact readers beside it
+        # already do.
+        chunks: list[bytes] = []
+        collected = 0
+        while collected <= maximum:
+            part = os.read(descriptor, maximum + 1 - collected)
+            if not part:
+                break
+            chunks.append(part)
+            collected += len(part)
         after = os.fstat(descriptor)
         if (after.st_size, after.st_mtime_ns) != (opened.st_size, opened.st_mtime_ns):
             return None, after.st_size, "file changed while reading"
     finally:
         os.close(descriptor)
+    raw = b"".join(chunks)
+    if len(raw) != min(opened.st_size, maximum + 1):
+        return None, opened.st_size, "file changed while reading"
     if b"\0" in raw:
         return None, opened.st_size, "binary file refused"
     truncated = max(0, opened.st_size - maximum)

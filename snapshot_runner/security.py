@@ -544,8 +544,10 @@ def _ends_in_truncated_credential(text: str) -> bool:
         return False
     offset = max(0, cut - _CREDENTIAL_MARKER_WINDOW)
     # A marker whose value is entirely gone -- the cut fell on the character right after it -- counts
-    # too, because the retained text ends where a secret begins and nothing here says how short the
-    # missing value was.
+    # too for every marker ending in a run character (`sk-proj-`, `ghp_`, `AIza`, `AKIA`), because those
+    # characters are themselves the run the strip found. `bearer` plus its space is the exception: the
+    # whitespace is not a run character, so no run reaches the end and the body is published. Nothing of
+    # the value was retained in either shape; the difference is only how conservatively each is read.
     return any(
         marker.end() + offset >= cut for marker in _CREDENTIAL_MARKER_RE.finditer(text[offset:])
     )
