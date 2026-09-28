@@ -205,7 +205,8 @@ public source baseline; it was not tagged or published to PyPI.
   at the moment it would matter; all three now derive from the registry. Corrected two claims the
   review disproved: the raster rules *are* consulted on any read carrying image evidence (two
   artifacts in this store do), and the era pins rule data rather than sanitizer code.
-- Fixed: a private key that the read budget cut in half is no longer published as ordinary text. Both
+- Fixed: a private key that the read budget cut in half no longer reaches a `file_context` as
+  ordinary text. Both
   file-context readers -- the worktree reader and branch review's sealed-target blob reader -- return
   *only the prefix they kept* to the sanitizer, while the PEM rule refuses a block it can see closed.
   A key whose closing marker lay in the bytes the reader never returned therefore looked like safe text:
@@ -235,6 +236,26 @@ public source baseline; it was not tagged or published to PyPI.
   D6 single-file fail-soft still costs one file and not the snapshot, and the truncation gap is filed
   under the body-refusal prefix so the `MAX_EVIDENCE_GAPS` cap keeps it. The unified diff cannot
   straddle at all: truncated diff evidence was already refused outright, and that refusal is unchanged.
+- Boundary that remains, measured on this change so the claim above is read at the right width: the
+  guard is asked of the two `file_context` readers, and only of a body they actually cut. Four shapes
+  still publish key material, none of them new here and none of them a regression -- each was reproduced
+  on `f3fdc12` and on this commit with the same result. A `test-triage` log keeps a head and a tail and
+  drops the middle, so a 2 940 072-byte `build.log` published 1 311 copies of a 37-byte key line under a
+  lone `test_log_limit` gap; the cut is not at the end of the retained text there, so the credential
+  half of the new probe would be anchored to a file end that was never a cut, and a block lying wholly
+  inside the dropped middle is invisible from either side. `git log --oneline` output
+  tolerates the 2 MiB per-command bound with a `git_output_limit` gap and publishes what it got: 20
+  commits carrying a 122 436-byte subject put 58 226 copies of that key line into `recent_commits`,
+  2 097 152 characters of it. An untruncated body that opens a block and never closes it is handed to
+  the sanitizer whole and refused only if the block also closes, so a 74 036-byte file published 2 000
+  copies with no gap and no redaction -- widening that is a sanitizer rule decision, and applying the
+  probe to every body would additionally make this repository's own `CHANGELOG.md`, which quotes an
+  opening marker with no closing one, vanish from its own evidence. And a label the PEM expression does
+  not know (`-----BEGIN PGP PRIVATE KEY BLOCK-----`, measured leaking 597 copies across the cut) or raw
+  base64 key material with no envelope at all (2 000 copies, cut or not) is invisible to the old rule
+  and to the new one alike, because both read that rule. `tests/test_truncated_secret_boundary.py` pins
+  the gate itself -- that an uncut body is *not* asked -- so widening either half is a decision someone
+  has to make on purpose.
 - No artifact schema, security epoch, contract version or CLI surface change. The guard is a write-time
   decision, and identity validation and read-time sanitization were not touched: every one of the 655
   artifacts in this machine's private store loaded under both the previous and this code with unchanged
