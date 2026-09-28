@@ -26,9 +26,11 @@ from .git import (
     detect_active_git_operation,
 )
 from .security import (
+    CREDENTIAL_CUTOFF,
     GIT_COMMAND_FAILED,
     MAX_EXTENSIONLESS_TEXT_BYTES,
     SCAN_CLASSIFIER_VERSION,
+    SECRET_BOUNDARY_CUTOFF,
     SNAPSHOT_COLLECTION_FAILED,
     YAML_CONTENT_REFUSED,
     RunnerError,
@@ -47,6 +49,7 @@ from .security import (
     raster_image_media_type,
     sanitize_json_value,
     sanitize_text,
+    truncated_secret_boundary,
     unified_diff_path_changes,
 )
 
@@ -640,9 +643,14 @@ def _read_regular_file(
     truncated = max(0, opened.st_size - maximum)
     raw = raw[:maximum]
     try:
-        return raw.decode("utf-8", errors="strict"), truncated, None
+        decoded = raw.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
         return None, opened.st_size, "non-UTF-8 file refused"
+    if truncated:
+        cutoff_reason = _truncated_body_reason(decoded)
+        if cutoff_reason is not None:
+            return None, opened.st_size, cutoff_reason
+    return decoded, truncated, None
 
 
 def _read_complete_regular(
@@ -1129,6 +1137,27 @@ BODY_SANITIZER_REFUSALS = frozenset(BODY_REFUSAL_REASONS)
 # never returned are a separate `file_limit` gap, so the two never double-count.
 BODY_REFUSED_REASON_PREFIX = "file body could not be safely redacted"
 
+# The same drop, reached one step earlier. The readers above cut a body to the per-file budget before
+# the sanitizer ever sees it, so the closing marker of a key that began earlier -- or the tail of a
+# credential -- lies in the bytes that were never returned. "No complete block found" is not evidence
+# that the retained prefix is safe; it is evidence that the prefix is a slice of something that was
+# not evaluated. The whole body is withheld rather than the slice, and the refusal is filed under the
+# body-refusal prefix because it is the same event: a gap naming a dropped body, kept out of the
+# reach of the gap-count cap by ``_is_body_refusal``. Widening the read budget is not the fix -- the
+# secret could as easily start one byte later.
+TRUNCATED_BODY_REFUSAL_REASONS = {
+    SECRET_BOUNDARY_CUTOFF: (
+        f"{BODY_REFUSED_REASON_PREFIX}: a private key boundary was cut off by the read limit"
+    ),
+    CREDENTIAL_CUTOFF: f"{BODY_REFUSED_REASON_PREFIX}: a credential was cut off by the read limit",
+}
+
+
+def _truncated_body_reason(text: str) -> str | None:
+    """The refusal a truncated read owes when the retained prefix cuts through a secret."""
+    cutoff = truncated_secret_boundary(text)
+    return None if cutoff is None else TRUNCATED_BODY_REFUSAL_REASONS[cutoff]
+
 
 def _truncation_reason(relative: str) -> str:
     return (
@@ -1446,9 +1475,14 @@ def _read_blob_prefix(
     if b"\0" in result.stdout:
         return None, entry.size, "binary Git blob refused"
     try:
-        return result.stdout.decode("utf-8", errors="strict"), omitted, None
+        decoded = result.stdout.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
         return None, entry.size, "non-UTF-8 Git blob refused"
+    if omitted:
+        cutoff_reason = _truncated_body_reason(decoded)
+        if cutoff_reason is not None:
+            return None, entry.size, cutoff_reason
+    return decoded, omitted, None
 
 
 def _add_branch_blob_context(

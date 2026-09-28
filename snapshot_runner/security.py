@@ -485,6 +485,68 @@ def _contains_complete_private_key_block(text: str) -> bool:
     return False
 
 
+def _has_unclosed_secret_boundary(text: str) -> bool:
+    """Report whether a private-key opener in ``text`` has no matching closer inside it.
+
+    ``_contains_complete_private_key_block`` can only refuse a block it can see end to end. When a
+    body is cut to a read budget, the closing marker of a key that started earlier falls outside the
+    retained prefix, so the prefix -- most of the base64 key material -- reads as ordinary text and
+    would be published by a caller that trusts "no complete block found". This is the check that
+    caller needs: an opener without a closer means the retained text is a *slice* of a protected
+    structure, which is not the same as proof that it is safe. Openers are counted rather than
+    remembered by label, because a second block opened under the same label is as unclosed as the
+    first.
+    """
+    open_counts: dict[str, int] = {}
+    for boundary in active_rules().pem_boundary_re.finditer(text):
+        label = _normalize_pem_label(boundary.group("label"))
+        if boundary.group("kind").upper() == "BEGIN":
+            open_counts[label] = open_counts.get(label, 0) + 1
+            continue
+        open_counts[label] = max(0, open_counts.get(label, 0) - 1)
+    return any(count > 0 for count in open_counts.values())
+
+
+# A credential marker whose value runs to the very last retained byte. Every complete credential ends
+# in whitespace or punctuation and is redacted where it sits, so a value that stops at the end of the
+# text is one the reader ran out of budget for: the cut went through it. Length is deliberately not
+# part of the test. Three of the four token rules match an unbounded tail and would redact a long
+# slice, but ``AKIA``/``ASIA`` are a fixed 16 characters behind a word boundary, so a slice of 17 or
+# more satisfies neither that rule nor any length floor -- and "this run reaches the cut" is the whole
+# signal either way. The marker is anchored at a word boundary and matched case-sensitively apart from
+# ``bearer``, so ordinary words that merely spell a prefix cannot trigger it.
+_TRUNCATED_CREDENTIAL_RE = re.compile(
+    r"\b(?:sk-(?:proj-)?|gh[pousr]_|AIza|(?:AKIA|ASIA)|(?i:bearer)\s)[A-Za-z0-9._~+/=-]+\Z"
+)
+
+# The two shapes a truncated read can cut through, named so a caller can file a refusal without
+# re-deriving the classification. They are exported as constants rather than bare strings because the
+# caller keys a reason table on them and a drifted literal would turn a deliberate refusal into a
+# crash -- which is the failure this module's callers have already been bitten by once.
+SECRET_BOUNDARY_CUTOFF = "private key boundary"
+CREDENTIAL_CUTOFF = "credential"
+SECRET_CUTOFF_KINDS = (SECRET_BOUNDARY_CUTOFF, CREDENTIAL_CUTOFF)
+
+
+def truncated_secret_boundary(text: str) -> str | None:
+    """Name the sensitive structure the text cuts off, or ``None`` when it cuts off none.
+
+    Two shapes are detectable from the retained prefix alone: a private-key block whose closer is
+    beyond the cut, and a credential whose value runs up to the cut. Both mean the same thing -- the
+    prefix is part of a secret that cannot be evaluated -- so a caller withholding a truncated read
+    should withhold it either way.
+
+    This is a predicate about a *slice*, asked by the reader before the sanitizer ever sees the body;
+    it is not a redaction rule and so is deliberately absent from :class:`SanitizerRules`. A stored
+    artifact was truncated by the release that wrote it, and no read re-runs this check over it.
+    """
+    if _has_unclosed_secret_boundary(text):
+        return SECRET_BOUNDARY_CUTOFF
+    if _TRUNCATED_CREDENTIAL_RE.search(text):
+        return CREDENTIAL_CUTOFF
+    return None
+
+
 def _reject_complete_private_key_block(text: str) -> None:
     if _contains_complete_private_key_block(text):
         raise SecurityError("PEM credential boundary cannot be proven")
