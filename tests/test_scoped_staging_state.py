@@ -45,7 +45,7 @@ def staging_repository(
     for name in names:
         (repo / name).write_text("BASE\n", encoding="utf-8")
     _git(repo, "add", "--", *names)
-    _git(repo, "commit", "--quiet", "-m", "baseline")
+    _git(repo, "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "baseline")
 
     # index != HEAD, worktree == index
     (repo / "staged_only.py").write_text("STAGED\n", encoding="utf-8")
@@ -140,7 +140,9 @@ def test_scoped_audit_preserves_staged_executable_mode(
     target.write_text("BASE\n", encoding="utf-8")
     target.chmod(0o644)
     _git(staging_repository, "add", "--", "mode.py")
-    _git(staging_repository, "commit", "--quiet", "-m", "mode baseline")
+    _git(
+        staging_repository, "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "mode baseline"
+    )
     target.chmod(0o755)
     _git(staging_repository, "add", "--", "mode.py")
 
@@ -168,13 +170,13 @@ def test_scoped_audit_refuses_unmerged_index_entries(
     _git(repo, "config", "user.email", "conflict@example.invalid")
     (repo / "conflict.py").write_text("BASE\n", encoding="utf-8")
     _git(repo, "add", "--", "conflict.py")
-    _git(repo, "commit", "--quiet", "-m", "baseline")
+    _git(repo, "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "baseline")
     _git(repo, "checkout", "--quiet", "-b", "side")
     (repo / "conflict.py").write_text("SIDE\n", encoding="utf-8")
-    _git(repo, "commit", "--quiet", "-am", "side")
+    _git(repo, "-c", "commit.gpgsign=false", "commit", "--quiet", "-am", "side")
     _git(repo, "checkout", "--quiet", "main")
     (repo / "conflict.py").write_text("MAIN\n", encoding="utf-8")
-    _git(repo, "commit", "--quiet", "-am", "main")
+    _git(repo, "-c", "commit.gpgsign=false", "commit", "--quiet", "-am", "main")
     merge = subprocess.run(
         ["/usr/bin/git", "-C", os.fspath(repo), "merge", "side"],
         cwd="/",

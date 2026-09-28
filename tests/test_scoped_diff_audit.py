@@ -32,7 +32,7 @@ def _repository(tmp_path: Path) -> Path:
     for name in ("selected.py", "unrelated.py", "removed.py", "unsafe.yaml"):
         (repo / name).write_text(f"BASE_{name}\n", encoding="utf-8")
     _git(repo, "add", "--", "selected.py", "unrelated.py", "removed.py", "unsafe.yaml")
-    _git(repo, "commit", "--quiet", "-m", "baseline")
+    _git(repo, "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "baseline")
     return repo
 
 
