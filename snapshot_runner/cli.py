@@ -151,27 +151,18 @@ def _load_staged_snapshot_artifact(
     staging: Path,
     repository_root: Path,
 ) -> artifact_module.SnapshotArtifact:
-    try:
-        return artifact_module._load_snapshot_directory(
-            snapshot_id, staging, repository_root=repository_root
-        )
-    except TypeError:
-        return artifact_module._load_snapshot_directory(snapshot_id, staging)
+    return artifact_module._load_snapshot_directory(
+        snapshot_id, staging, repository_root=repository_root
+    )
 
 
 def _load_existing_snapshot_artifact(
     snapshot_id: str,
     repository_root: Path,
 ) -> artifact_module.SnapshotArtifact:
-    try:
-        return artifact_module._load_snapshot(
-            snapshot_id, repository_root, repository_root=repository_root
-        )
-    except TypeError:
-        try:
-            return artifact_module._load_snapshot(snapshot_id, repository_root)
-        except TypeError:
-            return artifact_module._load_snapshot(snapshot_id)
+    return artifact_module._load_snapshot(
+        snapshot_id, repository_root, repository_root=repository_root
+    )
 
 
 def _prepare_snapshot(

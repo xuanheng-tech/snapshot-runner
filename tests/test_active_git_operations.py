@@ -15,6 +15,79 @@ from snapshot_runner import cli as runner
 GIT = "/usr/bin/git"
 
 
+@pytest.mark.parametrize(
+    ("command", "mixed"), [("repo-status", False), ("diff-audit", False), ("diff-audit", True)]
+)
+def test_real_conflicted_merge_accepts_empty_merge_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    mixed: bool,
+) -> None:
+    _private_state(monkeypatch, tmp_path)
+    repo = tmp_path / "target-repo"
+    _initialize_repo(repo)
+    if mixed:
+        (repo / "ordinary.py").write_text("NORMAL = 1\n")
+        _run_git(repo, "add", "ordinary.py")
+        _run_git(repo, "commit", "-qm", "ordinary baseline")
+    _run_git(repo, "switch", "-qc", "side")
+    (repo / "safe.py").write_text("VALUE = 2\n")
+    _run_git(repo, "commit", "-qam", "side")
+    _run_git(repo, "switch", "-q", "main")
+    (repo / "safe.py").write_text("VALUE = 3\n")
+    _run_git(repo, "commit", "-qam", "main")
+    assert _run_git(repo, "merge", "--no-edit", "side", check=False).returncode == 1
+    assert (repo / ".git/MERGE_MODE").read_bytes() == b""
+    if mixed:
+        (repo / "ordinary.py").write_text("NORMAL = 2\n")
+        (repo / "staged.py").write_text("STAGED = True\n")
+        _run_git(repo, "add", "staged.py")
+    before = _readonly_state(repo)
+    assert runner.main(["prepare", command, "--repo", str(repo), "--summary"]) == 0
+    captured = capsys.readouterr()
+    envelope = _payload_from_summary(captured.out)
+    if command == "repo-status":
+        assert envelope["data"]["active_operation"]["type"] == "merge"
+        assert envelope["data"]["active_operation"]["mode"] == ""
+    else:
+        assert any(gap["kind"] == "unmerged_diff" for gap in envelope["evidence_gaps"])
+        if mixed:
+            assert "diff --git a/staged.py b/staged.py" in envelope["data"]["staged_diff"]
+            assert "diff --git a/ordinary.py b/ordinary.py" in envelope["data"]["unstaged_diff"]
+        else:
+            assert envelope["data"]["staged_diff"] == ""
+            assert envelope["data"]["unstaged_diff"] == ""
+        contexts = {entry["path"]: entry["content"] for entry in envelope["data"]["file_context"]}
+        assert "<<<<<<< HEAD" in contexts["safe.py"]
+    assert json.loads(captured.out)["next_action"] == "open_artifact"
+    assert _readonly_state(repo) == before
+
+
+def test_git_operation_reader_refuses_a_symlink_swap_after_inspection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from snapshot_runner import git
+
+    metadata = tmp_path / "MERGE_MODE"
+    outside = tmp_path / "outside"
+    metadata.write_text("no-ff\n")
+    outside.write_text("synthetic outside metadata\n")
+    original = Path.lstat
+
+    def swap(path: Path, *args, **kwargs) -> os.stat_result:
+        result = original(path, *args, **kwargs)
+        if path == metadata:
+            metadata.unlink()
+            metadata.symlink_to(outside)
+        return result
+
+    monkeypatch.setattr(Path, "lstat", swap)
+    with pytest.raises(security.RunnerError, match="safely read"):
+        git._read_git_metadata_file(metadata)
+
+
 def _run_git(
     repo: Path,
     *arguments: str,

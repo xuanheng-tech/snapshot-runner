@@ -97,7 +97,12 @@ def identity(
         raise ReleaseError("formal release requires an annotated tag")
     header = command("git", "cat-file", "tag", tag_object).split("\n\n", 1)[0]
     commit = command("git", "rev-parse", f"{tag_object}^{{commit}}")
-    if header.splitlines()[:3] != [f"object {commit}", "type commit", f"tag {tag}"]:
+    lines = header.splitlines()
+    if (
+        len(lines) != 4
+        or lines[:3] != [f"object {commit}", "type commit", f"tag {tag}"]
+        or re.fullmatch(r"tagger [^\x00\r\n]+", lines[3]) is None
+    ):
         raise ReleaseError("raw annotated tag name/target conflict")
     if expected_sha is not None and commit != expected_sha:
         raise ReleaseError("tag/expected commit mismatch")

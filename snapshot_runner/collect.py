@@ -25,10 +25,10 @@ from .git import (
     TargetGitEvidence,
     detect_active_git_operation,
 )
+from .schema_v2 import _publication_workspace_sha256
 from .security import (
     CREDENTIAL_CUTOFF,
     GIT_COMMAND_FAILED,
-    MAX_EXTENSIONLESS_TEXT_BYTES,
     SCAN_CLASSIFIER_VERSION,
     SECRET_BOUNDARY_CUTOFF,
     SNAPSHOT_COLLECTION_FAILED,
@@ -38,6 +38,7 @@ from .security import (
     ScanModeBinding,
     ScanModeManifest,
     SecurityError,
+    active_rules,
     classify_scan_mode,
     has_supported_raster_image_suffix,
     is_extensionless_text_candidate,
@@ -57,6 +58,7 @@ MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024
 MAX_FILE_BYTES = 256 * 1024
 UV_LOCK_MAX_FILE_BYTES = 4 * 1024 * 1024
 MAX_TEST_LOG_BYTES = 2 * 1024 * 1024
+MAX_TEST_LOG_SCAN_BYTES = 16 * 1024 * 1024
 IMAGE_EVIDENCE_MAX_BYTES = MAX_GIT_OUTPUT_BYTES
 SNAPSHOT_CONTENT_BUDGET = MAX_SNAPSHOT_BYTES - 256 * 1024
 MAX_CONTEXT_FILES = 64
@@ -452,10 +454,21 @@ def _decode_git(result: GitResult, subject: str, builder: SnapshotBuilder) -> st
             "Git output truncated at the 2 MiB per-command hard limit",
         )
     try:
-        return result.stdout.decode("utf-8", errors="strict")
+        decoded = result.stdout.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
         builder.gap("binary_or_encoding", subject, "Git output was not valid UTF-8")
-        return result.stdout.decode("utf-8", errors="replace")
+        decoded = result.stdout.decode("utf-8", errors="replace")
+    if result.truncated:
+        cutoff = truncated_secret_boundary(decoded)
+        if cutoff is not None:
+            builder.gap(
+                "git_output_refused",
+                subject,
+                f"Git text withheld: truncated {cutoff} could not be safely redacted",
+                len(result.stdout),
+            )
+            return ""
+    return decoded
 
 
 def _decode_unified_diff(result: GitResult, subject: str, builder: SnapshotBuilder) -> str:
@@ -883,7 +896,7 @@ def _record_image_gap(
     )
 
 
-def _read_test_log(repo_root: Path, supplied: str) -> tuple[str, int, str]:
+def _read_test_log(repo_root: Path, supplied: str) -> tuple[str, int, str, dict[str, int]]:
     relative = _safe_relative_path(supplied)
     if relative is None:
         raise RunnerError(SNAPSHOT_COLLECTION_FAILED, "test log refused: unsafe repository path")
@@ -899,30 +912,53 @@ def _read_test_log(repo_root: Path, supplied: str) -> tuple[str, int, str]:
     assert descriptor is not None
     assert opened is not None
     try:
-        size = opened.st_size
-        if size <= MAX_TEST_LOG_BYTES:
-            raw = os.read(descriptor, MAX_TEST_LOG_BYTES + 1)
-            omitted = 0
-        else:
-            marker = b"\n[...TEST_LOG_MIDDLE_OMITTED...]\n"
-            half = (MAX_TEST_LOG_BYTES - len(marker)) // 2
-            head = os.read(descriptor, half)
-            os.lseek(descriptor, max(0, size - half), os.SEEK_SET)
-            tail = os.read(descriptor, half)
-            raw = head + marker + tail
-            omitted = size - len(head) - len(tail)
+        if opened.st_size > MAX_TEST_LOG_SCAN_BYTES:
+            raise RunnerError(
+                SNAPSHOT_COLLECTION_FAILED, "test log exceeds the 16 MiB validation hard limit"
+            )
+        chunks: list[bytes] = []
+        remaining = MAX_TEST_LOG_SCAN_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
         after = os.fstat(descriptor)
         if (after.st_size, after.st_mtime_ns) != (opened.st_size, opened.st_mtime_ns):
             raise RunnerError(SNAPSHOT_COLLECTION_FAILED, "test log changed while reading")
     finally:
         os.close(descriptor)
+    raw = b"".join(chunks)
+    if len(raw) != opened.st_size or len(raw) > MAX_TEST_LOG_SCAN_BYTES:
+        raise RunnerError(SNAPSHOT_COLLECTION_FAILED, "test log changed while reading")
     if b"\0" in raw:
         raise RunnerError(SNAPSHOT_COLLECTION_FAILED, "binary test log refused")
     try:
         text = raw.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
         raise RunnerError(SNAPSHOT_COLLECTION_FAILED, "non-UTF-8 test log refused") from exc
-    return text, omitted, "test-output.log"
+    if len(raw) > MAX_TEST_LOG_BYTES and truncated_secret_boundary(text) is not None:
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED, "test log sensitive boundary could not be proven"
+        )
+    try:
+        sanitized = sanitize_text(text, scan_mode=ScanMode.PLAIN_TEXT, repository_root=repo_root)
+    except SecurityError as exc:
+        raise _snapshot_security_error(
+            exc, "unable to sanitize test-output.log; prepare refused"
+        ) from exc
+    # Neither retained slice can prove safety when a boundary lies in the omitted middle.
+    raw = sanitized.text.encode("utf-8")
+    omitted = 0
+    if len(raw) > MAX_TEST_LOG_BYTES:
+        marker = b"\n[...TEST_LOG_MIDDLE_OMITTED...]\n"
+        half = (MAX_TEST_LOG_BYTES - len(marker)) // 2
+        head = raw[:half].decode("utf-8", errors="ignore").encode("utf-8")
+        tail = raw[-half:].decode("utf-8", errors="ignore").encode("utf-8")
+        omitted = len(raw) - len(head) - len(tail)
+        raw = head + marker + tail
+    return raw.decode("utf-8"), omitted, "test-output.log", sanitized.redactions
 
 
 def _uses_extensionless_fallback(relative: str) -> bool:
@@ -963,7 +999,7 @@ def _read_extensionless_worktree(
     assert opened is not None
     executable = bool(opened.st_mode & 0o111)
     try:
-        if opened.st_size > MAX_EXTENSIONLESS_TEXT_BYTES:
+        if opened.st_size > active_rules().max_extensionless_text_bytes:
             after = os.fstat(descriptor)
             if (
                 after.st_dev,
@@ -989,7 +1025,7 @@ def _read_extensionless_worktree(
                 executable,
             )
         chunks: list[bytes] = []
-        remaining = MAX_EXTENSIONLESS_TEXT_BYTES + 1
+        remaining = active_rules().max_extensionless_text_bytes + 1
         while remaining:
             chunk = os.read(descriptor, remaining)
             if not chunk:
@@ -1057,7 +1093,7 @@ def _read_extensionless_blob(
             cache[key] = evidence
             return evidence
         size = int(size_text)
-    if size > MAX_EXTENSIONLESS_TEXT_BYTES:
+    if size > active_rules().max_extensionless_text_bytes:
         evidence = _text_refusal(
             "extensionless text exceeds 64 KiB",
             size,
@@ -1067,7 +1103,7 @@ def _read_extensionless_blob(
         return evidence
     result = git.run(
         ("cat-file", "blob", object_id),
-        maximum=MAX_EXTENSIONLESS_TEXT_BYTES + 1,
+        maximum=active_rules().max_extensionless_text_bytes + 1,
     )
     if result.returncode != 0 or result.truncated or result.stderr or len(result.stdout) != size:
         evidence = _text_refusal("Git blob content unavailable")
@@ -2822,20 +2858,6 @@ def collect_repo_status(
     return builder.finish()
 
 
-def _publication_workspace_sha256(records: list[dict[str, object]]) -> str:
-    digest = hashlib.sha256()
-    for record in sorted(records, key=lambda item: str(item["path"])):
-        digest.update(str(record["path"]).encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(str(record["bytes"]).encode("ascii"))
-        digest.update(b"\0")
-        digest.update(str(record["sha256"]).encode("ascii"))
-        digest.update(b"\0")
-        digest.update(b"1" if record["executable"] is True else b"0")
-        digest.update(b"\n")
-    return digest.hexdigest()
-
-
 def _canonical_generated_tree(raw: str) -> str:
     relative = _safe_relative_path(raw)
     if (
@@ -3313,6 +3335,28 @@ def collect_diff_audit(
             SNAPSHOT_COLLECTION_FAILED,
             "generated-tree evidence requires initial publication mode",
         )
+    unmerged_paths = set(
+        _changed_paths(
+            git,
+            builder,
+            (
+                "diff",
+                "--no-renames",
+                "--name-only",
+                "--diff-filter=U",
+                "-z",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--",
+            ),
+        )
+    )
+    for path in sorted(unmerged_paths):
+        builder.gap(
+            "unmerged_diff",
+            path,
+            "unmerged index versions excluded from unified diffs; consult worktree context and Git conflict state",
+        )
     generated_members = frozenset()
     sanitized_initial_content: dict[str, str] = {}
     if initial_publish_evidence:
@@ -3377,6 +3421,7 @@ def collect_diff_audit(
         path
         for path in context_staged_paths
         if path not in images.paths
+        and path not in unmerged_paths
         and path not in unsupported_diff_paths
         and (path not in extensionless.fallback_paths or path in extensionless.staged_diff_paths)
     ]
@@ -3384,6 +3429,7 @@ def collect_diff_audit(
         path
         for path in context_unstaged_paths
         if path not in images.paths
+        and path not in unmerged_paths
         and path not in unsupported_diff_paths
         and (path not in extensionless.fallback_paths or path in extensionless.unstaged_diff_paths)
     ]
@@ -3701,14 +3747,16 @@ def collect_branch_review(
 
 def collect_test_triage(repo_root: Path, log_argument: str) -> Snapshot:
     builder = SnapshotBuilder("test-triage", repo_root.name, repo_root)
-    text, omitted, display_name = _read_test_log(repo_root, log_argument)
+    text, omitted, display_name, redactions = _read_test_log(repo_root, log_argument)
+    for category, count in redactions.items():
+        builder.redactions[category] = builder.redactions.get(category, 0) + count
     builder.add_text("log", text, source=display_name, scan_mode=ScanMode.PLAIN_TEXT)
     builder.add_value("log_display_name", display_name, scan_mode=ScanMode.PLAIN_TEXT)
     if omitted:
         builder.gap(
             "test_log_limit",
             display_name,
-            "test log middle truncated at the 2 MiB head/tail hard limit",
+            "sanitized test log middle truncated at the 2 MiB head/tail hard limit",
             omitted,
         )
     return builder.finish()

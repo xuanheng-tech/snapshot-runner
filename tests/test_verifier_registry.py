@@ -9,7 +9,6 @@ envelope validator follows the row it is given rather than the live producer con
 from __future__ import annotations
 
 import ast
-import inspect
 import os
 import re
 from dataclasses import replace
@@ -210,6 +209,7 @@ def test_the_envelope_validator_follows_the_row_it_is_given(
         security_notice="Superseded notice from the release that wrote this artifact.",
         rules=security_module.SCAN_RULES_V2,
         is_current=False,
+        format=verifiers.CURRENT_VERIFIER.format,
     )
     assert legacy.scan_classifier_version == 2
     superseded = {**_MINIMAL_ENVELOPE, "security_notice": legacy.security_notice}
@@ -408,8 +408,10 @@ RULE_CONSTANT_NAMES = frozenset(
     }
 )
 
-# The one function allowed to name the live rules object: it is what decides the default.
-ERA_RULES_EXEMPT_FUNCTIONS = frozenset({"active_rules"})
+# Only the era resolver and the current-write consistency check may name live rules.
+ERA_RULES_EXEMPT_FUNCTIONS = frozenset(
+    {("security.py", "active_rules"), ("verifiers.py", "resolve_verifier")}
+)
 
 
 def test_two_eras_cannot_claim_one_version_pair() -> None:
@@ -425,38 +427,83 @@ def test_two_eras_cannot_claim_one_version_pair() -> None:
         verifiers._registry((verifiers.CURRENT_VERIFIER, duplicate))
 
 
-def test_no_sanitizer_rule_is_read_bypassing_the_era_policy() -> None:
-    """A rule reached without ``active_rules()`` is a rule a later release applies to history.
-
-    Behavioural checks can only cover the fields a test happens to perturb, and a site can be
-    reverted in two ways: back to a bare constant, or to ``CURRENT_RULES.<field>`` with no value
-    changed at all. The second revert is invisible to every behavioural test in this file and is the
-    one a real release would introduce by mistake, so both are rejected structurally, in every module
-    that sanitizes. Only :func:`security.active_rules` may name the live rules object, because
-    deciding what "live" means is its whole job.
-    """
+def _unbound_rule_reads(source: str, module: str) -> list[str]:
+    tree = ast.parse(source)
+    protected = set(RULE_CONSTANT_NAMES) | {"CURRENT_RULES"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").endswith("security"):
+            protected.update(
+                alias.asname or alias.name for alias in node.names if alias.name in protected
+            )
     offenders: list[str] = []
-    for module in (security_module, artifact_module):
-        source = Path(inspect.getsourcefile(module) or "").read_text(encoding="utf-8")
-        for node in ast.walk(ast.parse(source)):
-            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-                continue
-            if node.name in ERA_RULES_EXEMPT_FUNCTIONS:
-                continue
-            for inner in ast.walk(node):
-                if isinstance(inner, ast.Name) and inner.id in RULE_CONSTANT_NAMES | {
-                    "CURRENT_RULES"
-                }:
-                    offenders.append(f"{module.__name__}.{node.name}:{inner.lineno} {inner.id}")
-                elif (
-                    isinstance(inner, ast.Attribute)
-                    and isinstance(inner.value, ast.Name)
-                    and inner.value.id == "CURRENT_RULES"
-                ):
-                    offenders.append(
-                        f"{module.__name__}.{node.name}:{inner.lineno} CURRENT_RULES.{inner.attr}"
-                    )
+    for node in tree.body:
+        if (
+            isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+            and (module, node.name) in ERA_RULES_EXEMPT_FUNCTIONS
+        ):
+            continue
+        if (
+            module == "security.py"
+            and isinstance(node, ast.Assign)
+            and [target.id for target in node.targets if isinstance(target, ast.Name)]
+            == ["CURRENT_RULES"]
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "SanitizerRules"
+        ):
+            continue
+        for inner in ast.walk(node):
+            if (
+                isinstance(inner, ast.Name)
+                and isinstance(inner.ctx, ast.Load)
+                and inner.id in protected
+            ):
+                offenders.append(f"{module}:{inner.lineno} {inner.id}")
+            elif isinstance(inner, ast.Attribute) and inner.attr in RULE_CONSTANT_NAMES | {
+                "CURRENT_RULES"
+            }:
+                offenders.append(f"{module}:{inner.lineno} {inner.attr}")
+    return offenders
+
+
+def test_no_sanitizer_rule_is_read_bypassing_the_era_policy() -> None:
+    """Scan every package module, import aliases and module-level cached rules."""
+    package = Path(security_module.__file__).parent
+    offenders = [
+        offender
+        for path in sorted(package.rglob("*.py"))
+        for offender in _unbound_rule_reads(
+            path.read_text(encoding="utf-8"), path.relative_to(package).as_posix()
+        )
+    ]
     assert offenders == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def scan(): return MAX_EXTENSIONLESS_TEXT_BYTES",
+        "from snapshot_runner.security import MAX_EXTENSIONLESS_TEXT_BYTES as limit\n"
+        "def scan(): return limit",
+        "import snapshot_runner.security as policy\n"
+        "def scan(): return policy.CURRENT_RULES.max_depth",
+        "cached = security.CURRENT_RULES\ndef scan(): return cached.max_depth",
+        "def active_rules(): return CURRENT_RULES",
+    ],
+)
+def test_era_guard_rejects_bypasses_in_new_modules(source: str) -> None:
+    assert _unbound_rule_reads(source, "future_sanitizer.py")
+
+
+@pytest.mark.parametrize(
+    ("module", "function"),
+    [("nested/security.py", "active_rules"), ("nested/verifiers.py", "resolve_verifier")],
+)
+def test_era_exemptions_do_not_apply_to_same_named_nested_modules(
+    module: str,
+    function: str,
+) -> None:
+    assert _unbound_rule_reads(f"def {function}(): return policy.CURRENT_RULES", module)
 
 
 def test_writing_stops_when_the_release_rules_leave_the_registered_era(
@@ -488,3 +535,129 @@ def test_writing_stops_when_the_release_rules_leave_the_registered_era(
         dict(_MINIMAL_ENVELOPE), Path("/tmp"), verifier=verifiers.CURRENT_VERIFIER
     )
     assert named["task"] == "test-triage"
+
+
+def test_current_format_limits_match_the_producer() -> None:
+    from snapshot_runner import schema_v2
+
+    current = verifiers.CURRENT_VERIFIER.format
+    assert current is schema_v2.SCHEMA_V2
+    assert current.max_snapshot_bytes == collect_module.MAX_SNAPSHOT_BYTES
+    assert current.max_meta_bytes == artifact_module.MAX_META_BYTES
+    assert current.max_preview_bytes == artifact_module.MAX_PREVIEW_BYTES
+    for name in (
+        "MAX_EVIDENCE_GAPS",
+        "MAX_CONVERSION_RECORDS",
+        "MAX_INITIAL_CONTEXT_FILES",
+        "MAX_GENERATED_TREE_FILES",
+        "MAX_GENERATED_TREE_BYTES",
+        "IMAGE_EVIDENCE_MAX_BYTES",
+    ):
+        assert getattr(schema_v2, name) == getattr(collect_module, name)
+
+
+def test_historical_format_reads_survive_changed_live_budgets_and_name_patterns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hashlib
+    import json
+
+    store = _store(tmp_path, monkeypatch)
+    envelope = _diff_audit_envelope(verifiers.CURRENT_VERIFIER, "VALUE = 2\n")
+    envelope["data"].update({"baseline_kind": "empty_tree", "baseline_oid": "a" * 40})
+    envelope["evidence_gaps"] = [{"kind": "test", "subject": "one.py", "reason": "fixture"}]
+    envelope["truncated"] = True
+    envelope["redactions"] = {"OPENAI_TOKEN": 1}
+    snapshot_bytes = artifact_module._serialize_snapshot(envelope)
+    snapshot_id = hashlib.sha256(snapshot_bytes).hexdigest()
+    preview = b"historical preview\n"
+    meta = artifact_module._snapshot_meta(
+        snapshot_id,
+        "diff-audit",
+        "target-repo",
+        snapshot_bytes,
+        preview,
+    )
+    directory = store / snapshot_id
+    directory.mkdir(mode=0o700)
+    payloads = {
+        "meta.json": artifact_module._serialize_snapshot_meta(meta),
+        "snapshot.json": snapshot_bytes,
+        "preview.txt": preview,
+    }
+    for name, content in payloads.items():
+        path = directory / name
+        path.write_bytes(content)
+        path.chmod(0o600)
+    assert artifact_module._load_snapshot(snapshot_id).envelope == envelope
+
+    for name in ("MAX_META_BYTES", "MAX_PREVIEW_BYTES", "MAX_SNAPSHOT_BYTES"):
+        monkeypatch.setattr(artifact_module, name, 1)
+    monkeypatch.setattr(collect_module, "MAX_EVIDENCE_GAPS", 0)
+    monkeypatch.setattr(collect_module, "MAX_SNAPSHOT_BYTES", 1)
+    monkeypatch.setattr(security_module, "REPOSITORY_NAME_RE", re.compile(r"(?!x)x"))
+    monkeypatch.setattr(artifact_module, "SNAPSHOT_GIT_OID_RE", re.compile(r"(?!x)x"))
+
+    loaded = artifact_module._load_snapshot(snapshot_id)
+    assert loaded.snapshot_bytes == snapshot_bytes
+    assert loaded.envelope == json.loads(snapshot_bytes)
+    assert {name: (directory / name).read_bytes() for name in payloads} == payloads
+    # Producer output quotas still apply to new writes.
+    with pytest.raises(artifact_module.RunnerError, match="hard output limit"):
+        artifact_module._serialize_snapshot(envelope)
+    with pytest.raises(artifact_module.RunnerError, match="hard output limit"):
+        artifact_module._serialize_snapshot_meta(meta)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "probe"),
+    [
+        ("sensitive_file_prefixes", (), "env"),
+        ("attributes_file_name", ".alternate", "attributes"),
+        ("bounded_diff_text_suffixes", frozenset(), "csv"),
+        ("basename_re", re.compile(r"."), "basename"),
+        ("basename_substitution", "-", "basename"),
+        ("basename_limit", 1, "basename"),
+        ("basename_fallback", "hidden", "fallback"),
+        ("absolute_path_digest_length", 1, "path"),
+        ("absolute_path_marker", "<PATH:{basename}:{digest}>", "path"),
+        ("redacted_value_re", re.compile(r"(?!x)x"), "redacted"),
+        ("redaction_marker", "[SCRUBBED_{category}]", "token"),
+        ("git_path_escapes", {"t": ord("x")}, "escape"),
+    ],
+)
+def test_previously_inline_rule_values_follow_the_resolved_era(
+    field: str,
+    replacement: object,
+    probe: str,
+) -> None:
+    from types import MappingProxyType
+
+    def outcome(rules: security_module.SanitizerRules) -> object:
+        with security_module.era_rules(rules):
+            if probe == "env":
+                return security_module.is_sensitive_repository_path(".env.preview")
+            if probe == "attributes":
+                return security_module.is_relevant_text_path(".gitattributes")
+            if probe == "csv":
+                return security_module._is_explicit_bounded_diff_text_path("data.csv")
+            if probe == "basename":
+                return security_module._safe_basename("/srv/a b.py")
+            if probe == "fallback":
+                return security_module._safe_basename("/srv/.env")
+            if probe == "redacted":
+                return security_module._is_redacted_value("[REDACTED_AUTH]")
+            if probe == "escape":
+                return security_module._decode_git_path_atom('"a\\tb"')
+            text = "/srv/a b.py\n" if probe == "path" else "sk-" + "x" * 20 + "\n"
+            return security_module.sanitize_text(
+                text, scan_mode=security_module.ScanMode.PLAIN_TEXT
+            )
+
+    frozen = verifiers.CURRENT_VERIFIER.rules
+    value = MappingProxyType(replacement) if field == "git_path_escapes" else replacement
+    changed = replace(frozen, **{field: value})
+    before = outcome(frozen)
+    assert outcome(changed) != before, field
+    assert outcome(frozen) == before

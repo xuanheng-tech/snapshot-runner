@@ -704,9 +704,11 @@ def test_prepare_validates_before_rename_and_does_not_reload_after_publish(
     original_validate = artifact_module._load_snapshot_directory
     original_rename = runner.os.rename
 
-    def record_validation(snapshot_id: str, directory: Path) -> artifact_module.SnapshotArtifact:
+    def record_validation(
+        snapshot_id: str, directory: Path, *, repository_root: Path | None = None
+    ) -> artifact_module.SnapshotArtifact:
         events.append(("validate", directory))
-        return original_validate(snapshot_id, directory)
+        return original_validate(snapshot_id, directory, repository_root=repository_root)
 
     def record_rename(source: Path, destination: Path) -> None:
         events.append(("rename", source))
@@ -1747,7 +1749,8 @@ def test_test_triage_log_limit_preserves_bounded_head_and_tail(tmp_path: Path) -
     repo.mkdir()
     (repo / "large.log").write_bytes(b"H" + b"x" * collect.MAX_TEST_LOG_BYTES + b"T")
 
-    log, omitted, display_name = collect._read_test_log(repo, "large.log")
+    log, omitted, display_name, redactions = collect._read_test_log(repo, "large.log")
+    assert redactions == {}
     assert len(log.encode()) <= collect.MAX_TEST_LOG_BYTES
     assert log.startswith("H") and log.endswith("T")
     assert "[...TEST_LOG_MIDDLE_OMITTED...]" in log
@@ -2974,8 +2977,10 @@ def test_branch_review_state_change_after_staging_leaves_no_final_artifact(
     def mutate_after_staging(
         snapshot_id: str,
         directory: Path,
+        *,
+        repository_root: Path | None = None,
     ) -> artifact_module.SnapshotArtifact:
-        artifact = original(snapshot_id, directory)
+        artifact = original(snapshot_id, directory, repository_root=repository_root)
         _run_test_git(repo, "update-ref", target_ref, base_commit)
         return artifact
 
@@ -3043,8 +3048,10 @@ def test_replace_ref_created_after_staging_validation_is_detected_before_rename(
     def add_replace_after_staging(
         snapshot_id: str,
         directory: Path,
+        *,
+        repository_root: Path | None = None,
     ) -> artifact_module.SnapshotArtifact:
-        artifact = original_load(snapshot_id, directory)
+        artifact = original_load(snapshot_id, directory, repository_root=repository_root)
         _run_test_git(repo, "replace", original_oid, replacement_oid)
         return artifact
 
@@ -3451,8 +3458,10 @@ def test_shallow_created_after_staging_validation_is_detected_before_rename(
     def load_then_add_shallow(
         snapshot_id: str,
         directory: Path,
+        *,
+        repository_root: Path | None = None,
     ) -> artifact_module.SnapshotArtifact:
-        artifact = original_load(snapshot_id, directory)
+        artifact = original_load(snapshot_id, directory, repository_root=repository_root)
         shallow.write_text(f"{marker}\n", encoding="utf-8")
         return artifact
 
@@ -5011,3 +5020,37 @@ def test_cli_main_sequential_calls_and_early_failures_do_not_leak_context(
     code = runner.main(["diff-audit", "--unexpected-flag-xyz"])
     assert code != 0
     assert artifact_module._ACTIVE_REPOSITORY_ROOT.get() is None
+
+
+@pytest.mark.parametrize("phase", ["staged", "existing"])
+def test_validation_typeerror_never_retries_without_repository_context(
+    monkeypatch: pytest.MonkeyPatch,
+    private_state: Path,
+    target_repository: git.ValidatedTargetRepository,
+    phase: str,
+) -> None:
+    monkeypatch.setattr(collect, "collect_repo_status", lambda *_args, **_kwargs: _safe_snapshot())
+    existing = None
+    if phase == "existing":
+        existing = runner._prepare_snapshot("repo-status", None, target_repository, "/usr/bin/git")
+    calls: list[Path | None] = []
+    name = "_load_snapshot_directory" if phase == "staged" else "_load_snapshot"
+    original = getattr(artifact_module, name)
+
+    def validation_fault(*args: object, **kwargs: object) -> artifact_module.SnapshotArtifact:
+        calls.append(kwargs.get("repository_root"))
+        if kwargs.get("repository_root") is not None:
+            raise TypeError("synthetic internal validation fault")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(artifact_module, name, validation_fault)
+    with pytest.raises(security.RunnerError, match=r"snapshot publication failed \(TypeError\)"):
+        runner._prepare_snapshot("repo-status", None, target_repository, "/usr/bin/git")
+    assert calls == [target_repository.path]
+    assert not list(private_state.rglob(".staging-*"))
+    store = artifact_module.snapshot_output_root()
+    if existing is None:
+        assert list(store.iterdir()) == []
+    else:
+        assert list(store.iterdir()) == [existing.directory]
+        assert (existing.directory / "snapshot.json").read_bytes() == existing.snapshot_bytes

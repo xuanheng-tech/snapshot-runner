@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from snapshot_runner import artifact, collect, git
+from snapshot_runner import artifact, collect, git, security
 from snapshot_runner import cli as runner
 
 GIT = "/usr/bin/git"
@@ -132,7 +132,9 @@ def test_untracked_extensionless_text_shebang_modes_and_exact_limit(
         (repo / name).write_text(content, encoding="utf-8")
     for name in ("python-entry", "shell-entry", "context-entry"):
         (repo / name).chmod(0o755)
-    (repo / "EXACT").write_bytes(b"x\n" * (collect.MAX_EXTENSIONLESS_TEXT_BYTES // 2))
+    (repo / "EXACT").write_bytes(
+        b"x\n" * (security.active_rules().max_extensionless_text_bytes // 2)
+    )
     (repo / "unknown.foo").write_text("must stay unsupported\n", encoding="utf-8")
 
     payload = _payload(_prepare(repo))
@@ -163,7 +165,9 @@ def test_extensionless_binary_encoding_limit_symlink_fifo_and_sensitive_are_refu
     outside.write_text("OUTSIDE_BODY_MUST_NOT_BE_READ\n", encoding="utf-8")
     (repo / "nul-file").write_bytes(b"text\0binary\n")
     (repo / "bad-encoding").write_bytes(b"text-\xff\n")
-    (repo / "too-large").write_bytes(b"x" * (collect.MAX_EXTENSIONLESS_TEXT_BYTES + 1))
+    (repo / "too-large").write_bytes(
+        b"x" * (security.active_rules().max_extensionless_text_bytes + 1)
+    )
     (repo / "outside-link").symlink_to(outside)
     (repo / "named-pipe").write_text("baseline pipe path\n", encoding="utf-8")
     _commit(repo, "add pipe path", "named-pipe")

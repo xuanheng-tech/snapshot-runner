@@ -29,6 +29,25 @@ RELEASE = {
 }
 
 
+@pytest.mark.parametrize(
+    "extra_header", ["object " + SHA, "type tree", "tag v9.9.9", "encoding UTF-8"]
+)
+def test_release_identity_rejects_extra_or_duplicate_tag_headers(
+    repository: Path, extra_header: str
+) -> None:
+    raw = subprocess.check_output(["git", "cat-file", "tag", TAG]).decode()
+    header, message = raw.split("\n\n", 1)
+    ambiguous = header + "\n" + extra_header + "\n\n" + message
+    result = subprocess.run(
+        ["git", "hash-object", "-t", "tag", "--literally", "--stdin", "-w"],
+        input=ambiguous.encode(),
+        capture_output=True,
+        check=True,
+    )
+    with pytest.raises(r.ReleaseError, match="raw annotated tag"):
+        r.identity(TAG, tag_object=result.stdout.decode().strip())
+
+
 @pytest.fixture
 def repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     repo = tmp_path / "repo"

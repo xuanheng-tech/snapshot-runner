@@ -170,10 +170,9 @@ class SanitizerRules:
     A read consults all of these except ``max_extensionless_text_bytes``, which is gated off by
     ``verify_live_diff_text=False``; it is pinned anyway so a release that tightens it cannot move a
     historical body either. What pinning this data does NOT do is freeze the sanitizer's *code*: the
-    classification logic, the inline literals inside it (the ``.env.`` prefix, ``.gitattributes``,
-    the quoted-path escape table) and the shape of its output markers (how many digest characters an
-    ``<ABS_PATH:...>`` replacement carries) are shared by every era. A change to those applies to
-    history whether an era is registered or not, and it has to be judged on its own terms.
+    classification algorithm and parser control flow are shared by every era. Rule values,
+    including path prefixes, quoted-path escapes and output-marker shapes, are data here. An
+    incompatible algorithm change still needs a versioned implementation and a new era.
 
     Tightening a rule is a two-step change: edit the constants above, then add a ``SCAN_RULES_V3``
     and the era row that writes it. ``SCAN_RULES_V2`` has to stay exactly as it is, since that
@@ -200,6 +199,18 @@ class SanitizerRules:
     max_elements: int
     max_diff_path_candidates: int
     max_extensionless_text_bytes: int
+    sensitive_file_prefixes: tuple[str, ...]
+    attributes_file_name: str
+    bounded_diff_text_suffixes: frozenset[str]
+    basename_re: re.Pattern[str]
+    basename_substitution: str
+    basename_limit: int
+    basename_fallback: str
+    absolute_path_digest_length: int
+    absolute_path_marker: str
+    redacted_value_re: re.Pattern[str]
+    redaction_marker: str
+    git_path_escapes: MappingProxyType[str, int]
 
     @staticmethod
     def _pattern(pattern: re.Pattern[str]) -> str:
@@ -226,6 +237,18 @@ class SanitizerRules:
             self.max_elements,
             self.max_diff_path_candidates,
             self.max_extensionless_text_bytes,
+            self.sensitive_file_prefixes,
+            self.attributes_file_name,
+            tuple(sorted(self.bounded_diff_text_suffixes)),
+            self._pattern(self.basename_re),
+            self.basename_substitution,
+            self.basename_limit,
+            self.basename_fallback,
+            self.absolute_path_digest_length,
+            self.absolute_path_marker,
+            self._pattern(self.redacted_value_re),
+            self.redaction_marker,
+            tuple(sorted(dict(self.git_path_escapes).items())),
         )
 
 
@@ -322,6 +345,30 @@ SCAN_RULES_V2 = SanitizerRules(
     max_elements=10_000,
     max_diff_path_candidates=128,
     max_extensionless_text_bytes=64 * 1024,
+    sensitive_file_prefixes=(".env.",),
+    attributes_file_name=".gitattributes",
+    bounded_diff_text_suffixes=frozenset({".csv"}),
+    basename_re=re.compile(r"[^A-Za-z0-9._-]"),
+    basename_substitution="_",
+    basename_limit=64,
+    basename_fallback="path",
+    absolute_path_digest_length=12,
+    absolute_path_marker="<ABS_PATH:{basename}:{digest}>",
+    redacted_value_re=re.compile(r"\[REDACTED(?:_[A-Z0-9_]+)?\]"),
+    redaction_marker="[REDACTED_{category}]",
+    git_path_escapes=MappingProxyType(
+        {
+            "a": 0x07,
+            "b": 0x08,
+            "t": 0x09,
+            "n": 0x0A,
+            "v": 0x0B,
+            "f": 0x0C,
+            "r": 0x0D,
+            '"': 0x22,
+            "\\": 0x5C,
+        }
+    ),
 )
 
 #: The rules this release writes new artifacts under, read from the live constants, so a rule edit
@@ -346,6 +393,30 @@ CURRENT_RULES = SanitizerRules(
     max_elements=MAX_SANITIZE_ELEMENTS,
     max_diff_path_candidates=MAX_DIFF_PATH_CANDIDATES,
     max_extensionless_text_bytes=MAX_EXTENSIONLESS_TEXT_BYTES,
+    sensitive_file_prefixes=(".env.",),
+    attributes_file_name=".gitattributes",
+    bounded_diff_text_suffixes=frozenset({".csv"}),
+    basename_re=re.compile(r"[^A-Za-z0-9._-]"),
+    basename_substitution="_",
+    basename_limit=64,
+    basename_fallback="path",
+    absolute_path_digest_length=12,
+    absolute_path_marker="<ABS_PATH:{basename}:{digest}>",
+    redacted_value_re=re.compile(r"\[REDACTED(?:_[A-Z0-9_]+)?\]"),
+    redaction_marker="[REDACTED_{category}]",
+    git_path_escapes=MappingProxyType(
+        {
+            "a": 0x07,
+            "b": 0x08,
+            "t": 0x09,
+            "n": 0x0A,
+            "v": 0x0B,
+            "f": 0x0C,
+            "r": 0x0D,
+            '"': 0x22,
+            "\\": 0x5C,
+        }
+    ),
 )
 
 _ACTIVE_RULES: contextvars.ContextVar[SanitizerRules | None] = contextvars.ContextVar(
@@ -595,7 +666,7 @@ def _normalize_leading_bom(text: str) -> str:
 
 def _is_redacted_value(raw: str) -> bool:
     value = raw.strip().strip("\"'")
-    return re.fullmatch(r"\[REDACTED(?:_[A-Z0-9_]+)?\]", value) is not None
+    return active_rules().redacted_value_re.fullmatch(value) is not None
 
 
 def _assert_no_residual_credentials(text: str) -> None:
@@ -619,13 +690,17 @@ def _redact_credentials(text: str, counts: Counter[str]) -> str:
         if _is_redacted_value(match.group("value")):
             return match.group(0)
         counts["AUTH"] += 1
-        return f"{match.group('prefix')}[REDACTED_AUTH]"
+        return match.group("prefix") + rules.redaction_marker.format(category="AUTH")
 
     redacted = rules.auth_header_re.sub(authorization, redacted)
-    redacted, replacements = rules.bearer_re.subn("Bearer [REDACTED_BEARER]", redacted)
+    redacted, replacements = rules.bearer_re.subn(
+        "Bearer " + rules.redaction_marker.format(category="BEARER"), redacted
+    )
     counts["BEARER"] += replacements
     for category, pattern in rules.token_patterns:
-        redacted, replacements = pattern.subn(f"[REDACTED_{category}]", redacted)
+        redacted, replacements = pattern.subn(
+            rules.redaction_marker.format(category=category), redacted
+        )
         counts[category] += replacements
     _assert_no_residual_credentials(redacted)
     return redacted
@@ -649,16 +724,17 @@ def _is_sensitive_path_component(component: str) -> bool:
     lowered = component.lower()
     return (
         lowered in rules.sensitive_exact_file_names
-        or lowered.startswith(".env.")
+        or lowered.startswith(rules.sensitive_file_prefixes)
         or _component_suffix(lowered) in rules.sensitive_file_suffixes
     )
 
 
 def _safe_basename(raw_path: str) -> str:
+    rules = active_rules()
     basename = PurePosixPath(raw_path.rstrip("/")).name
-    safe = re.sub(r"[^A-Za-z0-9._-]", "_", basename)[:64]
+    safe = rules.basename_re.sub(rules.basename_substitution, basename)[: rules.basename_limit]
     if not safe or _is_sensitive_path_component(safe):
-        return "path"
+        return rules.basename_fallback
     return safe
 
 
@@ -669,7 +745,10 @@ def _redact_absolute_paths(
     repository_root: Path | None,
     explicit_paths: tuple[Path, ...],
 ) -> str:
-    redacted, file_uri_count = active_rules().file_uri_re.subn("[REDACTED_FILE_URI]", text)
+    rules = active_rules()
+    redacted, file_uri_count = rules.file_uri_re.subn(
+        rules.redaction_marker.format(category="FILE_URI"), text
+    )
     counts["FILE_URI"] += file_uri_count
     # A tuple is (original, replacement, is_security_replacement): removing the
     # repository's own root prefix is deterministic relativization of in-repo
@@ -693,9 +772,11 @@ def _redact_absolute_paths(
         raw = match.group(0)
         if raw in {"/", "//"}:
             return raw
-        digest = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:12]
+        digest = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[
+            : rules.absolute_path_digest_length
+        ]
         counts["ABSOLUTE_PATH"] += 1
-        return f"<ABS_PATH:{_safe_basename(raw)}:{digest}>"
+        return rules.absolute_path_marker.format(basename=_safe_basename(raw), digest=digest)
 
     if "/" not in redacted:
         return redacted
@@ -726,7 +807,11 @@ def classify_scan_mode(relative_path: str) -> ScanMode:
 
 def _is_explicit_bounded_diff_text_path(relative_path: str) -> bool:
     path = PurePosixPath(relative_path)
-    return path.name == ".gitattributes" or path.suffix.lower() == ".csv"
+    rules = active_rules()
+    return (
+        path.name == rules.attributes_file_name
+        or path.suffix.lower() in rules.bounded_diff_text_suffixes
+    )
 
 
 def _validate_bounded_diff_text(
@@ -734,11 +819,12 @@ def _validate_bounded_diff_text(
     repository_root: Path | None,
 ) -> None:
     path = PurePosixPath(relative_path)
-    is_csv = path.suffix.lower() == ".csv"
-    is_gitattributes = path.name == ".gitattributes"
-    if not path.parts or not (is_csv or is_gitattributes):
+    rules = active_rules()
+    is_bounded_suffix = path.suffix.lower() in rules.bounded_diff_text_suffixes
+    is_gitattributes = path.name == rules.attributes_file_name
+    if not path.parts or not (is_bounded_suffix or is_gitattributes):
         raise SecurityError("scan mode path is not an approved text path")
-    if is_csv:
+    if is_bounded_suffix:
         if any(_is_sensitive_path_component(part) for part in path.parts):
             raise SecurityError("scan mode path is not an approved text path")
     elif is_sensitive_repository_path(relative_path):
@@ -853,19 +939,6 @@ def _diff_line_text(line: str) -> str:
     return line
 
 
-_GIT_PATH_ESCAPES = {
-    "a": 0x07,
-    "b": 0x08,
-    "t": 0x09,
-    "n": 0x0A,
-    "v": 0x0B,
-    "f": 0x0C,
-    "r": 0x0D,
-    '"': 0x22,
-    "\\": 0x5C,
-}
-
-
 def _split_quoted_git_path_atom(raw: str) -> tuple[str, str]:
     if not raw.startswith('"'):
         raise SecurityError("Git path atom is not quoted")
@@ -911,8 +984,8 @@ def _decode_git_path_atom(raw: str) -> str:
             if index >= len(payload):
                 raise SecurityError("Git path atom has an incomplete escape")
             escaped = payload[index]
-            if escaped in _GIT_PATH_ESCAPES:
-                encoded_bytes.append(_GIT_PATH_ESCAPES[escaped])
+            if escaped in active_rules().git_path_escapes:
+                encoded_bytes.append(active_rules().git_path_escapes[escaped])
                 index += 1
                 continue
             if escaped not in "01234567":
@@ -1628,7 +1701,7 @@ def is_relevant_text_path(relative_path: str) -> bool:
     return (
         path.suffix.lower() in rules.allowed_text_suffixes
         or path.name.lower() in rules.allowed_extensionless_names
-        or path.name == ".gitattributes"
+        or path.name == rules.attributes_file_name
     )
 
 

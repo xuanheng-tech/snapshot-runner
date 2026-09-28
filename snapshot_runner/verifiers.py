@@ -12,7 +12,7 @@ running turns a routine producer-side change into a store-wide outage: a read re
 re-serializes the body and refuses the artifact unless the bytes reproduce themselves, so adding
 one token pattern that matches text an old body already contains is enough to make that artifact
 unreadable. Each row of the registry below therefore pins one supported artifact version's
-declarations *and* its :class:`security.SanitizerRules`, and ``verifier_for`` resolves a stored
+declarations, :class:`security.SanitizerRules` and versioned format validator, and ``verifier_for`` resolves a stored
 snapshot to its own row. A version that is not registered fails closed.
 
 ``CURRENT_VERIFIER`` is the row this release writes. ``tests/test_verifier_registry.py`` checks it
@@ -25,16 +25,13 @@ a secret pattern existed stays readable with that text intact, because freezing 
 history readable at all. Writes always use ``CURRENT_VERIFIER``, so nothing new is published under
 superseded rules, and ``preview.txt`` still requires human review before any upload.
 
-Two boundaries are worth naming, because both are easy to mistake for this one. What the task-data
-validators accept -- the per-task required fields, the evidence-gap key sets, the redaction
-categories, the size budgets and the two shapes a read also matches a name against
-(``REPOSITORY_NAME_RE`` and ``SNAPSHOT_GIT_OID_RE``) -- is still read from this release's tables, so
-a schema-era split of those is separate work from pinning sanitizer rules. Some rule values are
-inline literals inside the sanitizer -- a ``.env.`` prefix, a ``.gitattributes`` name, the basename
-substitution and its bound -- and cannot be pinned until they become data. The module that holds the
-schema-2 data validator on the refactor branch is a *format* validator for the only persisted schema,
-not an era reader, and when the two lines of work meet it should take its classifier version from the
-resolved verifier rather than from the live constant.
+The row's format owns the task-data validators, evidence-gap key sets, redaction categories,
+read budgets and name/OID shapes. Schema 2 uses ``schema_v2`` with independent frozen tables;
+current collector quotas therefore do not decide whether a stored artifact remains readable.
+Changing a format requires a new versioned validator and an explicit registry row. Sanitizer
+path names, basename substitutions, marker shapes and quoted-path escapes are also era data.
+Parser control flow and classification algorithms remain shared code: an incompatible change
+to those still requires a versioned implementation, rather than only a new rule descriptor.
 """
 
 from __future__ import annotations
@@ -42,6 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from . import security
+from .schema_v2 import SCHEMA_V2, SnapshotFormat
 from .security import (
     ARTIFACT_PUBLISH_FAILED,
     SCAN_RULES_V2,
@@ -68,7 +66,7 @@ _EPOCH_4_SECURITY_NOTICE = (
 
 @dataclass(frozen=True, slots=True)
 class ArtifactVerifier:
-    """One supported artifact version: its declarations and the rules that wrote its bytes."""
+    """One supported artifact version: declarations, scan rules and frozen format validator."""
 
     schema_version: int
     meta_schema_version: int
@@ -77,6 +75,7 @@ class ArtifactVerifier:
     security_notice: str
     rules: SanitizerRules
     is_current: bool
+    format: SnapshotFormat
 
     @property
     def version_key(self) -> tuple[int, int]:
@@ -95,6 +94,7 @@ _VERIFIER_EPOCH_4 = ArtifactVerifier(
     security_notice=_EPOCH_4_SECURITY_NOTICE,
     rules=SCAN_RULES_V2,
     is_current=True,
+    format=SCHEMA_V2,
 )
 
 
@@ -119,6 +119,11 @@ def _registry(
 _VERIFIERS = _registry((_VERIFIER_EPOCH_4,))
 
 CURRENT_VERIFIER = _VERIFIER_EPOCH_4
+
+
+def maximum_meta_bytes() -> int:
+    """Bound version discovery before the stored era can be resolved."""
+    return max(row.format.max_meta_bytes for row in _VERIFIERS.values())
 
 
 def resolve_verifier(verifier: ArtifactVerifier | None) -> ArtifactVerifier:

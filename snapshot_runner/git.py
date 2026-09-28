@@ -1377,14 +1377,49 @@ def _read_git_metadata_file(
             SNAPSHOT_COLLECTION_FAILED,
             f"active Git operation metadata {path.name} exceeds size limit",
         )
+    directory_descriptor = None
+    descriptor = None
     try:
-        with path.open("rb") as stream:
-            data = stream.read(max_bytes + 1)
+        directory_descriptor = os.open(
+            path.parent, os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+        )
+        descriptor = os.open(
+            path.name,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOFOLLOW,
+            dir_fd=directory_descriptor,
+        )
+        opened = os.fstat(descriptor)
+
+        def identity(value: os.stat_result) -> tuple[int, ...]:
+            return value.st_dev, value.st_ino, value.st_mode, value.st_size, value.st_mtime_ns
+
+        if identity(opened) != identity(st):
+            raise RunnerError(
+                SNAPSHOT_COLLECTION_FAILED, "active Git operation metadata changed during safe open"
+            )
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if identity(os.fstat(descriptor)) != identity(opened) or len(data) != opened.st_size:
+            raise RunnerError(
+                SNAPSHOT_COLLECTION_FAILED, "active Git operation metadata changed while reading"
+            )
     except OSError as exc:
         raise RunnerError(
             SNAPSHOT_COLLECTION_FAILED,
-            f"unable to read {description} in Git metadata directory",
+            f"unable to safely read {description} in Git metadata directory",
         ) from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if directory_descriptor is not None:
+            os.close(directory_descriptor)
     if len(data) > max_bytes:
         raise RunnerError(
             SNAPSHOT_COLLECTION_FAILED,
@@ -1464,7 +1499,7 @@ def _parse_merge_operation(git_dir: Path) -> dict[str, object]:
         mode = _read_git_metadata_file(
             git_dir / "MERGE_MODE", max_bytes=256, description="MERGE_MODE"
         ).strip()
-        if mode and re.fullmatch(r"[a-z0-9_-]+", mode) is not None:
+        if not mode or re.fullmatch(r"[a-z0-9_-]+", mode) is not None:
             result["mode"] = mode
         else:
             raise RunnerError(

@@ -136,6 +136,17 @@ match the artifact's repository name. An absent snapshot fails with `ARTIFACT_NO
 bounded single-line JSON with `evidence_schema_version` **1** and repeats the snapshot's
 trust boundary: captured content remains untrusted evidence, not agent instructions.
 
+Oversized test logs are validated and sanitized in full before the 2 MiB head/tail
+capture, with a separate 16 MiB input-validation hard limit. Larger inputs fail closed.
+Both cuts retain only valid UTF-8; an omitted-byte count measures the sanitized middle,
+including incomplete UTF-8 characters removed at the cuts. Redaction counts include the
+full validated input, including text later omitted. Truncated Git text that cuts through
+a private-key boundary or a configured credential is withheld with a `git_output_refused`
+gap alongside the original output-limit gap.
+For unmerged index paths, `diff-audit` captures supported worktree context and records
+an `unmerged_diff` gap: Git's combined conflict diff and index-stage versions are not
+standard unified evidence. Ordinary staged and unstaged paths are still collected.
+
 ## Public interface and contract
 
 `snapshot-runner` is the only console script. Its five subcommands — four collection
@@ -170,13 +181,16 @@ A read resolves the era a snapshot was written under — its threat-model text, 
 classifier version, and the sanitizer *rule data* that redacted and path-normalized its body —
 from the versions recorded in its own `meta.json`, so raising a producer-side constant or
 tightening a redaction pattern in a later release keeps the artifacts of a registered era
-readable. The sanitizer's code is shared across eras: changing its classification logic, the
-literal names embedded in it, or the shape of its redaction markers affects stored bodies too,
-and is a schema decision rather than a rule edit. Targeted evidence questions about a stored
+readable. Its registry row also selects the frozen format validator and read bounds; schema 2
+does not import current collector quotas or name/OID patterns. Path prefixes, basename bounds,
+quoted-path escapes and redaction-marker shapes belong to the era's rule data. Parser control
+flow and classification algorithms remain shared code, so incompatible changes to those require
+a versioned implementation and registry row. Targeted evidence questions about a stored
 artifact are answered under the same era. An artifact declaring an era this build has not
 registered is refused before its bytes are hashed or sanitized, and no stored artifact is ever
 rewritten or migrated. Identity checks are not era-relative: hash, canonical serialization, file
-set and modes are validated the same way for every artifact.
+set and modes are validated the same way for every artifact. Internal validation errors stop
+publication without retrying with reduced repository context.
 
 With the same Runner version, command/options, collected repository state and contents,
 and path-sanitization context, canonical evidence and snapshot IDs are deterministic.
