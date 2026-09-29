@@ -251,6 +251,11 @@ before building a wheel and sdist; a separate job uses OIDC Trusted Publishing a
 approval in the `pypi` environment. Gitea uses the same quality gate and records the
 identical public tag and Release without building or uploading a second package.
 
+For environments that permit direct public reads but share an exhausted proxy quota,
+set the Gitea Actions repository variable `RELEASE_PUBLIC_API_DIRECT=true`. The record
+step appends only public GitHub API/PyPI hosts to the existing proxy bypass lists. Without
+this explicit option, the workflow uses its inherited proxy settings.
+
 `scripts/release.py` verifies tag, package, checksum, and PyPI provenance claims before
 closing Release records. Identity conflicts fail closed. To recover a missing GitHub
 Release after successful PyPI publication, dispatch `release-record` with the existing
