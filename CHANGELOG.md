@@ -5,6 +5,22 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.4.1 - 2026-09-29
+
+- Fixed: test-log capture sanitizes the complete bounded input before retaining a UTF-8-safe
+  head and tail. The scan limit is 16 MiB and the retained-text limit remains 2 MiB; unsafe or
+  oversized input is refused, and redaction counts cover the scanned input.
+- Fixed: truncated Git output with an unsafe sensitive-text boundary is withheld with an
+  explicit evidence gap instead of publishing a credential fragment.
+- Fixed: unresolved merges accept Git's empty default merge mode. Unmerged paths retain working-tree
+  context and a dedicated gap while ordinary staged and unstaged paths still receive unified diffs.
+- Changed: format 2 structural validators, read budgets and sanitizer rule data are independently
+  pinned. The era guard checks every package module, including imported aliases and qualified names.
+  Stored artifact schemas and declared scan versions are unchanged.
+- Fixed: an internal validation TypeError fails closed without retrying validation with fewer arguments.
+- Fixed: active-operation metadata reads reject symlink races and handle short reads; annotated release
+  tags require exact headers. Local Qoder session data is ignored during isolated Git audits.
+
 ## 2.4.0 - 2026-09-29
 
 - Added: a version-pinned artifact verifier registry (`snapshot_runner/verifiers.py`). Reading a stored snapshot
