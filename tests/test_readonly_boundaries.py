@@ -376,13 +376,6 @@ def test_prepare_only_analyze_refuses_before_prepare_boundaries(
 
 
 def test_automatic_analysis_production_implementation_is_absent() -> None:
-    source = (PROJECT_ROOT / "snapshot_runner/cli.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    definitions = {
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
-    }
     removed_symbols = {
         "_check_login",
         "_create_analysis_staging",
@@ -395,16 +388,29 @@ def test_automatic_analysis_production_implementation_is_absent() -> None:
         "state_output_root",
         "validate_preflight",
     }
-    assert definitions.isdisjoint(removed_symbols)
-    imported_roots = {
-        alias.name.split(".", 1)[0]
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.Import, ast.ImportFrom))
-        for alias in node.names
-    }
-    assert imported_roots.isdisjoint(
-        {"http", "pwd", "queue", "select", "selectors", "socket", "threading"}
-    )
+    for path in sorted((PROJECT_ROOT / "snapshot_runner").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        definitions = {
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        assert definitions.isdisjoint(removed_symbols), path
+        imported_roots = {
+            alias.name.split(".", 1)[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        } | {
+            (node.module or "").split(".", 1)[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.level == 0
+        }
+        assert imported_roots.isdisjoint(
+            {"http", "pwd", "queue", "select", "socket", "threading"}
+        ), path
+        if path != PROJECT_ROOT / "snapshot_runner" / "git.py":
+            assert "selectors" not in imported_roots, path
 
 
 @pytest.mark.parametrize(
@@ -1240,8 +1246,8 @@ def test_state_home_requires_an_absolute_existing_real_directory(
 
 def test_every_subprocess_is_shell_free() -> None:
     source = "\n".join(
-        (PROJECT_ROOT / "snapshot_runner" / name).read_text(encoding="utf-8")
-        for name in ("artifact.py", "cli.py", "collect.py", "git.py", "security.py")
+        path.read_text(encoding="utf-8")
+        for path in sorted((PROJECT_ROOT / "snapshot_runner").rglob("*.py"))
     )
     assert "shell=True" not in source
     assert "subprocess.run(" not in source
@@ -2299,10 +2305,30 @@ def test_target_and_runner_worktrees_must_not_contain_each_other(
     container.mkdir()
     runner_repo.mkdir()
     child.mkdir()
-    monkeypatch.setattr(runner, "REPOSITORY_ROOT", runner_repo)
+    monkeypatch.setattr(artifact_module, "REPOSITORY_ROOT", runner_repo)
     for candidate in (container, runner_repo, child):
         with pytest.raises(runner.RunnerError, match=f"^{git.TARGET_REPOSITORY_INVALID_ERROR}$"):
             runner._validate_target_repository_path(os.fspath(candidate))
+
+
+def test_runner_root_is_shared_by_target_and_state_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    container = tmp_path / "container"
+    runner_repo = container / "runner"
+    runner_repo.mkdir(parents=True, mode=0o700)
+    monkeypatch.setattr(artifact_module, "REPOSITORY_ROOT", runner_repo)
+    monkeypatch.setattr(runner, "_installed_runner_root", lambda: None)
+    assert runner._validated_runner_worktree_path() == runner_repo
+    for candidate in (container, runner_repo, runner_repo / "state"):
+        monkeypatch.setenv("XDG_STATE_HOME", os.fspath(candidate))
+        with pytest.raises(runner.RunnerError, match="outside and separate"):
+            artifact_module._state_home()
+    separate = tmp_path / "state"
+    separate.mkdir(mode=0o700)
+    monkeypatch.setenv("XDG_STATE_HOME", os.fspath(separate))
+    assert artifact_module._state_home() == separate
 
 
 @pytest.mark.parametrize("relation", ["target", "target-child", "target-parent"])
@@ -2417,7 +2443,7 @@ def test_state_git_admin_overlap_stops_after_only_fixed_path_validation(
         observed.append((self.repo_root, arguments))
         return original_run(self, arguments, maximum=maximum)
 
-    monkeypatch.setattr(runner, "REPOSITORY_ROOT", runner_repo)
+    monkeypatch.setattr(artifact_module, "REPOSITORY_ROOT", runner_repo)
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state))
     monkeypatch.setattr(git.GitRunner, "run", recording_run)
     monkeypatch.setattr(git, "_find_executable", lambda _name: "/usr/bin/git")
@@ -2467,7 +2493,7 @@ def test_repo_status_snapshot_is_isolated_from_runner_repository(
     )
     (runner_repo / "RUNNER_ONLY_CANARY.txt").write_text("runner only\n", encoding="utf-8")
     (target_repo / "TARGET_ONLY_CANARY.txt").write_text("target only\n", encoding="utf-8")
-    monkeypatch.setattr(runner, "REPOSITORY_ROOT", runner_repo)
+    monkeypatch.setattr(artifact_module, "REPOSITORY_ROOT", runner_repo)
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state))
     monkeypatch.chdir(runner_repo)
 
@@ -2520,7 +2546,7 @@ def test_shared_common_dir_repo_status_contains_only_target_worktree_evidence(
     state = tmp_path / "isolated-state"
     state.mkdir(mode=0o700)
     state.chmod(0o700)
-    monkeypatch.setattr(runner, "REPOSITORY_ROOT", runner_repo)
+    monkeypatch.setattr(artifact_module, "REPOSITORY_ROOT", runner_repo)
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state))
 
     validated = _validated_test_repository(target_repo)
@@ -2588,7 +2614,7 @@ def test_shared_common_dir_branch_review_rejects_runner_current_ref(
     state = tmp_path / "isolated-state"
     state.mkdir(mode=0o700)
     state.chmod(0o700)
-    monkeypatch.setattr(runner, "REPOSITORY_ROOT", runner_repo)
+    monkeypatch.setattr(artifact_module, "REPOSITORY_ROOT", runner_repo)
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state))
 
     result = runner.main(
@@ -3298,7 +3324,7 @@ def test_runner_shallow_repository_refuses_every_target_prepare(
     _initialize_isolation_repo(runner_repo, "runner", "RUNNER")
     _initialize_isolation_repo(target_repo, "target", "TARGET")
     (runner_repo / ".git" / "shallow").write_bytes(b"")
-    monkeypatch.setattr(runner, "REPOSITORY_ROOT", runner_repo)
+    monkeypatch.setattr(artifact_module, "REPOSITORY_ROOT", runner_repo)
 
     _assert_capability_prepare_rejected_before_content(
         monkeypatch,

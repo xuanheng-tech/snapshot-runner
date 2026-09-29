@@ -5,6 +5,12 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+- Internal: share the existing Runner source root between CLI and store validation, and keep
+  read-only boundary guards scanning every package module, including absolute `from` imports.
+- Release control: identify the failing Git operation without echoing arguments or diagnostics.
+  Retry only transient reads of the public GitHub repository, at most three attempts with a
+  60-second timeout each; permissions, identity conflicts and pushes stop immediately.
+
 ## 2.4.1 - 2026-09-29
 
 - Fixed: test-log capture sanitizes the complete bounded input before retaining a UTF-8-safe

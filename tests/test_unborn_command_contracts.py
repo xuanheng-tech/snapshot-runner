@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -350,6 +351,14 @@ def test_provider_named_alias_entrypoints_are_gone() -> None:
     """2.0.0 removed the four codex-* console scripts and their entrypoint functions."""
     for name in REMOVED_ALIAS_ENTRYPOINTS:
         assert not hasattr(runner, name), name
+    for path in sorted((PROJECT_ROOT / "snapshot_runner").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        definitions = {
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        assert definitions.isdisjoint(REMOVED_ALIAS_ENTRYPOINTS), path
     source = (PROJECT_ROOT / "snapshot_runner" / "cli.py").read_text(encoding="utf-8")
     assert "codex" not in source.lower()
 
