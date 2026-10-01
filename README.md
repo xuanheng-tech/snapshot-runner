@@ -114,8 +114,10 @@ The clone includes only the current branch's reachable history, without tags or 
 branch histories. The clone initializes the baseline index without expanding
 unrelated worktree files, then copies only the selected paths. Copy limits are 128 paths,
 8 MiB per version and 16 MiB total, counting index and worktree versions separately.
-Exact evidence scope is not a quota on the Git object database: large branch histories
-may still exceed available space or the per-command timeout.
+Exact evidence scope is not a quota on the Git object database or Git subprocess
+resident memory. Large branch histories may still exceed available space or the
+per-command timeout; Git pack mappings can also raise RSS even when selected files
+are small.
 
 For an entirely untracked, unborn repository, `--initial-publish-evidence` raises the
 bounded handwritten-file coverage limit from 64 to 128 files. Optional repeated
