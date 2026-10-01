@@ -283,6 +283,33 @@ def test_combined_acceptance_refuses_original_wheel_mutation(
     assert roots and all(not root.exists() for root in roots)
 
 
+def test_combined_acceptance_refuses_sdist_mutation_during_wheel_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    wheel = tmp_path / "original.whl"
+    wheel.write_bytes(b"original wheel")
+    archive = write_sdist(tmp_path)
+    roots = []
+
+    def installed(_wheel, _version, work):
+        roots.append(work.parent)
+        archive.write_bytes(archive.read_bytes() + b"\0")
+        return {"status": "PASS", "wheel_sha256": hashlib.sha256(_wheel.read_bytes()).hexdigest()}
+
+    def source(_archive, version, work):
+        assert p.extract_sdist(_archive, version, work / "source").is_dir()
+        return {"status": "PASS", "sdist_sha256": hashlib.sha256(_archive.read_bytes()).hexdigest()}
+
+    monkeypatch.setattr(p, "check", installed)
+    monkeypatch.setattr(p, "check_sdist", source)
+    monkeypatch.setattr(p.tempfile, "tempdir", str(tmp_path))
+    result = p.main(["--wheel", str(wheel), "--sdist", str(archive), "--expected-version", VERSION])
+    captured = capsys.readouterr()
+    assert result == 1 and captured.out == ""
+    assert captured.err == "package_check_failed: package acceptance modified the original sdist\n"
+    assert roots and all(not root.exists() for root in roots)
+
+
 def test_sdist_only_mode_preserves_acceptance_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

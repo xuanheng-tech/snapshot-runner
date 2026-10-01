@@ -419,6 +419,9 @@ def main(argv: list[str] | None = None) -> int:
                     len(wheels) == len(sdists) == 1, "build must produce one wheel and one sdist"
                 )
                 wheel, sdist = wheels[0], sdists[0]
+            sdist_hash = (
+                hashlib.sha256(sdist.read_bytes()).hexdigest() if sdist is not None else None
+            )
             result = {}
             if wheel is not None:
                 installed = root / "wheel-check"
@@ -436,6 +439,11 @@ def main(argv: list[str] | None = None) -> int:
                 require(
                     hashlib.sha256(wheel.read_bytes()).hexdigest() == result["wheel_sha256"],
                     "package acceptance modified the original wheel",
+                )
+            if sdist is not None:
+                require(
+                    hashlib.sha256(sdist.read_bytes()).hexdigest() == sdist_hash,
+                    "package acceptance modified the original sdist",
                 )
         print(json.dumps(result, sort_keys=True))
     except (PackageCheckError, OSError, ValueError, KeyError, TypeError) as exc:
