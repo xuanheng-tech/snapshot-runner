@@ -5,6 +5,15 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.5.1 - 2026-10-01
+
+- Fixed: each collection command's help lists only its supported flags. `branch-review`
+  shows the required `BASE`, and `test-triage` shows the required `TEST_LOG`.
+- Fixed: argument errors include static usage or constraint guidance while keeping the
+  bounded single-line error format and withholding user-supplied argument values.
+- Compatibility: valid primary and legacy `prepare` invocations retain their evidence
+  behavior and read-only boundary; public CLI and artifact schema versions are unchanged.
+
 ## 2.5.0 - 2026-10-01
 
 - Changed: scoped review clones initialize the baseline index without expanding unrelated

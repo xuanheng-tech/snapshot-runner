@@ -37,7 +37,8 @@ BRANCH_REVIEW_UNBORN_ERROR = "branch-review requires a target branch with at lea
 class SafeArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         del message
-        raise RunnerError(ARGUMENT_ERROR, CLI_ARGUMENT_ERROR)
+        usage = " ".join(self.format_usage().split())
+        raise RunnerError(ARGUMENT_ERROR, f"{CLI_ARGUMENT_ERROR}; {usage}")
 
 
 def _safe_exception_type(error: BaseException) -> str:
@@ -404,13 +405,49 @@ def _prepare_snapshot_guarded(
                     )
 
 
-def _add_prepare_arguments(prepare: argparse.ArgumentParser) -> None:
-    prepare.add_argument("--repo")
-    prepare.add_argument("--initial-publish-evidence", action="store_true")
-    prepare.add_argument("--generated-tree", action="append", default=[])
-    prepare.add_argument("--scope-path", action="append", default=[])
-    prepare.add_argument("--summary", action="store_true")
-    prepare.add_argument("task_argument", nargs="?")
+def _add_prepare_arguments(prepare: argparse.ArgumentParser, task: str | None = None) -> None:
+    prepare.add_argument(
+        "--repo", metavar="REPO", help="required canonical absolute Git worktree root"
+    )
+    prepare.add_argument("--summary", action="store_true", help="emit a bounded JSON summary")
+    prepare.set_defaults(
+        initial_publish_evidence=False, generated_tree=(), scope_path=(), task_argument=None
+    )
+    if task is None or task == "diff-audit":
+        prepare.add_argument(
+            "--initial-publish-evidence",
+            action="store_true",
+            help="diff-audit only: expanded unborn-repository evidence",
+        )
+        prepare.add_argument(
+            "--generated-tree",
+            action="append",
+            default=[],
+            metavar="DIRECTORY",
+            help="diff-audit only: generated JSON directory; requires --initial-publish-evidence",
+        )
+        prepare.add_argument(
+            "--scope-path",
+            action="append",
+            default=[],
+            metavar="PATH",
+            help="diff-audit only: exact changed path; cannot combine with --initial-publish-evidence",
+        )
+    if task == "branch-review":
+        prepare.add_argument(
+            "task_argument", metavar="BASE", help="required local base branch or tag"
+        )
+    elif task == "test-triage":
+        prepare.add_argument(
+            "task_argument", metavar="TEST_LOG", help="required repository-relative UTF-8 test log"
+        )
+    elif task is None:
+        prepare.add_argument(
+            "task_argument",
+            nargs="?",
+            metavar="BASE_OR_TEST_LOG",
+            help="required BASE for branch-review or TEST_LOG for test-triage",
+        )
 
 
 def build_argument_parser(*, neutral: bool = False) -> argparse.ArgumentParser:
@@ -431,7 +468,7 @@ def build_argument_parser(*, neutral: bool = False) -> argparse.ArgumentParser:
             prepare.add_argument(
                 "--version", action="version", version=f"snapshot-runner {__version__}"
             )
-            _add_prepare_arguments(prepare)
+            _add_prepare_arguments(prepare, task)
         read = commands.add_parser(
             "read",
             help="read targeted evidence from an existing snapshot",
@@ -451,6 +488,7 @@ def build_argument_parser(*, neutral: bool = False) -> argparse.ArgumentParser:
         read.add_argument("snapshot_id")
         return parser
     parser = SafeArgumentParser(
+        prog="python -m snapshot_runner.cli",
         description=__doc__,
         epilog=(
             "prepare-only mode does not support automatic analyze; the analyze action is a "
@@ -470,20 +508,39 @@ def _validate_arguments(arguments: argparse.Namespace) -> None:
         raise RunnerError(ARGUMENT_ERROR, TARGET_REPOSITORY_REQUIRED_ERROR)
     requires_argument = arguments.task in {"branch-review", "test-triage"}
     if requires_argument and arguments.task_argument is None:
-        raise RunnerError(ARGUMENT_ERROR, CLI_ARGUMENT_ERROR)
+        required = (
+            "BASE (a local branch or tag)" if arguments.task == "branch-review" else "TEST_LOG"
+        )
+        raise RunnerError(
+            ARGUMENT_ERROR, f"{CLI_ARGUMENT_ERROR}; {arguments.task} requires {required}"
+        )
     if not requires_argument and arguments.task_argument is not None:
-        raise RunnerError(ARGUMENT_ERROR, CLI_ARGUMENT_ERROR)
+        raise RunnerError(
+            ARGUMENT_ERROR, f"{CLI_ARGUMENT_ERROR}; {arguments.task} accepts no positional argument"
+        )
     if arguments.task_argument is not None and len(arguments.task_argument.encode("utf-8")) > 4096:
         raise RunnerError(ARGUMENT_ERROR, CLI_ARGUMENT_ERROR)
     if arguments.initial_publish_evidence and arguments.task != "diff-audit":
-        raise RunnerError(ARGUMENT_ERROR, CLI_ARGUMENT_ERROR)
+        raise RunnerError(
+            ARGUMENT_ERROR, f"{CLI_ARGUMENT_ERROR}; --initial-publish-evidence is diff-audit only"
+        )
     if arguments.generated_tree and not arguments.initial_publish_evidence:
-        raise RunnerError(ARGUMENT_ERROR, CLI_ARGUMENT_ERROR)
+        raise RunnerError(
+            ARGUMENT_ERROR,
+            f"{CLI_ARGUMENT_ERROR}; --generated-tree requires --initial-publish-evidence",
+        )
     if any(not tree or len(tree.encode("utf-8")) > 4096 for tree in arguments.generated_tree):
         raise RunnerError(ARGUMENT_ERROR, CLI_ARGUMENT_ERROR)
     if arguments.scope_path:
-        if arguments.task != "diff-audit" or arguments.initial_publish_evidence:
-            raise RunnerError(ARGUMENT_ERROR, CLI_ARGUMENT_ERROR)
+        if arguments.task != "diff-audit":
+            raise RunnerError(
+                ARGUMENT_ERROR, f"{CLI_ARGUMENT_ERROR}; --scope-path is diff-audit only"
+            )
+        if arguments.initial_publish_evidence:
+            raise RunnerError(
+                ARGUMENT_ERROR,
+                f"{CLI_ARGUMENT_ERROR}; --scope-path cannot combine with --initial-publish-evidence",
+            )
         try:
             arguments.scope_path = list(isolation_module.validate_scope_paths(arguments.scope_path))
         except RunnerError as exc:

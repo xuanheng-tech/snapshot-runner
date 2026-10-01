@@ -1,11 +1,30 @@
 from __future__ import annotations
 
 import json
+import re
 import tomllib
 from pathlib import Path
 
+import pytest
+
+from snapshot_runner import cli
+
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_COMMANDS = {"repo-status", "diff-audit", "branch-review", "test-triage", "read"}
+
+
+@pytest.mark.parametrize("command", sorted(EXPECTED_COMMANDS))
+def test_subcommand_help_matches_public_flags(
+    command: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contract = json.loads((ROOT / "tool_cli_contract.json").read_text(encoding="utf-8"))
+    specification = next(item for item in contract["commands"] if item["name"] == command)
+    with pytest.raises(SystemExit) as raised:
+        cli.build_argument_parser(neutral=True).parse_args([command, "--help"])
+    assert raised.value.code == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert set(re.findall(r"--[a-z][a-z-]*", captured.out)) == set(specification["flags"])
 
 
 def test_public_cli_contract_and_package_are_consistent() -> None:

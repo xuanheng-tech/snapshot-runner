@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from snapshot_runner import __version__
+from snapshot_runner import __version__, cli
 
 ROOT = Path(__file__).resolve().parents[1]
 TASKS = ("repo-status", "diff-audit", "branch-review", "test-triage")
@@ -98,7 +98,8 @@ def files(repo: Path) -> dict[str, str]:
 
 
 @pytest.mark.parametrize("task", TASKS)
-def test_primary_cli_collects_evidence_and_preserves_target(workspace, task: str) -> None:
+@pytest.mark.parametrize("entry", ["snapshot_runner_main", "main"])
+def test_collection_clis_preserve_evidence_and_target(workspace, task: str, entry: str) -> None:
     repo, env = workspace
     args = ["--repo", str(repo), "--summary"]
     if task == "branch-review":
@@ -106,7 +107,8 @@ def test_primary_cli_collects_evidence_and_preserves_target(workspace, task: str
     elif task == "test-triage":
         args.append("failed.log")
     before = files(repo)
-    result = invoke("snapshot_runner_main", [task, *args], env)
+    prefix = [] if entry == "snapshot_runner_main" else ["prepare"]
+    result = invoke(entry, [*prefix, task, *args], env)
     assert result.returncode == 0
     assert result.stderr == ""
     summary = json.loads(result.stdout)
@@ -116,7 +118,7 @@ def test_primary_cli_collects_evidence_and_preserves_target(workspace, task: str
     assert json.loads(artifact.read_bytes())["producer_security_epoch"] == 5
     assert files(repo) == before
     # Determinism: an identical repeat reuses the same content-addressed artifact.
-    repeat = invoke("snapshot_runner_main", [task, *args], env)
+    repeat = invoke(entry, [*prefix, task, *args], env)
     assert repeat.returncode == 0
     assert json.loads(repeat.stdout)["snapshot_id"] == summary["snapshot_id"]
     if task == "test-triage":
@@ -138,6 +140,95 @@ def test_primary_cli_keeps_argument_error_contract(workspace, args: list[str]) -
     assert result.returncode == 2
     assert result.stdout == ""
     assert result.stderr.startswith("workflow_failed:")
+
+
+@pytest.mark.parametrize(
+    ("task", "metavar"), [("branch-review", "BASE"), ("test-triage", "TEST_LOG")]
+)
+def test_required_collection_argument_is_explicit_and_rejected_before_collection(
+    task: str,
+    metavar: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    marker = "SYNTHETIC_CLI_MARKER"
+    monkeypatch.setattr(sys, "argv", [marker, task, "--repo", f"/{marker}"])
+    monkeypatch.setattr(cli, "_run_prepare", lambda _args: pytest.fail("collection ran"))
+    assert cli.snapshot_runner_main() == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith(
+        f"workflow_failed: {cli.ARGUMENT_ERROR}: {cli.CLI_ARGUMENT_ERROR}; "
+    )
+    assert f"usage: snapshot-runner {task}" in captured.err
+    assert metavar in captured.err and f"[{metavar}]" not in captured.err
+    assert marker not in captured.err
+    assert captured.err.count("\n") == 1
+    assert len(captured.err.encode("utf-8")) <= 512
+
+
+@pytest.mark.parametrize(
+    ("entry", "args", "guidance"),
+    [
+        ("main", ["prepare", "repo-status", "--initial-publish-evidence"], "diff-audit only"),
+        (
+            "main",
+            ["prepare", "repo-status", "--scope-path", "SYNTHETIC_CLI_MARKER"],
+            "diff-audit only",
+        ),
+        ("main", ["prepare", "test-triage"], "test-triage requires TEST_LOG"),
+        (
+            "main",
+            ["prepare", "repo-status", "SYNTHETIC_CLI_MARKER"],
+            "accepts no positional argument",
+        ),
+        (
+            "snapshot_runner_main",
+            ["diff-audit", "--generated-tree", "SYNTHETIC_CLI_MARKER"],
+            "--generated-tree requires --initial-publish-evidence",
+        ),
+        (
+            "snapshot_runner_main",
+            ["diff-audit", "--initial-publish-evidence", "--scope-path", "SYNTHETIC_CLI_MARKER"],
+            "--scope-path cannot combine with --initial-publish-evidence",
+        ),
+        (
+            "snapshot_runner_main",
+            ["repo-status", "--scope-path", "SYNTHETIC_CLI_MARKER"],
+            "usage: snapshot-runner",
+        ),
+    ],
+)
+def test_invalid_collection_arguments_give_safe_guidance_before_collection(
+    entry: str,
+    args: list[str],
+    guidance: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    marker = "SYNTHETIC_CLI_MARKER"
+    monkeypatch.setattr(sys, "argv", [marker, *args, "--repo", f"/{marker}"])
+    monkeypatch.setattr(cli, "_run_prepare", lambda _args: pytest.fail("collection ran"))
+    assert getattr(cli, entry)() == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith(
+        f"workflow_failed: {cli.ARGUMENT_ERROR}: {cli.CLI_ARGUMENT_ERROR}"
+    )
+    assert guidance in captured.err
+    assert marker not in captured.err
+    assert captured.err.count("\n") == 1
+    assert len(captured.err.encode("utf-8")) <= 512
+
+
+def test_legacy_prepare_accepts_options_before_task() -> None:
+    arguments = cli.build_argument_parser().parse_args(
+        ["prepare", "--repo", "/fixture", "--summary", "branch-review", "main"]
+    )
+    assert arguments.task == "branch-review"
+    assert arguments.task_argument == "main"
+    assert arguments.repo == "/fixture"
+    assert arguments.summary is True
 
 
 def test_provider_named_alias_entrypoints_no_longer_exist(workspace) -> None:

@@ -7,7 +7,7 @@ test log into local artifacts. It does not modify the inspected repository,
 automatically fix code, run tests, call a model, commit, or push. No model API is
 required. No API key is required.
 
-Current stable release: **2.5.0**.
+Current stable release: **2.5.1**.
 
 Use the same local CLI from a shell, from automation, or from any coding agent that
 permits the required local operations. Runner is vendor-neutral: it names, selects and
@@ -30,7 +30,7 @@ Install the published package from PyPI into a separate virtual environment:
 # Example using Python 3.12.13 or later in the supported 3.12 series.
 python3.12 --version
 python3.12 -m venv /absolute/path/to/runner-venv
-/absolute/path/to/runner-venv/bin/python -m pip install 'snapshot-runner==2.5.0'
+/absolute/path/to/runner-venv/bin/python -m pip install 'snapshot-runner==2.5.1'
 export PATH="/absolute/path/to/runner-venv/bin:$PATH"
 ```
 
@@ -50,6 +50,12 @@ reader. The main command and each subcommand support `--help` and `--version`:
 | `snapshot-runner branch-review` | Sealed base/HEAD identities, commits and changes relative to a local base |
 | `snapshot-runner test-triage` | An existing repository-relative UTF-8 test log, with explicit size limits |
 | `snapshot-runner read` | Targeted evidence from an existing snapshot, without re-running Git |
+
+Each subcommand's help lists its supported options. `branch-review` requires a `BASE`
+local branch or tag; `test-triage` requires a repository-relative `TEST_LOG`.
+`--initial-publish-evidence`, `--generated-tree`, and `--scope-path` belong to `diff-audit`.
+Invalid arguments return `ARGUMENT_ERROR` with static usage or constraint guidance,
+without echoing argument values.
 
 ## A real local example
 

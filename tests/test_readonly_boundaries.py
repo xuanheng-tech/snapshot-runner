@@ -512,7 +512,7 @@ CLI_MARKER = "SYNTHETIC_CLI_MARKER"
         (
             ["prepare", "branch-review", "--repo", "/synthetic/repo"],
             runner.ARGUMENT_ERROR,
-            runner.CLI_ARGUMENT_ERROR,
+            f"{runner.CLI_ARGUMENT_ERROR}; branch-review requires BASE (a local branch or tag)",
         ),
     ],
     ids=("choice", "type", "unknown", "missing-positional", "missing-task-argument"),
@@ -521,12 +521,20 @@ def test_cli_argument_errors_are_fixed_and_never_echo_input(
     argv: list[str],
     expected_code: str,
     expected_error: str,
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    monkeypatch.setattr(sys, "argv", [CLI_MARKER])
     assert runner.main(argv) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == f"workflow_failed: {expected_code}: {expected_error}\n"
+    prefix = f"workflow_failed: {expected_code}: {expected_error}\n"
+    if expected_error == runner.CLI_ARGUMENT_ERROR:
+        assert captured.err.startswith(prefix.rstrip() + "; usage: python -m snapshot_runner.cli")
+        assert captured.err.count("\n") == 1
+        assert len(captured.err.encode("utf-8")) <= 512
+    else:
+        assert captured.err == prefix
     assert CLI_MARKER not in captured.err
 
 
@@ -2658,9 +2666,11 @@ def test_extra_git_like_arguments_are_rejected_before_collection(
     )
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == (
-        f"workflow_failed: {runner.ARGUMENT_ERROR}: {runner.CLI_ARGUMENT_ERROR}\n"
+    assert captured.err.startswith(
+        f"workflow_failed: {runner.ARGUMENT_ERROR}: {runner.CLI_ARGUMENT_ERROR}; "
+        "usage: python -m snapshot_runner.cli"
     )
+    assert "/tmp/hostile" not in captured.err
 
 
 def _initialize_branch_review_test_repo(repo: Path) -> tuple[str, str]:
