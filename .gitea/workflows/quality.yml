@@ -50,3 +50,6 @@ jobs:
 
       - name: Check
         run: runuser -u ubuntu -- env -u UV_PYTHON_INSTALL_DIR UV_CACHE_DIR=/home/ubuntu/.cache/uv just check
+
+      - name: Check installed package
+        run: runuser -u ubuntu -- env -u UV_PYTHON_INSTALL_DIR UV_CACHE_DIR=/home/ubuntu/.cache/uv just check-package

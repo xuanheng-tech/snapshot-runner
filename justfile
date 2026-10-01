@@ -33,3 +33,8 @@ check:
     uv run --frozen ruff check snapshot_runner scripts tests
     uv run --frozen ruff format --check snapshot_runner scripts tests
     uv run --frozen pytest
+
+# Build and exercise a wheel in a clean environment outside the source checkout
+check-package *args:
+    #!/usr/bin/env bash
+    exec uv run --frozen python scripts/check_package.py "$@"

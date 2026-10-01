@@ -8,12 +8,16 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
 import hashlib
+import http.client
 import io
 import json
 import os
 import re
 import shutil
+import socket
+import ssl
 import subprocess
 import sys
 import tarfile
@@ -48,6 +52,10 @@ PUBLIC_GIT_TIMEOUT_SECONDS = 60
 
 class ReleaseError(ValueError):
     """Missing evidence or conflicting immutable publication identity."""
+
+
+class ReleaseIdentityError(ReleaseError):
+    """Observed source, tag, file, or provenance identities disagree."""
 
 
 def command(*args: str) -> str:
@@ -176,18 +184,18 @@ def identity(
         or lines[:3] != [f"object {commit}", "type commit", f"tag {tag}"]
         or re.fullmatch(r"tagger [^\x00\r\n]+", lines[3]) is None
     ):
-        raise ReleaseError("raw annotated tag name/target conflict")
+        raise ReleaseIdentityError("raw annotated tag name/target conflict")
     if expected_sha is not None and commit != expected_sha:
-        raise ReleaseError("tag/expected commit mismatch")
+        raise ReleaseIdentityError("tag/expected commit mismatch")
     if checkout and command("git", "rev-parse", "HEAD") != commit:
         raise ReleaseError("build checkout is not the exact release commit")
     project = tomllib.loads(command("git", "show", f"{commit}:pyproject.toml"))["project"]
     package = command("git", "show", f"{commit}:snapshot_runner/__init__.py")
     version = tag[1:]
     if project["name"] != PACKAGE or project["version"] != version:
-        raise ReleaseError("tag/project version mismatch")
+        raise ReleaseIdentityError("tag/project version mismatch")
     if re.search(rf'^__version__ = "{re.escape(version)}"$', package, re.MULTILINE) is None:
-        raise ReleaseError("package version declarations disagree")
+        raise ReleaseIdentityError("package version declarations disagree")
     check_readme_version(command("git", "show", f"{commit}:README.md"), version)
     notes = extract_tag(command("git", "show", f"{commit}:CHANGELOG.md"), tag)
     return {
@@ -199,6 +207,87 @@ def identity(
     }
 
 
+def _http_failure(error: urllib.error.HTTPError) -> ReleaseError:
+    # A bare 403 does not distinguish API permissions, a proxy refusal, and rate limiting.
+    remaining = error.headers.get("x-ratelimit-remaining", "") if error.headers else ""
+    retry_after = error.headers.get("retry-after", "") if error.headers else ""
+    rate_limited = error.code == 429 or (
+        error.code == 403
+        and (remaining.strip() == "0" or re.fullmatch(r"[0-9]{1,10}", retry_after.strip()))
+    )
+    if rate_limited:
+        code, recovery = "HTTP_RATE_LIMITED", "wait for the API retry window before rerunning"
+    elif error.code == 401:
+        code, recovery = "HTTP_UNAUTHORIZED", "check the existing API client's authorization"
+    elif error.code == 403:
+        code, recovery = (
+            "HTTP_FORBIDDEN_UNKNOWN",
+            "check API permissions and the configured proxy route; cause is unknown",
+        )
+    elif error.code == 407:
+        code, recovery = (
+            "HTTP_PROXY_AUTH_REQUIRED",
+            "check the configured proxy's existing authorization",
+        )
+    elif error.code in (409, 412):
+        code, recovery = (
+            "HTTP_STATE_CONFLICT",
+            "verify remote state and the original receipt before any mutation",
+        )
+    elif 500 <= error.code <= 599:
+        code, recovery = (
+            "HTTP_SERVER_ERROR",
+            "check service availability and the configured route before rerunning",
+        )
+    else:
+        code, recovery = "HTTP_REQUEST_REJECTED", "check the request and existing API authorization"
+    return ReleaseError(
+        f"{code}: release HTTP request failed (status {error.code}); recovery: {recovery}"
+    )
+
+
+def _network_failure(error: OSError | http.client.HTTPException) -> ReleaseError:
+    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    if isinstance(reason, TimeoutError):
+        code, recovery = (
+            "NETWORK_TIMEOUT",
+            "check service availability and the configured network route",
+        )
+    elif isinstance(reason, socket.gaierror):
+        code, recovery = "NETWORK_DNS_FAILED", "check name resolution for the configured route"
+    elif isinstance(reason, ssl.SSLCertVerificationError):
+        code, recovery = (
+            "NETWORK_TLS_VERIFICATION_FAILED",
+            "check the clock and certificate trust for the configured route",
+        )
+    elif isinstance(reason, ssl.SSLError):
+        code, recovery = "NETWORK_TLS_FAILED", "check TLS support for the configured route"
+    elif isinstance(reason, ConnectionError) or (
+        isinstance(reason, OSError)
+        and reason.errno in {errno.EHOSTUNREACH, errno.ENETUNREACH, errno.ENETDOWN}
+    ):
+        code, recovery = (
+            "NETWORK_CONNECTION_FAILED",
+            "check service availability and the configured proxy route",
+        )
+    elif isinstance(reason, http.client.IncompleteRead):
+        code, recovery = (
+            "NETWORK_RESPONSE_INCOMPLETE",
+            "check service availability before rerunning the read",
+        )
+    elif isinstance(reason, http.client.HTTPException):
+        code, recovery = (
+            "NETWORK_HTTP_PROTOCOL_FAILED",
+            "check HTTP support for the configured route; cause is unknown",
+        )
+    else:
+        code, recovery = (
+            "NETWORK_CAUSE_UNKNOWN",
+            "check the configured route with the existing client; cause is unknown",
+        )
+    return ReleaseError(f"{code}: release HTTP request unavailable; recovery: {recovery}")
+
+
 def request(url: str, *, token: str = "", method: str = "GET", data: dict | None = None):
     headers = {"Accept": "application/json", "User-Agent": "snapshot-runner-release"}
     if token:
@@ -206,16 +295,21 @@ def request(url: str, *, token: str = "", method: str = "GET", data: dict | None
     body = None if data is None else json.dumps(data).encode()
     if body is not None:
         headers["Content-Type"] = "application/json"
-    operation = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
+        operation = urllib.request.Request(url, data=body, headers=headers, method=method)
         with urllib.request.urlopen(operation, timeout=30) as response:
             raw = response.read(8 * 1024 * 1024 + 1)
     except urllib.error.HTTPError as exc:
         if exc.code == 404 and method == "GET":
             return None
-        raise ReleaseError(f"release HTTP {method} failed: {exc.code}") from None
-    except urllib.error.URLError:
-        raise ReleaseError("release HTTP request unavailable") from None
+        raise _http_failure(exc) from None
+    except (OSError, http.client.HTTPException) as exc:
+        raise _network_failure(exc) from None
+    except ValueError:
+        raise ReleaseError(
+            "HTTP_REQUEST_INVALID: release HTTP request configuration invalid; "
+            "recovery: check the API URL and the existing client's authorization configuration"
+        ) from None
     if len(raw) > 8 * 1024 * 1024:
         raise ReleaseError("release response exceeds 8 MiB")
     return raw
@@ -255,7 +349,7 @@ def github_identity(tag: str, expected_object: str | None = None) -> tuple[str, 
         return None
     obj = ref["object"]
     if obj["type"] != "tag" or (expected_object is not None and obj["sha"] != expected_object):
-        raise ReleaseError("GitHub annotated tag object identity conflict")
+        raise ReleaseIdentityError("GitHub annotated tag object identity conflict")
     tag_object = obj["sha"]
     obj = api(f"{GITHUB_API}/repos/{PUBLIC_REPOSITORY}/git/tags/{tag_object}", token=token)[
         "object"
@@ -271,7 +365,7 @@ def public_identity(tag: str, expected_sha: str | None, expected_object: str | N
         raise ReleaseError("GitHub formal tag missing")
     tag_object, commit = remote
     if expected_sha is not None and commit != expected_sha:
-        raise ReleaseError("tag/expected commit mismatch")
+        raise ReleaseIdentityError("tag/expected commit mismatch")
     # Fetch the immutable object into the object database, without updating any
     # local tag. This also works with a detached HEAD or a shallow checkout.
     command("git", "fetch", "--no-tags", f"https://github.com/{PUBLIC_REPOSITORY}.git", tag_object)
@@ -334,7 +428,7 @@ def receipt_identity(receipt: dict) -> dict:
         or run["event"] not in ("push", "workflow_dispatch")
         or run["head_branch"] != release["control_ref"].split("/", 2)[2]
     ):
-        raise ReleaseError("release-control run provenance conflict")
+        raise ReleaseIdentityError("release-control run provenance conflict")
     release["files"] = hashes
     return release
 
@@ -368,7 +462,7 @@ def check_artifact(name: str, raw: bytes, version: str) -> None:
             metadata = archive.extractfile(paths[0]).read()
     parsed = BytesParser().parsebytes(metadata)
     if parsed["Name"] != PACKAGE or parsed["Version"] != version:
-        raise ReleaseError("package artifact identity mismatch")
+        raise ReleaseIdentityError("package artifact identity mismatch")
 
 
 def check_provenance(item: dict, release: dict, *, wait: bool = False) -> None:
@@ -411,7 +505,7 @@ def check_provenance(item: dict, release: dict, *, wait: bool = False) -> None:
                 and uri + "\n" in text
             ):
                 return
-    raise ReleaseError("PyPI publisher/commit/file provenance conflict")
+    raise ReleaseIdentityError("PyPI publisher/commit/file provenance conflict")
 
 
 def pypi_files(
@@ -422,7 +516,7 @@ def pypi_files(
     if doc is None:
         return None
     if doc["info"]["name"] != PACKAGE or doc["info"]["version"] != release["version"]:
-        raise ReleaseError("PyPI project/version conflict")
+        raise ReleaseIdentityError("PyPI project/version conflict")
     items = doc["urls"]
     names = {item["filename"] for item in items}
     expected = filenames(release["version"])
@@ -436,12 +530,12 @@ def pypi_files(
         raw = request(item["url"])
         digest = hashlib.sha256(raw).hexdigest()
         if digest != item["digests"]["sha256"] or len(raw) != item["size"]:
-            raise ReleaseError("PyPI downloaded file digest/size conflict")
+            raise ReleaseIdentityError("PyPI downloaded file digest/size conflict")
         check_artifact(item["filename"], raw, release["version"])
         check_provenance(item, release, wait=wait)
         hashes[item["filename"]] = digest
         if "files" in release and release["files"].get(item["filename"]) != digest:
-            raise ReleaseError("PyPI file differs from the source-bound build receipt")
+            raise ReleaseIdentityError("PyPI file differs from the source-bound build receipt")
     return hashes
 
 
@@ -453,7 +547,7 @@ def build(release: dict, dist: Path = Path("dist")) -> bool:
     command("just", "check")
     command("git", "diff", "--exit-code", "HEAD", "--")
     if github_tag(release["tag"], release["tag_object"]) != release["commit"]:
-        raise ReleaseError("GitHub tag identity conflict")
+        raise ReleaseIdentityError("GitHub tag identity conflict")
     if pypi_files(release) is not None:
         return False
     previous = api(
@@ -463,6 +557,17 @@ def build(release: dict, dist: Path = Path("dist")) -> bool:
     if previous is None or previous["total_count"]:
         raise ReleaseError("original build artifact exists or is unknown; resume its publish job")
     command("uv", "build", "--out-dir", str(dist))
+    command(
+        "uv",
+        "run",
+        "--frozen",
+        "python",
+        str(Path(__file__).resolve().with_name("check_package.py")),
+        "--wheel",
+        str(dist / f"{ARCHIVE}-{release['version']}-py3-none-any.whl"),
+        "--expected-version",
+        release["version"],
+    )
     return True
 
 
@@ -488,18 +593,18 @@ def pending_dist(release: dict, source: Path, output: Path) -> list[str]:
 
 def check_record(record: dict, release: dict, hashes: dict, platform: str) -> None:
     if record["tag_name"] != release["tag"] or record["draft"] or record["prerelease"]:
-        raise ReleaseError(f"{platform} Release identity conflict")
+        raise ReleaseIdentityError(f"{platform} Release identity conflict")
     if record.get("sha1", release["commit"]) != release["commit"]:
-        raise ReleaseError(f"{platform} Release commit conflict")
+        raise ReleaseIdentityError(f"{platform} Release commit conflict")
     target = record.get("target_commitish", "")
     if re.fullmatch(r"[0-9a-f]{40}", target) and target != release["commit"]:
-        raise ReleaseError(f"{platform} Release target commit conflict")
+        raise ReleaseIdentityError(f"{platform} Release target commit conflict")
     body = record.get("body") or ""
     if body.count(MARKER) != 1:
         raise ReleaseError(f"{platform} Release identity marker missing or ambiguous")
     marker = body.split(MARKER, 1)[1].split(" -->", 1)[0]
     if json.loads(marker) != record_identity(release, hashes):
-        raise ReleaseError(f"{platform} Release file/tag object identity conflict")
+        raise ReleaseIdentityError(f"{platform} Release file/tag object identity conflict")
 
 
 def record_identity(release: dict, hashes: dict) -> dict:
@@ -536,7 +641,7 @@ def release_record(
         if target is not None:
             remote = command("git", "ls-remote", "--refs", "origin", f"refs/tags/{release['tag']}")
             if remote.split() != [release["tag_object"], f"refs/tags/{release['tag']}"]:
-                raise ReleaseError("Gitea tag object identity conflict")
+                raise ReleaseIdentityError("Gitea tag object identity conflict")
     if target != release["commit"]:
         raise ReleaseError(f"{platform} tag missing or conflicting")
     expected = record_identity(release, hashes)
@@ -605,7 +710,7 @@ def sync_gitea(tag: str, base: str, repository: str) -> dict:
     receipt = json.loads(body.split(MARKER, 1)[1].split(" -->", 1)[0])
     release = receipt_identity(receipt)
     if release["tag"] != tag or release["commit"] != public_commit:
-        raise ReleaseError("GitHub Release source identity conflict")
+        raise ReleaseIdentityError("GitHub Release source identity conflict")
     hashes = pypi_files(release, wait=True)
     if hashes is None:
         return {
@@ -627,11 +732,11 @@ def sync_gitea(tag: str, base: str, repository: str) -> dict:
             "git", "push", "--no-follow-tags", "origin", f"{release['tag_object']}:refs/tags/{tag}"
         )
     elif existing["commit"]["sha"] != public_commit:
-        raise ReleaseError("Gitea formal tag identity conflict")
+        raise ReleaseIdentityError("Gitea formal tag identity conflict")
     raw_tag = release["tag_object"]
     remote = command("git", "ls-remote", "--refs", "origin", f"refs/tags/{tag}")
     if remote.split() != [raw_tag, f"refs/tags/{tag}"]:
-        raise ReleaseError("Gitea tag object identity conflict")
+        raise ReleaseIdentityError("Gitea tag object identity conflict")
     private = release_record(release, hashes, "gitea", base, repository, apply=True, token=token)
     return {
         "tag": tag,
@@ -681,14 +786,14 @@ def main(argv: list[str] | None = None) -> int:
         elif args.receipt is not None:
             release = receipt_identity(json.loads(args.receipt.read_text(encoding="utf-8")))
             if args.tag is not None and args.tag != release["tag"]:
-                raise ReleaseError("requested tag/receipt conflict")
+                raise ReleaseIdentityError("requested tag/receipt conflict")
             if args.expected_sha is not None and args.expected_sha != release["commit"]:
-                raise ReleaseError("expected source commit/receipt conflict")
+                raise ReleaseIdentityError("expected source commit/receipt conflict")
             if (
                 args.expected_tag_object is not None
                 and args.expected_tag_object != release["tag_object"]
             ):
-                raise ReleaseError("expected tag object/receipt conflict")
+                raise ReleaseIdentityError("expected tag object/receipt conflict")
         elif args.command == "gate":
             release = public_identity(args.tag, args.expected_sha, args.expected_tag_object)
         else:
@@ -719,7 +824,7 @@ def main(argv: list[str] | None = None) -> int:
             outputs["pending"] = str(bool(result["pending"])).lower()
         elif args.command != "gate":
             if github_tag(release["tag"], release["tag_object"]) != release["commit"]:
-                raise ReleaseError("GitHub tag identity conflict")
+                raise ReleaseIdentityError("GitHub tag identity conflict")
             hashes = pypi_files(release, wait=args.command in ("record", "verify"))
             result["package_verification"] = "MISSING" if hashes is None else "PASS"
             result["files"] = hashes
@@ -744,7 +849,10 @@ def main(argv: list[str] | None = None) -> int:
                     stream.write(f"{key}={value}\n")
         print(json.dumps(result, sort_keys=True))
     except (ReleaseError, OSError, ValueError, KeyError, TypeError) as exc:
-        print(f"release_failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        message = f"release_failed: {type(exc).__name__}: {exc}"
+        if isinstance(exc, ReleaseIdentityError):
+            message += "; recovery: verify remote identities against the original build receipt and exact tag"
+        print(message, file=sys.stderr)
         return 1
     return 0
 

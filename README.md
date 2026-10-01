@@ -268,6 +268,7 @@ The pinned development baseline is Python 3.12.13; CI also checks Python 3.13.14
 ```bash
 uv sync --frozen
 just check
+just check-package
 uv build
 ```
 
@@ -277,11 +278,22 @@ The public CLI contract is recorded in `tool_cli_contract.json`.
 The committed lockfile uses public PyPI and is checked against that index explicitly;
 local mirror settings must not change the lockfile committed by contributors.
 
+`just check-package` builds a disposable wheel, installs it without dependencies or index
+access into a fresh virtual environment, and runs all five public commands from outside
+the checkout. It checks installed versions and entry points, help, evidence collection
+and targeted reads, private artifact modes, safe argument errors, and unchanged target
+repository bytes and modes. Its synthetic repository, state and environment are removed
+on completion. `TMPDIR`, if set, must be outside the source checkout. Both CI providers
+run this gate on all three supported Python minors. To check an existing wheel, use
+`just check-package --wheel /absolute/path/to/package.whl --expected-version X.Y.Z`.
+
 GitHub is the only release-package build and PyPI publishing authority. An annotated
 `vX.Y.Z` tag must match both package version declarations. The README current-stable declaration and `snapshot-runner==X.Y.Z` install pins must match that same version; `scripts/release.py` rejects mismatches during release preparation. Historical changelog entries are not part of that check. The build job runs `just check`
 before building a wheel and sdist; a separate job uses OIDC Trusted Publishing after
 approval in the `pypi` environment. Gitea uses the same quality gate and records the
 identical public tag and Release without building or uploading a second package.
+The build step tests its original wheel before writing the build receipt and allowing
+upload; acceptance uses that exact wheel and does not rebuild it.
 
 For environments that permit direct public reads but share an exhausted proxy quota,
 set the Gitea Actions repository variable `RELEASE_PUBLIC_API_DIRECT=true`. The record
@@ -296,6 +308,18 @@ workflow with that tag. These routes
 do not rebuild or upload packages. If an upload was interrupted, rerun the original
 failed publish job so it reuses the original Actions artifact and selects only missing
 files. Never move a published tag or upload replacement files.
+
+Release HTTP failures report a controlled category and recovery action without echoing
+URLs, credentials, response bodies or network exception details. An observed 401 reports
+authorization failure; 407 reports proxy authorization; 429, or a 403 with a zero
+`x-ratelimit-remaining` or valid numeric `retry-after`, reports a rate-limit window.
+A bare 403 reports an unknown forbidden cause, not an assumed rate limit. Typed network
+errors distinguish timeout, DNS, TLS, connection failure, and interrupted or invalid HTTP
+responses; an unclassified reason stays unknown. HTTP requests are not automatically
+replayed. Identity conflicts use
+`ReleaseIdentityError` and require comparing the original receipt and exact tag with live
+remote identities before recovery. These diagnostics do not change the explicit proxy
+option or the existing release-recovery workflows.
 
 When release-control code needs repair before a first upload, dispatch `publish-pypi`
 from `master` with the existing tag, exact annotated tag object, and exact source commit.

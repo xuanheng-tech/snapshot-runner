@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import io
 import json
 import os
+import socket
+import ssl
 import subprocess
 import tarfile
 import zipfile
+from email.message import Message
 from pathlib import Path
 
 import pytest
@@ -27,6 +31,164 @@ RELEASE = {
     "control_ref": "refs/heads/master",
     "build_run_id": "123",
 }
+
+
+@pytest.mark.parametrize(
+    ("status", "header_values", "category"),
+    [
+        (401, {}, "HTTP_UNAUTHORIZED"),
+        (403, {}, "HTTP_FORBIDDEN_UNKNOWN"),
+        (403, {"X-RateLimit-Remaining": "0"}, "HTTP_RATE_LIMITED"),
+        (403, {"X-RateLimit-Remaining": "1"}, "HTTP_FORBIDDEN_UNKNOWN"),
+        (403, {"Retry-After": "12"}, "HTTP_RATE_LIMITED"),
+        (403, {"Retry-After": "SYNTHETIC_RELEASE_MARKER"}, "HTTP_FORBIDDEN_UNKNOWN"),
+        (403, {"X-RateLimit-Remaining": "SYNTHETIC_RELEASE_MARKER"}, "HTTP_FORBIDDEN_UNKNOWN"),
+        (407, {}, "HTTP_PROXY_AUTH_REQUIRED"),
+        (409, {}, "HTTP_STATE_CONFLICT"),
+        (412, {}, "HTTP_STATE_CONFLICT"),
+        (429, {}, "HTTP_RATE_LIMITED"),
+        (502, {}, "HTTP_SERVER_ERROR"),
+        (503, {}, "HTTP_SERVER_ERROR"),
+        (422, {}, "HTTP_REQUEST_REJECTED"),
+    ],
+)
+def test_http_failure_uses_evidence_and_safe_recovery_without_replay(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    status: int,
+    header_values: dict[str, str],
+    category: str,
+) -> None:
+    marker = "SYNTHETIC_RELEASE_MARKER"
+    url = f"https://{marker}@example.invalid/{marker}"
+    headers = Message()
+    for name, value in {**header_values, "Set-Cookie": marker}.items():
+        headers[name] = value
+    body = io.BytesIO(marker.encode())
+    failure = r.urllib.error.HTTPError(url, status, marker, headers, body)
+    calls = []
+
+    def open_request(request, **kwargs):
+        calls.append((request.get_method(), kwargs["timeout"]))
+        raise failure
+
+    monkeypatch.setattr(r.urllib.request, "urlopen", open_request)
+    monkeypatch.setattr(r.time, "sleep", lambda _: pytest.fail("HTTP errors must not replay"))
+    with pytest.raises(r.ReleaseError) as raised:
+        r.request(url, token=marker)
+    message = str(raised.value)
+    assert message.startswith(category + ":")
+    assert f"status {status}" in message and "recovery:" in message
+    assert marker not in message and "example.invalid" not in message
+    assert calls == [("GET", 30)]
+    assert body.tell() == 0
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_only_get_404_is_missing_evidence(monkeypatch: pytest.MonkeyPatch, method: str) -> None:
+    def open_request(*_args, **_kwargs):
+        raise r.urllib.error.HTTPError("https://example.invalid", 404, "fixture", None, None)
+
+    monkeypatch.setattr(r.urllib.request, "urlopen", open_request)
+    if method == "GET":
+        assert r.request("https://example.invalid", method=method) is None
+    else:
+        with pytest.raises(r.ReleaseError, match="HTTP_REQUEST_REJECTED.*status 404"):
+            r.request("https://example.invalid", method=method)
+
+
+@pytest.mark.parametrize(
+    ("failure", "category"),
+    [
+        (r.urllib.error.URLError(TimeoutError("SYNTHETIC_RELEASE_MARKER")), "NETWORK_TIMEOUT"),
+        (TimeoutError("SYNTHETIC_RELEASE_MARKER"), "NETWORK_TIMEOUT"),
+        (
+            r.urllib.error.URLError(socket.gaierror(-2, "SYNTHETIC_RELEASE_MARKER")),
+            "NETWORK_DNS_FAILED",
+        ),
+        (
+            r.urllib.error.URLError(ssl.SSLCertVerificationError(1, "SYNTHETIC_RELEASE_MARKER")),
+            "NETWORK_TLS_VERIFICATION_FAILED",
+        ),
+        (ssl.SSLError(1, "SYNTHETIC_RELEASE_MARKER"), "NETWORK_TLS_FAILED"),
+        (
+            r.urllib.error.URLError(ConnectionRefusedError("SYNTHETIC_RELEASE_MARKER")),
+            "NETWORK_CONNECTION_FAILED",
+        ),
+        (ConnectionResetError("SYNTHETIC_RELEASE_MARKER"), "NETWORK_CONNECTION_FAILED"),
+        (OSError(errno.ENETUNREACH, "SYNTHETIC_RELEASE_MARKER"), "NETWORK_CONNECTION_FAILED"),
+        (r.urllib.error.URLError("SYNTHETIC_RELEASE_MARKER"), "NETWORK_CAUSE_UNKNOWN"),
+        (OSError(errno.EIO, "SYNTHETIC_RELEASE_MARKER"), "NETWORK_CAUSE_UNKNOWN"),
+        (r.http.client.IncompleteRead(b"SYNTHETIC_RELEASE_MARKER"), "NETWORK_RESPONSE_INCOMPLETE"),
+        (r.http.client.BadStatusLine("SYNTHETIC_RELEASE_MARKER"), "NETWORK_HTTP_PROTOCOL_FAILED"),
+    ],
+)
+def test_network_failure_uses_typed_evidence_without_private_details_or_replay(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: OSError | r.http.client.HTTPException,
+    category: str,
+) -> None:
+    calls = []
+
+    def open_request(*_args, **_kwargs):
+        calls.append("request")
+        raise failure
+
+    monkeypatch.setattr(r.urllib.request, "urlopen", open_request)
+    monkeypatch.setattr(r.time, "sleep", lambda _: pytest.fail("network errors must not replay"))
+    with pytest.raises(r.ReleaseError) as raised:
+        r.request("https://example.invalid/SYNTHETIC_RELEASE_MARKER")
+    assert str(raised.value).startswith(category + ":")
+    assert "recovery:" in str(raised.value)
+    assert "SYNTHETIC_RELEASE_MARKER" not in str(raised.value)
+    assert calls == ["request"]
+    assert capsys.readouterr() == ("", "")
+
+
+def test_invalid_http_configuration_withholds_private_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def open_request(*_args, **_kwargs):
+        raise ValueError("SYNTHETIC_RELEASE_MARKER")
+
+    monkeypatch.setattr(r.urllib.request, "urlopen", open_request)
+    with pytest.raises(r.ReleaseError) as raised:
+        r.request("https://example.invalid/SYNTHETIC_RELEASE_MARKER")
+    assert str(raised.value).startswith("HTTP_REQUEST_INVALID:")
+    assert "SYNTHETIC_RELEASE_MARKER" not in str(raised.value)
+
+
+def test_response_read_failure_has_the_same_safe_network_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class InterruptedBody(io.BytesIO):
+        def read(self, _limit: int) -> bytes:
+            raise r.http.client.IncompleteRead(b"SYNTHETIC_RELEASE_MARKER")
+
+    monkeypatch.setattr(r.urllib.request, "urlopen", lambda *_, **__: InterruptedBody())
+    with pytest.raises(r.ReleaseError) as raised:
+        r.request("https://example.invalid")
+    assert str(raised.value).startswith("NETWORK_RESPONSE_INCOMPLETE:")
+    assert "SYNTHETIC_RELEASE_MARKER" not in str(raised.value)
+
+
+def test_identity_failure_has_its_own_recovery_entry_before_mutation(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def conflict(*_args):
+        raise r.ReleaseIdentityError("GitHub annotated tag object identity conflict")
+
+    monkeypatch.setattr(r, "public_identity", conflict)
+    monkeypatch.setattr(
+        r, "command", lambda *_: pytest.fail("must not mutate on identity conflict")
+    )
+    assert r.main(["gate", TAG]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("release_failed: ReleaseIdentityError:")
+    assert "original build receipt and exact tag" in captured.err
 
 
 @pytest.mark.parametrize(
@@ -282,7 +444,7 @@ def test_lightweight_tag_is_not_a_formal_release(repository: Path) -> None:
 @pytest.mark.parametrize("kind,object_id", [("commit", SHA), ("tag", "d" * 40)])
 def test_public_tag_object_conflict_fails_even_at_same_commit(monkeypatch, kind, object_id) -> None:
     monkeypatch.setattr(r, "api", lambda *_, **__: {"object": {"type": kind, "sha": object_id}})
-    with pytest.raises(r.ReleaseError, match="tag object identity conflict"):
+    with pytest.raises(r.ReleaseIdentityError, match="tag object identity conflict"):
         r.github_tag(TAG, RELEASE["tag_object"])
 
 
@@ -294,7 +456,7 @@ def test_gitea_tag_object_conflict_blocks_record_creation(monkeypatch) -> None:
 
     monkeypatch.setattr(r, "api", api)
     monkeypatch.setattr(r, "command", lambda *_: "d" * 40 + "\trefs/tags/" + TAG)
-    with pytest.raises(r.ReleaseError, match="tag object identity conflict"):
+    with pytest.raises(r.ReleaseIdentityError, match="tag object identity conflict"):
         r.release_record(
             RELEASE, {}, "gitea", "https://example.invalid/api/v1", "org/repo", apply=True
         )
@@ -619,6 +781,88 @@ def test_previous_artifact_blocks_a_second_build(repository: Path, monkeypatch) 
     with pytest.raises(r.ReleaseError, match="resume its publish job"):
         r.build(release)
     assert calls == [("just", "check")]
+
+
+@pytest.mark.parametrize("acceptance_failed", [False, True])
+def test_original_wheel_acceptance_gates_receipt_and_upload_outputs(
+    repository: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    acceptance_failed: bool,
+) -> None:
+    release = r.identity(TAG)
+    dist, receipt, output = (tmp_path / name for name in ("dist", "receipt.json", "outputs"))
+    calls = []
+    original = r.command
+
+    def command(*args):
+        if args[0] == "git":
+            return original(*args)
+        calls.append(args)
+        if args[:4] == ("uv", "run", "--frozen", "python") and acceptance_failed:
+            raise r.ReleaseError("original wheel acceptance failed")
+        return ""
+
+    hashes = {name: "e" * 64 for name in r.filenames(release["version"])}
+
+    def artifact_hashes(*_args):
+        assert not acceptance_failed, "receipt hashes must follow successful acceptance"
+        return hashes
+
+    monkeypatch.setattr(r, "command", command)
+    monkeypatch.setattr(r, "public_identity", lambda *_: dict(release))
+    monkeypatch.setattr(
+        r,
+        "control_identity",
+        lambda: {key: RELEASE[key] for key in ("control_commit", "control_ref", "build_run_id")},
+    )
+    monkeypatch.setattr(r, "github_tag", lambda *_: release["commit"])
+    monkeypatch.setattr(r, "pypi_files", lambda *_: None)
+    monkeypatch.setattr(r, "api", lambda *_, **__: {"total_count": 0})
+    monkeypatch.setattr(r, "artifact_hashes", artifact_hashes)
+    monkeypatch.delenv("RELEASE_NOTES", raising=False)
+    monkeypatch.delenv("PUBLIC_GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    result = r.main(
+        [
+            "build",
+            TAG,
+            "--expected-sha",
+            release["commit"],
+            "--dist",
+            str(dist),
+            "--receipt",
+            str(receipt),
+        ]
+    )
+    assert calls == [
+        ("just", "check"),
+        ("uv", "build", "--out-dir", str(dist)),
+        (
+            "uv",
+            "run",
+            "--frozen",
+            "python",
+            str(ROOT / "scripts/check_package.py"),
+            "--wheel",
+            str(dist / "snapshot_runner-1.2.3-py3-none-any.whl"),
+            "--expected-version",
+            "1.2.3",
+        ),
+    ]
+    captured = capsys.readouterr()
+    if acceptance_failed:
+        assert result == 1 and captured.out == ""
+        assert "original wheel acceptance failed" in captured.err
+        assert not receipt.exists() and not output.exists()
+    else:
+        assert result == 0 and captured.err == ""
+        recorded = json.loads(receipt.read_text())
+        assert recorded["package_source_commit"] == release["commit"]
+        assert recorded["release_control_commit"] == RELEASE["control_commit"]
+        assert recorded["files"] == hashes
+        assert "built=true" in output.read_text()
 
 
 @pytest.mark.parametrize("conflict", [None, "control", "source", "workflow", "ref", "unknown"])

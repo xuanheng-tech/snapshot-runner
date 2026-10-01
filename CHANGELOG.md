@@ -5,6 +5,14 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+- Development: check installed wheels in isolated environments outside the source checkout
+  on Python 3.12, 3.13 and 3.14 in both CI providers. Exercise all public commands and
+  evidence reads, and verify that target repository bytes and modes remain unchanged.
+- Release control: test the original built wheel before creating its source-bound receipt
+  or allowing upload. Classify HTTP and typed network failures with safe recovery guidance;
+  a bare 403 remains an unknown forbidden cause. Verified identity conflicts have a
+  separate error type and original-receipt recovery guidance.
+
 ## 2.5.1 - 2026-10-01
 
 - Fixed: each collection command's help lists only its supported flags. `branch-review`
