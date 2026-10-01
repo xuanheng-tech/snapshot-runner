@@ -278,22 +278,32 @@ The public CLI contract is recorded in `tool_cli_contract.json`.
 The committed lockfile uses public PyPI and is checked against that index explicitly;
 local mirror settings must not change the lockfile committed by contributors.
 
-`just check-package` builds a disposable wheel, installs it without dependencies or index
-access into a fresh virtual environment, and runs all five public commands from outside
-the checkout. It checks installed versions and entry points, help, evidence collection
-and targeted reads, private artifact modes, safe argument errors, and unchanged target
-repository bytes and modes. Its synthetic repository, state and environment are removed
-on completion. `TMPDIR`, if set, must be outside the source checkout. Both CI providers
-run this gate on all three supported Python minors. To check an existing wheel, use
-`just check-package --wheel /absolute/path/to/package.whl --expected-version X.Y.Z`.
+`just check-package` builds a disposable wheel and sdist. It checks the source archive's
+single canonical root, regular files, required source/build/license files, and package
+identity before extracting it outside the checkout. It then builds a separate test wheel
+from that tree through isolated PEP 517, with local source overrides disabled. The sdist
+build may resolve its declared build requirements; both wheel installations use fresh
+environments without dependencies or index access.
+Both installed wheels run all five public commands from outside the checkout. The gate
+checks versions and entry points, help, evidence collection and targeted reads, private
+artifact modes, safe argument errors, and unchanged target repository bytes and modes.
+Original wheel and sdist hashes must remain unchanged. Its source tree, test wheel,
+synthetic repositories, state and environments are removed on completion. `TMPDIR`, if
+set, must be outside the source checkout. Both CI providers run this gate on all three
+supported Python minors. To check existing artifacts, use
+`just check-package --wheel /absolute/path/to/package.whl --sdist /absolute/path/to/package.tar.gz --expected-version X.Y.Z`.
+Either artifact option can be used alone to check only that input.
 
 GitHub is the only release-package build and PyPI publishing authority. An annotated
 `vX.Y.Z` tag must match both package version declarations. The README current-stable declaration and `snapshot-runner==X.Y.Z` install pins must match that same version; `scripts/release.py` rejects mismatches during release preparation. Historical changelog entries are not part of that check. The build job runs `just check`
 before building a wheel and sdist; a separate job uses OIDC Trusted Publishing after
 approval in the `pypi` environment. Gitea uses the same quality gate and records the
 identical public tag and Release without building or uploading a second package.
-The build step tests its original wheel before writing the build receipt and allowing
-upload; acceptance uses that exact wheel and does not rebuild it.
+The build step tests its original wheel and sdist before writing the build receipt and
+allowing upload. The default `uv build` already builds its wheel from the sdist; the
+explicit source-archive gate also checks layout and a separate PEP 517 build outside Git.
+The extra test wheel stays in temporary storage. Upload and receipt hashes always use
+the unchanged original artifacts.
 
 For environments that permit direct public reads but share an exhausted proxy quota,
 set the Gitea Actions repository variable `RELEASE_PUBLIC_API_DIRECT=true`. The record

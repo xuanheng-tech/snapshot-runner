@@ -5,6 +5,11 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+- Development and release control: explicitly validate and extract the original sdist
+  outside Git, check required source/build/license files and package identity, and build
+  a separate PEP 517 test wheel without local source overrides. Run the installed-command
+  and read-only acceptance checks on both wheels across all supported Python minors.
+  Acceptance preserves both original artifact hashes and gates the receipt and upload.
 - Development: check installed wheels in isolated environments outside the source checkout
   on Python 3.12, 3.13 and 3.14 in both CI providers. Exercise all public commands and
   evidence reads, and verify that target repository bytes and modes remain unchanged.

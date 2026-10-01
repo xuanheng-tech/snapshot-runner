@@ -784,7 +784,7 @@ def test_previous_artifact_blocks_a_second_build(repository: Path, monkeypatch) 
 
 
 @pytest.mark.parametrize("acceptance_failed", [False, True])
-def test_original_wheel_acceptance_gates_receipt_and_upload_outputs(
+def test_original_distribution_acceptance_gates_receipt_and_upload_outputs(
     repository: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -801,7 +801,7 @@ def test_original_wheel_acceptance_gates_receipt_and_upload_outputs(
             return original(*args)
         calls.append(args)
         if args[:4] == ("uv", "run", "--frozen", "python") and acceptance_failed:
-            raise r.ReleaseError("original wheel acceptance failed")
+            raise r.ReleaseError("original distribution acceptance failed")
         return ""
 
     hashes = {name: "e" * 64 for name in r.filenames(release["version"])}
@@ -847,6 +847,8 @@ def test_original_wheel_acceptance_gates_receipt_and_upload_outputs(
             str(ROOT / "scripts/check_package.py"),
             "--wheel",
             str(dist / "snapshot_runner-1.2.3-py3-none-any.whl"),
+            "--sdist",
+            str(dist / "snapshot_runner-1.2.3.tar.gz"),
             "--expected-version",
             "1.2.3",
         ),
@@ -854,7 +856,7 @@ def test_original_wheel_acceptance_gates_receipt_and_upload_outputs(
     captured = capsys.readouterr()
     if acceptance_failed:
         assert result == 1 and captured.out == ""
-        assert "original wheel acceptance failed" in captured.err
+        assert "original distribution acceptance failed" in captured.err
         assert not receipt.exists() and not output.exists()
     else:
         assert result == 0 and captured.err == ""

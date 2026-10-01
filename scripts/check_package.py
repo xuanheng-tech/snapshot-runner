@@ -1,4 +1,4 @@
-"""Exercise an installed wheel outside the source checkout and its virtual environment."""
+"""Exercise wheel and sdist installations outside the source checkout."""
 
 from __future__ import annotations
 
@@ -10,9 +10,11 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import tomllib
-from pathlib import Path
+from email.parser import BytesParser
+from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
 TASKS = ("repo-status", "diff-audit", "branch-review", "test-triage")
@@ -58,23 +60,139 @@ def repository_files(repo: Path) -> dict[str, tuple[int, str]]:
     }
 
 
-def check(wheel: Path | None, version: str, root: Path) -> dict[str, object]:
+def extract_sdist(sdist: Path, version: str, destination: Path) -> Path:
+    """Validate the source archive before extracting regular files into a private tree."""
+    prefix = PurePosixPath(f"snapshot_runner-{version}")
+    required = {
+        "pyproject.toml",
+        "PKG-INFO",
+        "LICENSE",
+        "README.md",
+        "snapshot_runner/__init__.py",
+        "snapshot_runner/cli.py",
+        "tool_cli_contract.json",
+    }
+    try:
+        with tarfile.open(sdist, "r:gz") as archive:
+            files = {}
+            seen = set()
+            for member in archive.getmembers():
+                path = PurePosixPath(member.name)
+                require(
+                    not path.is_absolute()
+                    and (
+                        member.name == path.as_posix()
+                        or member.isdir()
+                        and member.name.rstrip("/") == path.as_posix()
+                    )
+                    and ".." not in path.parts
+                    and "\\" not in member.name
+                    and path.is_relative_to(prefix),
+                    "sdist archive contains a non-canonical source path",
+                )
+                require(member.isfile() or member.isdir(), "sdist archive contains a special entry")
+                require(path != prefix or member.isdir(), "sdist source root is not a directory")
+                relative = path.relative_to(prefix).as_posix()
+                require(relative not in seen, "sdist archive contains a duplicate path")
+                require(".git" not in path.parts, "sdist archive contains Git metadata")
+                seen.add(relative)
+                if member.isfile():
+                    files[relative] = member
+            require(required <= files.keys(), "sdist is missing required source files")
+            require(
+                all(files[name].size > 0 for name in required),
+                "sdist contains an empty required source file",
+            )
+
+            def read(name: str) -> bytes:
+                stream = archive.extractfile(files[name])
+                if stream is None:
+                    raise PackageCheckError("sdist source file could not be read")
+                with stream:
+                    return stream.read()
+
+            metadata = BytesParser().parsebytes(read("PKG-INFO"))
+            require(
+                metadata.get_all("Name") == ["snapshot-runner"]
+                and metadata.get_all("Version") == [version],
+                "sdist package metadata mismatch",
+            )
+            project = tomllib.loads(read("pyproject.toml").decode("utf-8"))
+            project_identity = project.get("project")
+            require(
+                isinstance(project_identity, dict)
+                and project_identity.get("name") == "snapshot-runner"
+                and project_identity.get("version") == version,
+                "sdist project identity mismatch",
+            )
+            build_system = project.get("build-system")
+            require(
+                isinstance(build_system, dict)
+                and isinstance(build_system.get("build-backend"), str)
+                and bool(build_system["build-backend"].strip())
+                and isinstance(build_system.get("requires"), list)
+                and bool(build_system["requires"])
+                and all(
+                    isinstance(item, str) and item.strip() for item in build_system["requires"]
+                ),
+                "sdist build configuration is incomplete",
+            )
+            destination.mkdir(mode=0o700)
+            archive.extractall(destination, filter="data")
+    except (tarfile.TarError, tomllib.TOMLDecodeError, UnicodeError):
+        raise PackageCheckError("sdist archive or configuration could not be read") from None
+    return destination / prefix.name
+
+
+def check_sdist(sdist: Path, version: str, root: Path) -> dict[str, object]:
+    require(not root.is_relative_to(ROOT), "TMPDIR must be outside the source checkout")
+    sdist = sdist.resolve(strict=True)
+    require(
+        sdist.is_file() and sdist.name.endswith(".tar.gz"), "acceptance requires a source archive"
+    )
+    source_hash = hashlib.sha256(sdist.read_bytes()).hexdigest()
+    source = extract_sdist(sdist, version, root / "source")
+    uv = shutil.which("uv")
+    if uv is None:
+        raise PackageCheckError("uv is required for package acceptance")
+    run(
+        [
+            uv,
+            "build",
+            "--wheel",
+            "--force-pep517",
+            "--no-config",
+            "--no-sources",
+            "--out-dir",
+            str(root / "dist"),
+            "--python",
+            sys.executable,
+            str(source),
+        ],
+        cwd=root,
+        env=dict(os.environ),
+        phase="sdist wheel build",
+        timeout=180,
+    )
+    wheels = list((root / "dist").glob("*.whl"))
+    require(len(wheels) == 1, "sdist build must produce exactly one wheel")
+    installed = root / "installed"
+    installed.mkdir(mode=0o700)
+    result = check(wheels[0], version, installed)
+    require(
+        hashlib.sha256(sdist.read_bytes()).hexdigest() == source_hash,
+        "package acceptance modified the sdist",
+    )
+    result["sdist_sha256"] = source_hash
+    return result
+
+
+def check(wheel: Path, version: str, root: Path) -> dict[str, object]:
     require(not root.is_relative_to(ROOT), "TMPDIR must be outside the source checkout")
     uv = shutil.which("uv")
     if uv is None:
         raise PackageCheckError("uv is required for package acceptance")
     build_env = dict(os.environ)
-    if wheel is None:
-        run(
-            [uv, "build", "--wheel", "--out-dir", str(root / "dist"), "--python", sys.executable],
-            cwd=ROOT,
-            env=build_env,
-            phase="wheel build",
-            timeout=180,
-        )
-        wheels = list((root / "dist").glob("*.whl"))
-        require(len(wheels) == 1, "wheel build must produce exactly one wheel")
-        wheel = wheels[0]
     wheel = wheel.resolve(strict=True)
     require(wheel.is_file() and wheel.suffix == ".whl", "acceptance requires a wheel file")
     wheel_hash = hashlib.sha256(wheel.read_bytes()).hexdigest()
@@ -272,15 +390,53 @@ def check(wheel: Path | None, version: str, root: Path) -> dict[str, object]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--wheel", type=Path, help="check an existing wheel instead of building one"
+        "--wheel", type=Path, help="check an existing wheel; may be combined with --sdist"
     )
+    parser.add_argument("--sdist", type=Path, help="build and check an existing source archive")
     parser.add_argument("--expected-version", help="defaults to the source project version")
     args = parser.parse_args(argv)
     try:
         with (ROOT / "pyproject.toml").open("rb") as stream:
             version = args.expected_version or tomllib.load(stream)["project"]["version"]
         with tempfile.TemporaryDirectory(prefix="snapshot-runner-package-check-") as temporary:
-            result = check(args.wheel, version, Path(temporary).resolve())
+            root = Path(temporary).resolve()
+            require(not root.is_relative_to(ROOT), "TMPDIR must be outside the source checkout")
+            wheel, sdist = args.wheel, args.sdist
+            if wheel is None and sdist is None:
+                uv = shutil.which("uv")
+                if uv is None:
+                    raise PackageCheckError("uv is required for package acceptance")
+                run(
+                    [uv, "build", "--out-dir", str(root / "dist"), "--python", sys.executable],
+                    cwd=ROOT,
+                    env=dict(os.environ),
+                    phase="distribution build",
+                    timeout=180,
+                )
+                wheels = list((root / "dist").glob("*.whl"))
+                sdists = list((root / "dist").glob("*.tar.gz"))
+                require(
+                    len(wheels) == len(sdists) == 1, "build must produce one wheel and one sdist"
+                )
+                wheel, sdist = wheels[0], sdists[0]
+            result = {}
+            if wheel is not None:
+                installed = root / "wheel-check"
+                installed.mkdir(mode=0o700)
+                result = check(wheel, version, installed)
+            if sdist is not None:
+                source = root / "sdist-check"
+                source.mkdir(mode=0o700)
+                source_result = check_sdist(sdist, version, source)
+                if result:
+                    result["sdist"] = source_result
+                else:
+                    result = source_result
+            if wheel is not None:
+                require(
+                    hashlib.sha256(wheel.read_bytes()).hexdigest() == result["wheel_sha256"],
+                    "package acceptance modified the original wheel",
+                )
         print(json.dumps(result, sort_keys=True))
     except (PackageCheckError, OSError, ValueError, KeyError, TypeError) as exc:
         print(f"package_check_failed: {exc}", file=sys.stderr)

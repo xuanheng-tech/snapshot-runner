@@ -565,6 +565,8 @@ def build(release: dict, dist: Path = Path("dist")) -> bool:
         str(Path(__file__).resolve().with_name("check_package.py")),
         "--wheel",
         str(dist / f"{ARCHIVE}-{release['version']}-py3-none-any.whl"),
+        "--sdist",
+        str(dist / f"{ARCHIVE}-{release['version']}.tar.gz"),
         "--expected-version",
         release["version"],
     )
