@@ -9,6 +9,10 @@ just check
 uv build
 ```
 
+CI tests all three supported Python minors. To check another supported interpreter
+locally, install it with `uv python install <version>` and run
+`UV_PYTHON=<version> just check`; `.python-version` keeps the default baseline pinned.
+
 Keep changes focused and add a synthetic regression test for changed behavior. Tests
 must not use credentials, real services or the caller's Git configuration. Preserve
 the target repository's read-only boundary and the private artifact-store checks.

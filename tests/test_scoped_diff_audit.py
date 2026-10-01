@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from snapshot_runner import cli, isolation, security
+from snapshot_runner.git import GitResult, GitRunner
 
 
 def _git(repo: Path, *arguments: str) -> str:
@@ -114,11 +115,201 @@ def test_scope_clone_does_not_copy_an_unrelated_branch_history(isolated_environm
     with isolation.isolated_diff_repository(
         repo, repo.name, selected_head, ("selected.py",), "/usr/bin/git"
     ) as cloned:
-        from snapshot_runner.git import GitRunner
-
         assert GitRunner(cloned).run(("cat-file", "-e", unrelated_head)).returncode != 0
         assert _git(cloned, "rev-parse", "HEAD").strip() == selected_head
     _assert_no_task_directory(isolation.TEMP_ROOT)
+
+
+def test_scope_clone_does_not_expand_unrelated_baseline_files(
+    isolated_environment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, _state, temp_root = isolated_environment
+    (repo / "large.bin").write_bytes(b"x" * (isolation.MAX_SCOPE_FILE_BYTES + 1))
+    (repo / "link.py").symlink_to("selected.py")
+    _git(repo, "add", "--", "large.bin", "link.py")
+    _git(repo, "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "large baseline")
+    head = _git(repo, "rev-parse", "HEAD").strip()
+    (repo / "selected.py").write_text("SELECTED_CHANGE\n", encoding="utf-8")
+    source_status = _git(repo, "status", "--porcelain=v1")
+    overlay = isolation._overlay_scope
+
+    def inspect_baseline(source, destination, paths, git_executable):
+        assert [path.name for path in destination.iterdir()] == [".git"]
+        assert _git(destination, "status", "--porcelain=v1") == ""
+        overlay(source, destination, paths, git_executable)
+
+    monkeypatch.setattr(isolation, "_overlay_scope", inspect_baseline)
+    with isolation.isolated_diff_repository(
+        repo, repo.name, head, ("selected.py",), "/usr/bin/git"
+    ) as cloned:
+        assert (cloned / "selected.py").read_text(encoding="utf-8") == "SELECTED_CHANGE\n"
+        assert not (cloned / "large.bin").exists()
+        assert not (cloned / "link.py").is_symlink()
+        assert _git(cloned, "status", "--porcelain=v1") == source_status
+    assert _git(repo, "status", "--porcelain=v1") == source_status
+    _assert_no_task_directory(temp_root)
+
+
+@pytest.mark.parametrize("relative", ["[selected].py", "nested/中文 file.py", "!selected.py"])
+def test_scope_clone_preserves_literal_added_paths(isolated_environment, relative: str) -> None:
+    repo, _state, temp_root = isolated_environment
+    head = _git(repo, "rev-parse", "HEAD").strip()
+    path = repo / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("SELECTED_CHANGE\n", encoding="utf-8")
+    _git(repo, "add", "--", relative)
+    with isolation.isolated_diff_repository(
+        repo, repo.name, head, (relative,), "/usr/bin/git"
+    ) as cloned:
+        assert (cloned / relative).read_text(encoding="utf-8") == "SELECTED_CHANGE\n"
+        assert _git(cloned, "diff", "--cached", "--name-only", "-z") == relative + "\0"
+        assert _git(cloned, "diff", "--name-only") == ""
+    _assert_no_task_directory(temp_root)
+
+
+def test_scope_clone_preserves_baseline_ignore_rules(isolated_environment) -> None:
+    repo, _state, temp_root = isolated_environment
+    (repo / ".gitignore").write_text("ignored.py\n", encoding="utf-8")
+    _git(repo, "add", "--", ".gitignore")
+    _git(repo, "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "ignore baseline")
+    head = _git(repo, "rev-parse", "HEAD").strip()
+    (repo / "ignored.py").write_text("IGNORED\n", encoding="utf-8")
+    with (
+        pytest.raises(security.RunnerError, match="unchanged or ambiguous"),
+        isolation.isolated_diff_repository(repo, repo.name, head, ("ignored.py",), "/usr/bin/git"),
+    ):
+        pytest.fail("ignored path should not yield a review repository")
+    _assert_no_task_directory(temp_root)
+
+
+def test_scope_clone_supports_an_empty_committed_baseline(isolated_environment) -> None:
+    repo, _state, temp_root = isolated_environment
+    _git(repo, "rm", "--quiet", "--", "selected.py", "unrelated.py", "removed.py", "unsafe.yaml")
+    _git(repo, "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "empty baseline")
+    head = _git(repo, "rev-parse", "HEAD").strip()
+    (repo / "selected.py").write_text("SELECTED_CHANGE\n", encoding="utf-8")
+    with isolation.isolated_diff_repository(
+        repo, repo.name, head, ("selected.py",), "/usr/bin/git"
+    ) as cloned:
+        assert _git(cloned, "status", "--porcelain=v1") == "?? selected.py\n"
+    _assert_no_task_directory(temp_root)
+
+
+def test_scoped_conversion_metadata_uses_baseline_attributes_and_exact_scope(
+    isolated_environment,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo, _state, temp_root = isolated_environment
+    (repo / ".gitattributes").write_text("*.py filter=example\n", encoding="utf-8")
+    _git(repo, "add", "--", ".gitattributes")
+    _git(repo, "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "attribute baseline")
+    (repo / "selected.py").write_text("SELECTED_CHANGE\n", encoding="utf-8")
+    assert (
+        cli.main(
+            [
+                "prepare",
+                "diff-audit",
+                "--repo",
+                os.fspath(repo),
+                "--scope-path",
+                "selected.py",
+                "--summary",
+            ]
+        )
+        == 0
+    )
+    summary = json.loads(capsys.readouterr().out)
+    snapshot = json.loads(Path(summary["artifact"]).read_text(encoding="utf-8"))
+    records = snapshot["data"]["conversion_safety"]["files"]
+    assert [record["path"] for record in records] == ["selected.py"]
+    assert records[0]["disabled_types"] == ["content_filter_attribute"]
+    assert records[0]["worktree_state"] == "regular"
+    assert "unrelated.py" not in json.dumps(snapshot["data"])
+    _assert_no_task_directory(temp_root)
+
+
+@pytest.mark.parametrize("limit_offset", [-1, 0])
+def test_scope_total_copy_budget_counts_index_and_worktree(
+    isolated_environment,
+    monkeypatch: pytest.MonkeyPatch,
+    limit_offset: int,
+) -> None:
+    repo, _state, temp_root = isolated_environment
+    head = _git(repo, "rev-parse", "HEAD").strip()
+    index_bytes = (repo / "selected.py").stat().st_size
+    (repo / "selected.py").write_text("SELECTED_CHANGE\n", encoding="utf-8")
+    required = index_bytes + (repo / "selected.py").stat().st_size
+    monkeypatch.setattr(isolation, "MAX_SCOPE_TOTAL_BYTES", required + limit_offset)
+    if limit_offset == -1:
+        with (
+            pytest.raises(security.RunnerError, match="total copy limit"),
+            isolation.isolated_diff_repository(
+                repo, repo.name, head, ("selected.py",), "/usr/bin/git"
+            ),
+        ):
+            pytest.fail("over-budget scope should not yield a review repository")
+    else:
+        with isolation.isolated_diff_repository(
+            repo, repo.name, head, ("selected.py",), "/usr/bin/git"
+        ) as cloned:
+            assert _git(cloned, "status", "--porcelain=v1") == " M selected.py\n"
+    _assert_no_task_directory(temp_root)
+
+
+def test_scope_total_copy_budget_refuses_next_index_blob_before_body_capture(
+    isolated_environment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, _state, temp_root = isolated_environment
+    head = _git(repo, "rev-parse", "HEAD").strip()
+    selected_index_bytes = (repo / "selected.py").stat().st_size
+    unrelated_oid = _git(repo, "rev-parse", "HEAD:unrelated.py").strip()
+    (repo / "selected.py").write_text("SELECTED_CHANGE\n", encoding="utf-8")
+    (repo / "unrelated.py").write_text("OTHER_CHANGE\n", encoding="utf-8")
+    monkeypatch.setattr(
+        isolation,
+        "MAX_SCOPE_TOTAL_BYTES",
+        selected_index_bytes + (repo / "selected.py").stat().st_size,
+    )
+    run = GitRunner.run
+
+    def refuse_body(self, arguments, **kwargs):
+        assert arguments != ("cat-file", "blob", unrelated_oid)
+        return run(self, arguments, **kwargs)
+
+    monkeypatch.setattr(GitRunner, "run", refuse_body)
+    with (
+        pytest.raises(security.RunnerError, match="total copy limit"),
+        isolation.isolated_diff_repository(
+            repo, repo.name, head, ("selected.py", "unrelated.py"), "/usr/bin/git"
+        ),
+    ):
+        pytest.fail("over-budget scope should not yield a review repository")
+    _assert_no_task_directory(temp_root)
+
+
+def test_baseline_index_failure_cleans_temporary_clone(
+    isolated_environment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, _state, temp_root = isolated_environment
+    head = _git(repo, "rev-parse", "HEAD").strip()
+    (repo / "selected.py").write_text("SELECTED_CHANGE\n", encoding="utf-8")
+    run = GitRunner.run
+
+    def fail_baseline(self, arguments, **kwargs):
+        if "read-tree" in arguments:
+            return GitResult(b"", b"synthetic failure", 1, False, "read-tree")
+        return run(self, arguments, **kwargs)
+
+    monkeypatch.setattr(GitRunner, "run", fail_baseline)
+    with (
+        pytest.raises(security.RunnerError, match="baseline index"),
+        isolation.isolated_diff_repository(repo, repo.name, head, ("selected.py",), "/usr/bin/git"),
+    ):
+        pytest.fail("failed baseline should not yield a review repository")
+    _assert_no_task_directory(temp_root)
 
 
 def test_collection_failure_cleans_temporary_clone(

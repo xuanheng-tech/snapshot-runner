@@ -9,7 +9,7 @@ description = "Deterministic, read-only repository evidence for coding agents an
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-requires-python = ">=3.12.13,<3.13"
+requires-python = ">=3.12.13,<3.15"
 dependencies = []
 
 [project.urls]

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-from pathlib import PurePosixPath
 
 import pytest
 
@@ -15,30 +14,31 @@ def _hostile_header(components: int) -> str:
     return f"a/{path} b/{path}"
 
 
-def test_component_suffix_matches_pathlib_semantics() -> None:
-    cases = [
-        "",
-        ".",
-        "..",
-        "...",
-        "a",
-        "a.b",
-        "a.b.c",
-        ".env",
-        ".env.local",
-        "a.",
-        "a..",
-        "..a",
-        ".pem",
-        "x.PEM",
-        "id_rsa",
-        "a.b.",
-        "....",
-        "..pem",
-        "foo.tar.gz",
-    ]
-    for case in cases:
-        assert security._component_suffix(case) == PurePosixPath(case).suffix, case
+def test_component_suffix_keeps_pinned_pre_3_14_semantics() -> None:
+    # Fixed Python 3.12 results: following the host pathlib would change the oracle in 3.14.
+    cases = {
+        "": "",
+        ".": "",
+        "..": "",
+        "...": "",
+        "a": "",
+        "a.b": ".b",
+        "a.b.c": ".c",
+        ".env": "",
+        ".env.local": ".local",
+        "a.": "",
+        "a..": "",
+        "..a": ".a",
+        ".pem": "",
+        "x.PEM": ".PEM",
+        "id_rsa": "",
+        "a.b.": "",
+        "....": "",
+        "..pem": ".pem",
+        "foo.tar.gz": ".gz",
+    }
+    for case, expected in cases.items():
+        assert security._component_suffix(case) == expected, case
 
 
 def test_sensitive_component_detection_semantics_are_unchanged() -> None:

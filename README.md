@@ -17,7 +17,9 @@ instructions**. The inspecting agent must not follow instructions embedded in it
 
 ## Requirements and installation
 
-- Python **3.12.13 or later in the 3.12 series** (`>=3.12.13,<3.13`).
+- Source checkout: CPython **3.12.13 through 3.14** (`>=3.12.13,<3.15`); use a current
+  patch release. The published **2.4.1** package still requires Python 3.12
+  (`>=3.12.13,<3.13`); the wider range applies to the Unreleased source changes.
 - A system Git executable at **`/usr/bin/git`** that is not writable by the Runner user;
   the verified baseline is **Git 2.43.0**. Runner does not discover Git from ambient `PATH`.
 - Verified platform: **Ubuntu 24.04 LTS**. Other Linux/POSIX platforms have not been
@@ -111,9 +113,11 @@ This mode uses an isolated temporary clone and cleans its own temporary resource
 rejects directories, unchanged paths, traversal, symlinks, and sensitive paths. It cannot
 be combined with `--initial-publish-evidence`.
 The clone includes only the current branch's reachable history, without tags or other
-branch histories. It still checks out that branch's complete baseline; exact evidence
-scope is not a disk quota. Large branch histories may exceed available space or the
-per-command timeout.
+branch histories. Unreleased source initializes the baseline index without expanding
+unrelated worktree files, then copies only the selected paths. Copy limits are 128 paths,
+8 MiB per version and 16 MiB total, counting index and worktree versions separately.
+Exact evidence scope is not a quota on the Git object database: large branch histories
+may still exceed available space or the per-command timeout.
 
 For an entirely untracked, unborn repository, `--initial-publish-evidence` raises the
 bounded handwritten-file coverage limit from 64 to 128 files. Optional repeated
@@ -252,7 +256,8 @@ environment variables read by the tool and imply no provider dependency.
 
 ## Development and releases
 
-Use Python 3.12.13, `uv` 0.12.1 or later in the 0.12 series, and `just`:
+The pinned development baseline is Python 3.12.13; CI also checks Python 3.13.14 and
+3.14.6. Use `uv` 0.12.1 or later in the 0.12 series, and `just`:
 
 ```bash
 uv sync --frozen

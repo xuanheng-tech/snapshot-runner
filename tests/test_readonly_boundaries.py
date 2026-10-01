@@ -7,7 +7,6 @@ import inspect
 import json
 import math
 import os
-import platform
 import re
 import shutil
 import signal
@@ -246,7 +245,7 @@ def prepared_snapshot(
 
 
 def test_python_environment_and_project_modules_are_isolated() -> None:
-    assert platform.python_version() == "3.12.13"
+    assert (3, 12, 13) <= sys.version_info[:3] < (3, 15, 0)
     assert PROJECT_ROOT in RESOLVED_TEST_PATHS
     assert all(RUNNER_MODULE_LOCATIONS.values())
     assert all(

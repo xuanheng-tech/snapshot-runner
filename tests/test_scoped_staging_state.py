@@ -132,6 +132,25 @@ def test_scoped_audit_reports_staged_and_unstaged_diffs_separately(
     assert data["status_short"].startswith("MM ")
 
 
+def test_scoped_audit_preserves_staged_deletion_with_recreated_worktree(
+    staging_repository: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (staging_repository / "staged_delete.py").write_text("RECREATED\n", encoding="utf-8")
+    before = _git(staging_repository, "status", "--porcelain=v1", "--", "staged_delete.py")
+    summary = _summary(staging_repository, "staged_delete.py", capsys)
+    result = summary["result"]
+    assert isinstance(result, dict)
+    assert (result["staged"], result["unstaged"], result["untracked"]) == (1, 0, 1)
+    snapshot = json.loads(Path(str(summary["artifact"])).read_text(encoding="utf-8"))
+    assert "deleted file mode" in snapshot["data"]["staged_diff"]
+    assert "RECREATED" not in snapshot["data"]["staged_diff"]
+    assert snapshot["data"]["file_context"] == [
+        {"path": "staged_delete.py", "content": "RECREATED\n"}
+    ]
+    assert _git(staging_repository, "status", "--porcelain=v1", "--", "staged_delete.py") == before
+
+
 def test_scoped_audit_preserves_staged_executable_mode(
     staging_repository: Path,
     capsys: pytest.CaptureFixture[str],

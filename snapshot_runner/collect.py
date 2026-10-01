@@ -3462,7 +3462,17 @@ def collect_diff_audit(
     git = GitRunner(repo_root, git_executable, conversion_policy=conversion_policy)
     staged_paths, unstaged_paths, untracked_paths = _workspace_changed_paths(git, builder)
     _refuse_yaml_paths([*staged_paths, *unstaged_paths, *untracked_paths])
-    tracked_paths = _changed_paths(git, builder, ("ls-files", "--cached", "-z", "--"))
+    tracked_paths = _changed_paths(
+        git,
+        builder,
+        (
+            "ls-files",
+            "--cached",
+            "-z",
+            "--",
+            *(f":(top,literal){path}" for path in review_scope),
+        ),
+    )
     if generated_trees and not initial_publish_evidence:
         raise RunnerError(
             SNAPSHOT_COLLECTION_FAILED,

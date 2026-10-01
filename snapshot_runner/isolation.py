@@ -18,6 +18,7 @@ from .security import SNAPSHOT_COLLECTION_FAILED, RunnerError, is_sensitive_repo
 MAX_SCOPE_PATHS = 128
 MAX_SCOPE_PATH_BYTES = 32 * 1024
 MAX_SCOPE_FILE_BYTES = 8 * 1024 * 1024
+MAX_SCOPE_TOTAL_BYTES = 16 * 1024 * 1024
 REVIEW_SCOPE_MODE = "isolated-clone"
 TEMP_ROOT = Path("/tmp") / f"snapshot-runner-{os.getuid()}"
 
@@ -160,7 +161,12 @@ def _open_directory(path: Path) -> int:
     return os.open(path, flags)
 
 
-def _read_source_file(repo_root: Path, relative: str) -> _FileEvidence | None:
+def _read_source_file(
+    repo_root: Path,
+    relative: str,
+    *,
+    budget: int = MAX_SCOPE_FILE_BYTES,
+) -> _FileEvidence | None:
     parts = PurePosixPath(relative).parts
     try:
         directory_descriptor = _open_directory(repo_root)
@@ -199,6 +205,9 @@ def _read_source_file(repo_root: Path, relative: str) -> _FileEvidence | None:
             raise _fail("source scope path must be a regular non-symlink file or a deletion")
         if before.st_size > MAX_SCOPE_FILE_BYTES:
             raise _fail("source scope file exceeds its hard copy limit")
+        if before.st_size > budget:
+            raise _fail("source scope exceeds its total copy limit")
+        maximum = min(MAX_SCOPE_FILE_BYTES, budget)
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
             descriptor = os.open(parts[-1], flags, dir_fd=directory_descriptor)
@@ -213,12 +222,12 @@ def _read_source_file(repo_root: Path, relative: str) -> _FileEvidence | None:
         byte_size = 0
         try:
             while True:
-                chunk = os.read(descriptor, min(64 * 1024, MAX_SCOPE_FILE_BYTES + 1 - byte_size))
+                chunk = os.read(descriptor, min(64 * 1024, maximum + 1 - byte_size))
                 if not chunk:
                     break
                 byte_size += len(chunk)
-                if byte_size > MAX_SCOPE_FILE_BYTES:
-                    raise _fail("source scope file exceeds its hard copy limit")
+                if byte_size > maximum:
+                    raise _fail("source scope file exceeds its remaining copy limit")
                 chunks.append(chunk)
                 digest.update(chunk)
             after = os.fstat(descriptor)
@@ -355,15 +364,13 @@ def _materialize_destination_file(
 def _delete_destination_file(repo_root: Path, relative: str) -> None:
     directory_descriptor = _destination_parent_descriptor(repo_root, relative, create=False)
     if directory_descriptor is None:
-        raise _fail("deleted scope path is not present in the temporary clone baseline")
+        return
     name = PurePosixPath(relative).name
     try:
         try:
             metadata = os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
-        except FileNotFoundError as exc:
-            raise _fail(
-                "deleted scope path is not present in the temporary clone baseline"
-            ) from exc
+        except FileNotFoundError:
+            return
         except OSError as exc:
             raise _fail("deleted scope path could not be inspected") from exc
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
@@ -435,6 +442,8 @@ def _clone_repository(
             "--no-hardlinks",
             "--no-tags",
             "--single-branch",
+            "--no-checkout",
+            "--template=",
             os.fspath(source),
             os.fspath(destination),
         )
@@ -443,12 +452,37 @@ def _clone_repository(
         raise _fail("temporary review clone failed")
     if _git_head(destination, git_executable) != expected_head:
         raise _fail("temporary review clone HEAD does not match the source")
+    # Seed the complete baseline index without expanding any unrelated worktree file.
+    # The overlay replaces selected index entries, clearing their skip-worktree bits.
+    sparse_path = destination / ".git" / "info" / "sparse-checkout"
+    try:
+        sparse_path.parent.mkdir(mode=0o700)
+        descriptor = os.open(sparse_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="ascii") as stream:
+            stream.write("!/*\n")
+    except OSError as exc:
+        raise _fail("temporary review baseline could not be initialized") from exc
+    baseline = GitRunner(destination, git_executable).run(
+        (
+            "-c",
+            "core.sparseCheckout=true",
+            "-c",
+            "core.sparseCheckoutCone=false",
+            "read-tree",
+            "-mu",
+            expected_head,
+        )
+    )
+    if baseline.returncode != 0 or baseline.truncated or baseline.stderr:
+        raise _fail("temporary review baseline index could not be initialized")
 
 
 def _read_source_index_entry(
     repo: Path,
     relative: str,
     git_executable: str,
+    *,
+    budget: int = MAX_SCOPE_FILE_BYTES,
 ) -> _IndexEvidence | None:
     """Read the exact stage-0 index entry for one scope path, or None when unstaged."""
 
@@ -490,7 +524,9 @@ def _read_source_index_entry(
     byte_size = int(size_text)
     if byte_size > MAX_SCOPE_FILE_BYTES:
         raise _fail("source scope index blob exceeds its hard copy limit")
-    blob = runner.run(("cat-file", "blob", oid), maximum=MAX_SCOPE_FILE_BYTES + 1)
+    if byte_size > budget:
+        raise _fail("source scope exceeds its total copy limit")
+    blob = runner.run(("cat-file", "blob", oid), maximum=byte_size + 1)
     if blob.returncode != 0 or blob.truncated or blob.stderr or len(blob.stdout) != byte_size:
         raise _fail("source scope index blob could not be read")
     return _IndexEvidence(mode, oid, blob.stdout)
@@ -505,10 +541,10 @@ def _apply_index_state(
     """Reproduce the source index state for one scope path inside the clone."""
 
     runner = GitRunner(destination, git_executable)
+    removal = runner.run(("update-index", "--force-remove", "--", relative))
+    if removal.returncode != 0 or removal.truncated or removal.stderr:
+        raise _fail("temporary clone scope index entry could not be removed")
     if entry is None:
-        removal = runner.run(("update-index", "--force-remove", "--", relative))
-        if removal.returncode != 0 or removal.truncated or removal.stderr:
-            raise _fail("temporary clone scope index entry could not be removed")
         return
     _materialize_destination_file(
         destination, relative, entry.content, executable=entry.mode == "100755"
@@ -541,19 +577,32 @@ def _overlay_scope(
     git_executable: str,
 ) -> None:
     evidence: dict[str, _ScopeEvidence] = {}
+    remaining = MAX_SCOPE_TOTAL_BYTES
     for relative in paths:
-        source_evidence = _ScopeEvidence(
-            _read_source_index_entry(source, relative, git_executable),
-            _read_source_file(source, relative),
-        )
+        index = _read_source_index_entry(source, relative, git_executable, budget=remaining)
+        if index is not None:
+            remaining -= len(index.content)
+        worktree = _read_source_file(source, relative, budget=remaining)
+        if worktree is not None:
+            remaining -= worktree.byte_size
+        source_evidence = _ScopeEvidence(index, worktree)
         evidence[relative] = source_evidence
         _apply_index_state(destination, relative, source_evidence.index, git_executable)
         _apply_worktree_state(destination, relative, source_evidence.worktree)
         _require_exact_change(destination, relative, git_executable)
     for relative, expected in evidence.items():
         observed = _ScopeEvidence(
-            _read_source_index_entry(source, relative, git_executable),
-            _read_source_file(source, relative),
+            _read_source_index_entry(
+                source,
+                relative,
+                git_executable,
+                budget=len(expected.index.content) if expected.index is not None else 0,
+            ),
+            _read_source_file(
+                source,
+                relative,
+                budget=expected.worktree.byte_size if expected.worktree is not None else 0,
+            ),
         )
         if observed != expected:
             raise _fail("source scope changed while the temporary review clone was prepared")

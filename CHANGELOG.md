@@ -5,6 +5,11 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+- Changed: scoped review clones initialize the baseline index without expanding unrelated
+  worktree files. Selected index and worktree copies share a 16 MiB quota, and conversion
+  metadata stays inside the exact review scope; baseline attribute and ignore rules remain active.
+- Compatibility: source installation accepts CPython 3.13 and 3.14 as well as the existing
+  3.12 baseline. GitHub and Gitea quality jobs check all three supported minors.
 - Fixed: workspace diff batches and recursive splits enforce the shared JSON-encoded content
   budget before retaining more evidence; staged content is charged before unstaged capture.
 - Fixed: Git status and diff output use stable formats regardless of repository display settings.

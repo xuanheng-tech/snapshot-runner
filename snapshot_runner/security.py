@@ -787,10 +787,11 @@ def _redact_credentials(text: str, counts: Counter[str]) -> str:
 
 
 def _component_suffix(component: str) -> str:
-    """Return ``PurePosixPath(component).suffix`` without building a path object.
+    """Use the pre-3.14 POSIX suffix semantics pinned by existing sanitizer eras.
 
     This is a hot path: diff header classification calls it once per path component
     per candidate, so constructing a ``PurePosixPath`` here dominated large-path runs.
+    Unlike Python 3.14's pathlib, a trailing dot is not a suffix here.
     """
     name = "" if component == "." else component
     index = name.rfind(".")
