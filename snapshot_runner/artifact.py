@@ -33,6 +33,7 @@ from .security import (
     era_rules,
     sanitize_json_value,
     unified_diff_path_changes,
+    verified_bounded_diff_paths,
 )
 from .security import (
     paths_overlap as _paths_overlap,
@@ -282,33 +283,9 @@ def _serialize_snapshot_meta(
 def _build_preview_summary(snapshot_id: str, envelope: dict[str, object]) -> str:
     data = envelope["data"]
     assert isinstance(data, dict)
-    status = data.get("status_short")
-    status_lines = status.splitlines() if isinstance(status, str) else None
-    if status_lines is None:
-        status_counts: tuple[object, ...] = ("n/a",) * 4
-    else:
-        status_counts = (
-            sum(line[:2] not in {"??", "!!"} for line in status_lines),
-            sum(line.startswith("??") for line in status_lines),
-            sum(line[0] not in {" ", "?", "!"} for line in status_lines),
-            sum(line[1] not in {" ", "?", "!"} for line in status_lines),
-        )
-
-    diffs = [data[key] for key in ("staged_diff", "unstaged_diff", "diff") if key in data]
-    diff_lines = [line for diff in diffs for line in diff.splitlines()]
-    diff_counts: tuple[object, ...] = (
-        tuple(
-            sum(line.startswith(prefix) and not line.startswith(prefix * 3) for line in diff_lines)
-            for prefix in "+-"
-        )
-        if diffs
-        else ("n/a", "n/a")
-    )
-    changed_files = (
-        len(status_lines)
-        if status_lines is not None
-        else (sum(line.startswith("diff --git ") for line in diff_lines) if diffs else "n/a")
-    )
+    status_counts = _summary_status_counts(data)
+    diff_counts = _summary_diff_counts(data)
+    changed_files = status_counts.get("changed_files", diff_counts.get("diff_files", "n/a"))
     branch = data.get("current_branch", data.get("target_ref"))
     if not isinstance(branch, str) or not branch or "\n" in branch or "\r" in branch:
         branch = "n/a"
@@ -338,9 +315,12 @@ def _build_preview_summary(snapshot_id: str, envelope: dict[str, object]) -> str
         f"git: branch={branch} head={head}\n"
         f"{operation_line}"
         "changes: "
-        f"tracked_modified={status_counts[0]} untracked={status_counts[1]} "
-        f"staged={status_counts[2]} unstaged={status_counts[3]} changed_files={changed_files}\n"
-        f"diff: additions={diff_counts[0]} deletions={diff_counts[1]}\n"
+        f"tracked_modified={status_counts.get('tracked_modified', 'n/a')} "
+        f"untracked={status_counts.get('untracked', 'n/a')} "
+        f"staged={status_counts.get('staged', 'n/a')} "
+        f"unstaged={status_counts.get('unstaged', 'n/a')} changed_files={changed_files}\n"
+        f"diff: additions={diff_counts.get('additions', 'n/a')} "
+        f"deletions={diff_counts.get('deletions', 'n/a')}\n"
         f"{scope_line}"
         f"completeness: evidence_gaps={len(envelope['evidence_gaps'])} "
         f"truncated={'yes' if envelope['truncated'] else 'no'} "
@@ -353,13 +333,14 @@ def _summary_status_counts(data: dict[str, object]) -> dict[str, int]:
     status = data.get("status_short")
     if not isinstance(status, str):
         return {}
-    lines = status.splitlines()
+    # A bounded Git capture may end halfway through a status record.
+    lines = [line for line in status.splitlines() if len(line) >= 3 and line[2] == " "]
     return {
         "changed_files": len(lines),
         "tracked_modified": sum(line[:2] not in {"??", "!!"} for line in lines),
         "untracked": sum(line.startswith("??") for line in lines),
-        "staged": sum(bool(line) and line[0] not in {" ", "?", "!"} for line in lines),
-        "unstaged": sum(len(line) > 1 and line[1] not in {" ", "?", "!"} for line in lines),
+        "staged": sum(line[0] not in {" ", "?", "!"} for line in lines),
+        "unstaged": sum(line[1] not in {" ", "?", "!"} for line in lines),
     }
 
 
@@ -371,12 +352,20 @@ def _summary_diff_counts(data: dict[str, object]) -> dict[str, int]:
     ]
     if not diffs:
         return {}
-    lines = [line for diff in diffs for line in diff.splitlines()]
-    return {
-        "diff_files": sum(line.startswith("diff --git ") for line in lines),
-        "additions": sum(line.startswith("+") and not line.startswith("+++ ") for line in lines),
-        "deletions": sum(line.startswith("-") and not line.startswith("--- ") for line in lines),
-    }
+    counts = {"diff_files": 0, "additions": 0, "deletions": 0}
+    for diff in diffs:
+        in_hunk = False
+        for line in diff.splitlines():
+            if line.startswith("diff --git "):
+                counts["diff_files"] += 1
+                in_hunk = False
+            elif line.startswith("@@ "):
+                in_hunk = True
+            elif in_hunk and line.startswith("+"):
+                counts["additions"] += 1
+            elif in_hunk and line.startswith("-"):
+                counts["deletions"] += 1
+    return counts
 
 
 def _bounded_summary_text(value: object) -> object:
@@ -934,11 +923,12 @@ def _sanitize_validate_snapshot(
     expected_scan_manifest: ScanModeManifest | None = None,
     verify_live_diff_text: bool = True,
     verifier: ArtifactVerifier | None = None,
+    verified_paths: frozenset[str] = frozenset(),
 ) -> dict[str, object]:
     verifier = resolve_verifier(verifier)
     # Everything below re-derives the artifact's bytes, so every rule it consults must be the one
     # the artifact's era was written under, not the one this release happens to publish with.
-    with era_rules(verifier.rules):
+    with era_rules(verifier.rules), verified_bounded_diff_paths(verified_paths):
         envelope = _validate_snapshot_envelope(payload, verifier)
         try:
             derived_snapshot_manifest = _snapshot_data_scan_manifest(envelope, verifier)

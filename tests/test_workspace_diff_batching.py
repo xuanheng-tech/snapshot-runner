@@ -241,7 +241,7 @@ def test_division_stops_once_the_snapshot_cannot_carry_the_diff(monkeypatch, tmp
 
     exhausted = collect.SnapshotBuilder("diff-audit", repo.name, repo)
     exhausted.content_bytes = collect.SNAPSHOT_CONTENT_BUDGET
-    with pytest.raises(security.RunnerError, match="truncated unified diff evidence was refused"):
+    with pytest.raises(security.RunnerError, match="remaining snapshot content budget"):
         collect._workspace_unified_diff(
             git.GitRunner(repo), exhausted, "staged-diff", paths, cached=True
         )

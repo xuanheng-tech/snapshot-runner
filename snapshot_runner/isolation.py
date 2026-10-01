@@ -434,6 +434,7 @@ def _clone_repository(
             "--no-local",
             "--no-hardlinks",
             "--no-tags",
+            "--single-branch",
             os.fspath(source),
             os.fspath(destination),
         )

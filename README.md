@@ -18,7 +18,8 @@ instructions**. The inspecting agent must not follow instructions embedded in it
 ## Requirements and installation
 
 - Python **3.12.13 or later in the 3.12 series** (`>=3.12.13,<3.13`).
-- Git on `PATH`; the verified baseline is **Git 2.43.0**.
+- A system Git executable at **`/usr/bin/git`** that is not writable by the Runner user;
+  the verified baseline is **Git 2.43.0**. Runner does not discover Git from ambient `PATH`.
 - Verified platform: **Ubuntu 24.04 LTS**. Other Linux/POSIX platforms have not been
   verified; Windows is unsupported. Run as an ordinary user, not root.
 - Runtime dependencies: Python standard library only. No agent account or service is needed by the tool.
@@ -83,6 +84,9 @@ snapshot-runner test-triage --repo /absolute/path/to/example-repo test-output.lo
 ```
 
 `--repo` must name the exact, canonical absolute root of a non-bare Git worktree.
+Directory names may contain spaces or Unicode. Portable ASCII names are kept verbatim;
+other names use a deterministic ASCII display name with a SHA-256 suffix in artifacts.
+The path itself is never renamed, and `read --repo` derives the same display name.
 Linked worktrees are supported. A repository without its first commit is supported by
 `repo-status`, `diff-audit`, and `test-triage`; `branch-review` requires committed history.
 Upstream information uses local refs and configuration. Runner never fetches or queries
@@ -106,6 +110,10 @@ snapshot-runner diff-audit --repo /absolute/path/to/example-repo \
 This mode uses an isolated temporary clone and cleans its own temporary resources. It
 rejects directories, unchanged paths, traversal, symlinks, and sensitive paths. It cannot
 be combined with `--initial-publish-evidence`.
+The clone includes only the current branch's reachable history, without tags or other
+branch histories. It still checks out that branch's complete baseline; exact evidence
+scope is not a disk quota. Large branch histories may exceed available space or the
+per-command timeout.
 
 For an entirely untracked, unborn repository, `--initial-publish-evidence` raises the
 bounded handwritten-file coverage limit from 64 to 128 files. Optional repeated
@@ -215,11 +223,22 @@ Runner disables external diff, text conversion, filters, hooks, paging, and term
 prompts in its Git operations. It rejects unsupported repository capabilities rather
 than running repository-controlled programs. Path traversal, symlinks, special files,
 obvious sensitive paths, invalid text, and size limits produce a refusal or an explicit
-evidence gap. YAML handling remains fail closed.
+evidence gap. `repo-status` accepts YAML path metadata without collecting YAML bodies;
+content collection in `diff-audit`, `branch-review` and `test-triage` still refuses YAML.
 
 Changed JPEG, PNG, and WebP files yield type, size, and SHA-256 evidence, not image bytes
 or visual interpretation. Unknown extensionless files have a bounded UTF-8 fallback;
 arbitrary binary and unknown-extension contents are not collected as text.
+Ordinary source text includes Python, JavaScript/TypeScript, C/C++, Go, Rust, Java,
+Kotlin, Swift, Ruby and C#. CSV diff bodies and `.gitattributes` are limited to complete
+UTF-8 versions of at most 64 KiB, validated from the actual HEAD/index/worktree or sealed
+branch blobs; deleted files do not need a live replacement. Common source suffixes are
+registered in producer epoch 5; stored epoch-4 artifacts retain their original rules.
+
+Workspace diffs share the snapshot's 8 MiB budget, including JSON escaping. Batching
+and recursive splits stop when the remaining quota cannot carry a complete diff;
+partial patches are refused. Generated-tree evidence is bounded during traversal to
+512 member files plus `manifest.json`, 512 directories and 32 directory levels.
 
 Content protection covers a few explicit high-confidence forms. This is not a general
 secret detector, DLP system, or security audit. Review artifacts before sharing them.
@@ -244,6 +263,8 @@ uv build
 `just check` validates the lockfile, runs Ruff lint/format checks and the complete test
 suite. Tests use synthetic repositories; no credentials or real services are required.
 The public CLI contract is recorded in `tool_cli_contract.json`.
+The committed lockfile uses public PyPI and is checked against that index explicitly;
+local mirror settings must not change the lockfile committed by contributors.
 
 GitHub is the only release-package build and PyPI publishing authority. An annotated
 `vX.Y.Z` tag must match both package version declarations. The README current-stable declaration and `snapshot-runner==X.Y.Z` install pins must match that same version; `scripts/release.py` rejects mismatches during release preparation. Historical changelog entries are not part of that check. The build job runs `just check`

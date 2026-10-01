@@ -656,7 +656,7 @@ def test_prepare_publishes_content_addressed_private_snapshot(
     meta = json.loads((artifact.directory / "meta.json").read_bytes())
     assert envelope["schema_version"] == collect.SNAPSHOT_SCHEMA_VERSION == 2
     assert meta["schema_version"] == artifact_module.SNAPSHOT_META_SCHEMA_VERSION == 2
-    assert envelope["producer_security_epoch"] == collect.PRODUCER_SECURITY_EPOCH == 4
+    assert envelope["producer_security_epoch"] == collect.PRODUCER_SECURITY_EPOCH == 5
     assert meta["producer_security_epoch"] == collect.PRODUCER_SECURITY_EPOCH
     preview = (artifact.directory / "preview.txt").read_text(encoding="utf-8")
     assert preview.startswith("MANUAL REVIEW REQUIRED BEFORE UPLOAD\n")
@@ -1118,7 +1118,7 @@ def test_targeted_evidence_attribution_uses_the_era_that_wrote_the_artifact(
     )
 
     assert observed, "attribution must consult the sanitizer rules at all"
-    assert all(rules is security.SCAN_RULES_V2 for rules in observed)
+    assert all(rules is artifact.verifier.rules for rules in observed)
     assert security.SCAN_RULES_V2 is not security.CURRENT_RULES
     assert output["found"] is True
     assert output["evidence"]["diff_sections"]["unstaged_diff"]["matched"] == 1
@@ -2184,7 +2184,7 @@ def test_prepare_only_public_entry_completes_all_four_prepare_workflows(
     meta = json.loads((directory / "meta.json").read_bytes())
     assert envelope["task"] == task
     assert envelope["schema_version"] == collect.SNAPSHOT_SCHEMA_VERSION == 2
-    assert envelope["producer_security_epoch"] == collect.PRODUCER_SECURITY_EPOCH == 4
+    assert envelope["producer_security_epoch"] == collect.PRODUCER_SECURITY_EPOCH == 5
     assert meta["schema_version"] == artifact_module.SNAPSHOT_META_SCHEMA_VERSION == 2
     assert meta["producer_security_epoch"] == collect.PRODUCER_SECURITY_EPOCH
     assert meta["snapshot_sha256"] == hashlib.sha256(snapshot_bytes).hexdigest()
@@ -4231,7 +4231,7 @@ def _initialize_yaml_test_repo(repo: Path) -> None:
 
 
 @pytest.mark.parametrize("change_kind", ["staged", "unstaged", "untracked"])
-@pytest.mark.parametrize("task", ["repo-status", "diff-audit"])
+@pytest.mark.parametrize("task", ["diff-audit"])
 def test_prepare_refuses_yaml_workspace_changes_before_diff_or_file_content_read(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

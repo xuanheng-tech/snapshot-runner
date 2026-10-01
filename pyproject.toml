@@ -28,6 +28,8 @@ module-root = ""
 source-include = [
     "tool_cli_contract.json",
     "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
     "justfile",
     ".python-version",
     "uv.lock",

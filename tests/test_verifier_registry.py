@@ -29,7 +29,7 @@ CURRENT_KEY = verifiers.CURRENT_VERIFIER.version_key
 UNREGISTERED_EPOCH = max(key[1] for key in REGISTRY_KEYS) + 1
 _MINIMAL_ENVELOPE = {
     "schema_version": 2,
-    "producer_security_epoch": 4,
+    "producer_security_epoch": CURRENT_KEY[1],
     "task": "test-triage",
     "repository": "target-repo",
     "data": {"log": "", "log_display_name": "pytest.log"},
@@ -69,7 +69,7 @@ def _write_snapshot_directory(store: Path, meta: dict[str, object]) -> Path:
 def _meta(**overrides: object) -> dict[str, object]:
     meta: dict[str, object] = {
         "schema_version": 2,
-        "producer_security_epoch": 4,
+        "producer_security_epoch": CURRENT_KEY[1],
         "snapshot_id": SNAPSHOT_ID,
         "task": "repo-status",
         "repository": "target-repo",
@@ -212,7 +212,11 @@ def test_the_envelope_validator_follows_the_row_it_is_given(
         format=verifiers.CURRENT_VERIFIER.format,
     )
     assert legacy.scan_classifier_version == 2
-    superseded = {**_MINIMAL_ENVELOPE, "security_notice": legacy.security_notice}
+    superseded = {
+        **_MINIMAL_ENVELOPE,
+        "producer_security_epoch": 4,
+        "security_notice": legacy.security_notice,
+    }
 
     assert artifact_module._validate_snapshot_envelope(superseded, legacy) is superseded
     with pytest.raises(artifact_module.RunnerError):

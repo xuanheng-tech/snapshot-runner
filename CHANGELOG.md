@@ -5,6 +5,21 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+- Fixed: workspace diff batches and recursive splits enforce the shared JSON-encoded content
+  budget before retaining more evidence; staged content is charged before unstaged capture.
+- Fixed: Git status and diff output use stable formats regardless of repository display settings.
+  Preview and JSON summary share status/diff counters; truncated records cannot crash preview,
+  and hunk lines starting with `+++` or `---` are counted as content.
+- Fixed: bounded CSV and `.gitattributes` diffs validate the actual Git/worktree versions,
+  including deletions and sealed branch reviews; unsafe versions remain refused.
+- Changed: repository-status accepts YAML metadata without reading bodies. Generated-tree
+  traversal stops at file, directory and depth quotas, including ignored entries.
+  Scoped review clones omit unrelated branch histories.
+- Added: Unicode and space-containing repository directories use portable artifact display
+  names. Common C/C++, Go, Rust, Java, Kotlin, Swift, Ruby and C# source suffixes are text
+  under producer epoch 5; epoch-4 artifacts keep their frozen sanitizer rules and format.
+- Development: regenerate the lockfile against public PyPI and check that index explicitly.
+  Document the fixed system-Git boundary and contributor/security reporting workflow.
 - Internal: share the existing Runner source root between CLI and store validation, and keep
   read-only boundary guards scanning every package module, including absolute `from` imports.
 - Release control: identify the failing Git operation without echoing arguments or diagnostics.

@@ -97,16 +97,13 @@ def _validate_target_repository_path(raw: str) -> tuple[Path, str, Path]:
             "target repository",
             git_module.TARGET_REPOSITORY_INVALID_ERROR,
         )
-        if not security.is_safe_repository_name(canonical.name):
-            raise RunnerError(
-                security.REPOSITORY_VALIDATION_FAILED, git_module.TARGET_REPOSITORY_INVALID_ERROR
-            )
+        display_name = security.repository_display_name(canonical.name)
         runner_repository = _validated_runner_worktree_path()
         if security.paths_overlap(canonical, runner_repository):
             raise RunnerError(
                 security.REPOSITORY_VALIDATION_FAILED, git_module.TARGET_REPOSITORY_INVALID_ERROR
             )
-        return canonical, canonical.name, runner_repository
+        return canonical, display_name, runner_repository
     except (OSError, RuntimeError, ValueError) as exc:
         raise RunnerError(
             security.REPOSITORY_VALIDATION_FAILED, git_module.TARGET_REPOSITORY_INVALID_ERROR
@@ -298,6 +295,7 @@ def _prepare_snapshot_guarded(
             snapshot.as_envelope(),
             target.path,
             expected_scan_manifest=snapshot.scan_manifest,
+            verified_paths=snapshot.verified_diff_paths,
         )
         snapshot_bytes = artifact_module._serialize_snapshot(envelope)
         snapshot_id = hashlib.sha256(snapshot_bytes).hexdigest()

@@ -100,6 +100,27 @@ def test_scoped_diff_audit_cleans_clone_and_keeps_only_exact_paths(
     assert "review_scope: mode=isolated-clone exact_paths=2" in preview
 
 
+def test_scope_clone_does_not_copy_an_unrelated_branch_history(isolated_environment) -> None:
+    repo, _state, _temp_root = isolated_environment
+    _git(repo, "checkout", "--quiet", "-b", "unrelated")
+    (repo / "branch-only.py").write_text("UNRELATED_BRANCH_BODY\n", encoding="utf-8")
+    _git(repo, "add", "branch-only.py")
+    _git(repo, "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "other branch")
+    unrelated_head = _git(repo, "rev-parse", "HEAD").strip()
+    _git(repo, "checkout", "--quiet", "main")
+    selected_head = _git(repo, "rev-parse", "HEAD").strip()
+    (repo / "selected.py").write_text("SELECTED_CHANGE\n", encoding="utf-8")
+
+    with isolation.isolated_diff_repository(
+        repo, repo.name, selected_head, ("selected.py",), "/usr/bin/git"
+    ) as cloned:
+        from snapshot_runner.git import GitRunner
+
+        assert GitRunner(cloned).run(("cat-file", "-e", unrelated_head)).returncode != 0
+        assert _git(cloned, "rev-parse", "HEAD").strip() == selected_head
+    _assert_no_task_directory(isolation.TEMP_ROOT)
+
+
 def test_collection_failure_cleans_temporary_clone(
     isolated_environment: tuple[Path, Path, Path],
     capsys: pytest.CaptureFixture[str],

@@ -11,7 +11,7 @@ import re
 import stat
 from collections import Counter
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -126,6 +126,20 @@ ALLOWED_TEXT_SUFFIXES = frozenset(
         ".jsx",
         ".lock",
         ".mako",
+        ".c",
+        ".h",
+        ".cc",
+        ".cpp",
+        ".cxx",
+        ".hpp",
+        ".go",
+        ".rs",
+        ".java",
+        ".kt",
+        ".kts",
+        ".swift",
+        ".rb",
+        ".cs",
     }
 )
 ALLOWED_EXTENSIONLESS_NAMES = frozenset(
@@ -371,6 +385,32 @@ SCAN_RULES_V2 = SanitizerRules(
     ),
 )
 
+# Epoch 5 adds ordinary source-text suffixes without changing the classifier algorithm.
+# Derive only from the frozen era, never from live constants: historical values stay fixed.
+SCAN_RULES_EPOCH_5 = replace(
+    SCAN_RULES_V2,
+    allowed_text_suffixes=SCAN_RULES_V2.allowed_text_suffixes
+    | frozenset(
+        {
+            ".c",
+            ".h",
+            ".cc",
+            ".cpp",
+            ".cxx",
+            ".hpp",
+            ".go",
+            ".rs",
+            ".java",
+            ".kt",
+            ".kts",
+            ".swift",
+            ".rb",
+            ".cs",
+        }
+    ),
+)
+
+
 #: The rules this release writes new artifacts under, read from the live constants, so a rule edit
 #: above shows up here immediately and no longer moves any registered era. A read with no installed
 #: era uses these, which is the safe direction: newest rules, never an older set by accident.
@@ -422,6 +462,23 @@ CURRENT_RULES = SanitizerRules(
 _ACTIVE_RULES: contextvars.ContextVar[SanitizerRules | None] = contextvars.ContextVar(
     "_ACTIVE_RULES", default=None
 )
+_VERIFIED_BOUNDED_DIFF_PATHS: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVar(
+    "_VERIFIED_BOUNDED_DIFF_PATHS", default=frozenset()
+)
+
+
+@contextlib.contextmanager
+def verified_bounded_diff_paths(paths: frozenset[str]) -> Iterator[None]:
+    """Bind paths whose actual Git/worktree versions the trusted collector validated.
+
+    This authority is in memory only; no artifact or repository metadata can request it.
+    Standalone scans still require a safe live file and historical reads use their era.
+    """
+    token = _VERIFIED_BOUNDED_DIFF_PATHS.set(paths)
+    try:
+        yield
+    finally:
+        _VERIFIED_BOUNDED_DIFF_PATHS.reset(token)
 
 
 def active_rules() -> SanitizerRules:
@@ -516,6 +573,29 @@ def is_safe_repository_name(value: object) -> bool:
         and value not in {".", ".."}
         and REPOSITORY_NAME_RE.fullmatch(value) is not None
     )
+
+
+def repository_display_name(name: str) -> str:
+    """Keep portable artifact names without restricting the actual directory name."""
+    if is_safe_repository_name(name):
+        return name
+    if (
+        not name
+        or name in {".", ".."}
+        or any(
+            ord(character) < 32 or ord(character) == 127 or character in {"/", "\ufeff"}
+            for character in name
+        )
+    ):
+        raise RunnerError(REPOSITORY_VALIDATION_FAILED, "target repository path is invalid")
+    try:
+        digest = hashlib.sha256(name.encode("utf-8", errors="strict")).hexdigest()[:16]
+    except UnicodeEncodeError as exc:
+        raise RunnerError(
+            REPOSITORY_VALIDATION_FAILED, "target repository path is invalid"
+        ) from exc
+    prefix = re.sub(r"[^A-Za-z0-9._-]", "_", name).strip("._-")[:64] or "repository"
+    return f"{prefix}-{digest}"
 
 
 def canonical_owned_directory(path: Path, description: str, error: str) -> Path:
@@ -926,7 +1006,16 @@ def _classify_diff_scan_mode(
             return ScanMode.PLAIN_TEXT
         mode = ScanMode.PLAIN_TEXT
         requires_validation = True
-    if mode is ScanMode.PLAIN_TEXT and requires_validation and verify_live_diff_text:
+    if (
+        mode is ScanMode.PLAIN_TEXT
+        and requires_validation
+        and verify_live_diff_text
+        and not (
+            _is_explicit_bounded_diff_text_path(relative_path)
+            and not is_sensitive_repository_path(relative_path)
+            and relative_path in _VERIFIED_BOUNDED_DIFF_PATHS.get()
+        )
+    ):
         _validate_bounded_diff_text(relative_path, repository_root)
     return mode
 

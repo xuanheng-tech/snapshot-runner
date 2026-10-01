@@ -29,7 +29,7 @@ analyze-snapshot *args:
     exec uv run --no-cache --frozen --no-sync python -m snapshot_runner.cli analyze "$@"
 
 check:
-    uv lock --check --no-config
+    uv lock --check --no-config --default-index https://pypi.org/simple
     uv run --frozen ruff check snapshot_runner scripts tests
     uv run --frozen ruff format --check snapshot_runner scripts tests
     uv run --frozen pytest
