@@ -327,8 +327,8 @@ def test_release_version_and_console_script_metadata_are_consistent(
 ) -> None:
     metadata = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
-    assert snapshot_runner.__version__ == "2.4.1"
     assert metadata["project"]["version"] == snapshot_runner.__version__
+    version_output = f"snapshot-runner {metadata['project']['version']}\n"
     # The single public console script is the provider-neutral primary command.
     assert metadata["project"]["scripts"] == {
         "snapshot-runner": "snapshot_runner.cli:snapshot_runner_main"
@@ -336,15 +336,15 @@ def test_release_version_and_console_script_metadata_are_consistent(
     assert metadata["tool"]["uv"]["build-backend"]["module-name"] == "snapshot_runner"
     assert metadata["build-system"]["build-backend"] == "uv_build"
     assert runner.main(["--version"]) == 0
-    assert capsys.readouterr().out == "snapshot-runner 2.4.1\n"
+    assert capsys.readouterr().out == version_output
     assert runner.main(["--version"], neutral=True) == 0
-    assert capsys.readouterr().out == "snapshot-runner 2.4.1\n"
+    assert capsys.readouterr().out == version_output
 
     for task in PUBLIC_SUBCOMMANDS:
         with pytest.raises(SystemExit) as exit_info:
             runner.main([task, "--version"], neutral=True)
         assert exit_info.value.code == 0
-        assert capsys.readouterr().out == "snapshot-runner 2.4.1\n"
+        assert capsys.readouterr().out == version_output
 
 
 def test_provider_named_alias_entrypoints_are_gone() -> None:

@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from snapshot_runner import __version__
+
 ROOT = Path(__file__).resolve().parents[1]
 TASKS = ("repo-status", "diff-audit", "branch-review", "test-triage")
 # 2.0.0 removed the provider-named alias entrypoints.
@@ -155,7 +157,7 @@ def test_primary_help_version_and_neutral_guidance(workspace) -> None:
     assert "untrusted evidence" in help_result.stdout
     assert "Codex" not in help_result.stdout
     version = invoke("snapshot_runner_main", ["--version"], env)
-    assert version.returncode == 0 and version.stdout == "snapshot-runner 2.4.1\n"
+    assert version.returncode == 0 and version.stdout == f"snapshot-runner {__version__}\n"
     prepared = invoke("snapshot_runner_main", ["repo-status", "--repo", str(repo)], env)
     assert prepared.returncode == 0
     assert "coding agent or automation" in prepared.stdout

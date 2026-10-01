@@ -5,6 +5,8 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.5.0 - 2026-10-01
+
 - Changed: scoped review clones initialize the baseline index without expanding unrelated
   worktree files. Selected index and worktree copies share a 16 MiB quota, and conversion
   metadata stays inside the exact review scope; baseline attribute and ignore rules remain active.
@@ -25,6 +27,7 @@ public source baseline; it was not tagged or published to PyPI.
   under producer epoch 5; epoch-4 artifacts keep their frozen sanitizer rules and format.
 - Development: regenerate the lockfile against public PyPI and check that index explicitly.
   Document the fixed system-Git boundary and contributor/security reporting workflow.
+  Check CLI and summary versions against package metadata instead of pinned version literals.
 - Internal: share the existing Runner source root between CLI and store validation, and keep
   read-only boundary guards scanning every package module, including absolute `from` imports.
 - Release control: identify the failing Git operation without echoing arguments or diagnostics.
