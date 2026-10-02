@@ -33,6 +33,46 @@ RELEASE = {
 }
 
 
+def _http_wire(body: bytes, headers: bytes = b"", status: str = "200 OK") -> bytes:
+    return f"HTTP/1.1 {status}\r\n".encode() + headers + b"\r\n" + body
+
+
+@pytest.fixture
+def memory_http(monkeypatch: pytest.MonkeyPatch):
+    """Use the real HTTP parser and reader without opening a network connection."""
+
+    class MemorySocket:
+        def __init__(self, raw: bytes):
+            self.stream = io.BytesIO(raw)
+
+        def makefile(self, mode: str):
+            assert mode == "rb"
+            return self.stream
+
+    def serve(*messages: bytes):
+        pending = iter(messages)
+        calls = []
+        responses = []
+        streams = []
+        slept = []
+
+        def open_request(operation, **kwargs):
+            assert all(stream.closed for stream in streams)
+            calls.append((operation.get_method(), operation.data, kwargs["timeout"]))
+            source = MemorySocket(next(pending))
+            response = r.http.client.HTTPResponse(source, method=operation.get_method())
+            response.begin()
+            streams.append(source.stream)
+            responses.append(response)
+            return response
+
+        monkeypatch.setattr(r.urllib.request, "urlopen", open_request)
+        monkeypatch.setattr(r.time, "sleep", slept.append)
+        return calls, responses, streams, slept
+
+    return serve
+
+
 @pytest.mark.parametrize(
     ("status", "header_values", "category"),
     [
@@ -362,6 +402,185 @@ def test_get_retry_preserves_the_response_size_limit(
     assert len(responses) == (2 if interrupted else 1)
     assert all(response.closed for response in responses)
     assert slept == ([2] if interrupted else [])
+
+
+@pytest.mark.parametrize("json_api", [False, True])
+def test_content_length_premature_eof_recovers_without_accepting_partial_json(
+    memory_http, json_api: bool
+) -> None:
+    partial = b'{"partial":true}'
+    complete = b'{"complete":true}'
+    headers = f"Content-Length: {len(complete)}\r\n".encode()
+    calls, responses, streams, slept = memory_http(
+        _http_wire(partial, headers), _http_wire(complete, headers)
+    )
+    url = "https://example.invalid"
+    if json_api:
+        assert r.api(url) == {"complete": True}
+    else:
+        assert r.request(url) == complete
+    assert calls == [("GET", None, 30)] * 2
+    assert slept == [2]
+    assert all(response.isclosed() for response in responses)
+    assert all(stream.closed for stream in streams)
+
+
+def test_content_length_premature_eof_exhaustion_has_safe_bounded_diagnostics(
+    memory_http, capsys: pytest.CaptureFixture[str]
+) -> None:
+    partial = b"SYNTHETIC_RELEASE_MARKER"
+    message = _http_wire(partial, b"Content-Length: 200\r\n")
+    calls, responses, streams, slept = memory_http(message, message)
+    with pytest.raises(r.ReleaseError, match="^NETWORK_RESPONSE_INCOMPLETE:") as raised:
+        r.request("https://example.invalid/SYNTHETIC_RELEASE_MARKER")
+    assert "recovery:" in str(raised.value)
+    assert "SYNTHETIC_RELEASE_MARKER" not in str(raised.value)
+    assert "example.invalid" not in str(raised.value)
+    assert calls == [("GET", None, 30)] * 2
+    assert slept == [2]
+    assert all(response.isclosed() for response in responses)
+    assert all(stream.closed for stream in streams)
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize(
+    ("method", "data"), [("POST", {"fixture": True}), ("PATCH", None), ("GET", {})]
+)
+def test_content_length_premature_eof_does_not_replay_writes_or_get_with_body(
+    memory_http, method: str, data: dict | None
+) -> None:
+    calls, responses, streams, slept = memory_http(_http_wire(b"short", b"Content-Length: 20\r\n"))
+    with pytest.raises(r.ReleaseError, match="^NETWORK_RESPONSE_INCOMPLETE:"):
+        r.request("https://example.invalid", method=method, data=data)
+    assert calls == [(method, None if data is None else json.dumps(data).encode(), 30)]
+    assert slept == []
+    assert responses[0].isclosed() and streams[0].closed
+
+
+@pytest.mark.parametrize(
+    ("method", "status", "headers", "body", "expected"),
+    [
+        ("GET", "200 OK", b"Content-Length: 4\r\n", b"data", b"data"),
+        ("GET", "200 OK", b"Content-Length: 0\r\n", b"ignored", b""),
+        ("GET", "200 OK", b"", b"data", b"data"),
+        ("GET", "200 OK", b"Content-Length: invalid\r\n", b"data", b"data"),
+        ("GET", "200 OK", b"Content-Length: -1\r\n", b"data", b"data"),
+        ("HEAD", "200 OK", b"Content-Length: 200\r\n", b"", b""),
+        ("GET", "101 Switching Protocols", b"Content-Length: 200\r\n", b"", b""),
+        ("GET", "204 No Content", b"Content-Length: 200\r\n", b"", b""),
+        ("GET", "304 Not Modified", b"Content-Length: 200\r\n", b"", b""),
+        (
+            "GET",
+            "200 OK",
+            b"Transfer-Encoding: chunked\r\nContent-Length: 200\r\n",
+            b"4\r\ndata\r\n0\r\n\r\n",
+            b"data",
+        ),
+    ],
+)
+def test_http_effective_framing_keeps_existing_success_semantics(
+    memory_http, method: str, status: str, headers: bytes, body: bytes, expected: bytes
+) -> None:
+    calls, responses, streams, slept = memory_http(_http_wire(body, headers, status))
+    assert r.request("https://example.invalid", method=method) == expected
+    assert calls == [(method, None, 30)]
+    assert slept == []
+    assert responses[0].isclosed() and streams[0].closed
+
+
+def test_chunked_premature_eof_still_recovers_through_the_existing_retry(memory_http) -> None:
+    headers = b"Transfer-Encoding: chunked\r\nContent-Length: 200\r\n"
+    calls, responses, streams, slept = memory_http(
+        _http_wire(b"4\r\nda", headers), _http_wire(b"4\r\ndata\r\n0\r\n\r\n", headers)
+    )
+    assert r.request("https://example.invalid") == b"data"
+    assert calls == [("GET", None, 30)] * 2
+    assert slept == [2]
+    assert all(response.isclosed() for response in responses)
+    assert all(stream.closed for stream in streams)
+
+
+@pytest.mark.parametrize(
+    ("declared", "actual"),
+    [
+        (8 * 1024 * 1024, 8 * 1024 * 1024),
+        (8 * 1024 * 1024 + 1, 8 * 1024 * 1024 + 1),
+        (16 * 1024 * 1024, 8 * 1024 * 1024 + 1),
+    ],
+)
+def test_http_content_length_preserves_the_size_limit_before_incomplete_detection(
+    memory_http, declared: int, actual: int
+) -> None:
+    payload = b"x" * actual
+    calls, responses, streams, slept = memory_http(
+        _http_wire(payload, f"Content-Length: {declared}\r\n".encode())
+    )
+    if actual == 8 * 1024 * 1024:
+        assert r.request("https://example.invalid") == payload
+    else:
+        with pytest.raises(r.ReleaseError, match="response exceeds 8 MiB"):
+            r.request("https://example.invalid")
+    assert calls == [("GET", None, 30)]
+    assert slept == []
+    assert responses[0].isclosed() and streams[0].closed
+
+
+@pytest.mark.parametrize("actual", [5, 8 * 1024 * 1024])
+def test_short_body_with_large_content_length_is_still_an_incomplete_response(
+    memory_http, actual: int
+) -> None:
+    message = _http_wire(b"x" * actual, b"Content-Length: 16777216\r\n")
+    calls, responses, streams, slept = memory_http(message, message)
+    with pytest.raises(r.ReleaseError, match="^NETWORK_RESPONSE_INCOMPLETE:"):
+        r.request("https://example.invalid")
+    assert calls == [("GET", None, 30)] * 2
+    assert slept == [2]
+    assert all(response.isclosed() for response in responses)
+    assert all(stream.closed for stream in streams)
+
+
+def test_complete_http_response_with_malformed_json_is_not_retried(memory_http) -> None:
+    payload = b"{invalid JSON"
+    calls, responses, streams, slept = memory_http(
+        _http_wire(payload, f"Content-Length: {len(payload)}\r\n".encode())
+    )
+    with pytest.raises(json.JSONDecodeError):
+        r.api("https://example.invalid")
+    assert calls == [("GET", None, 30)]
+    assert slept == []
+    assert responses[0].isclosed() and streams[0].closed
+
+
+@pytest.mark.parametrize("conflict", ["digest", "size"])
+def test_complete_http_artifact_conflict_stops_without_transport_retry(
+    monkeypatch: pytest.MonkeyPatch, memory_http, conflict: str
+) -> None:
+    payload = b"fixture artifact"
+    calls, responses, streams, slept = memory_http(
+        _http_wire(payload, f"Content-Length: {len(payload)}\r\n".encode())
+    )
+    item = {
+        "filename": "snapshot_runner-1.2.3-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/fixture.whl",
+        "yanked": False,
+        "digests": {"sha256": hashlib.sha256(payload).hexdigest()},
+        "size": len(payload),
+    }
+    if conflict == "digest":
+        item["digests"]["sha256"] = "f" * 64
+    else:
+        item["size"] += 1
+    monkeypatch.setattr(
+        r, "api", lambda _: {"info": {"name": r.PACKAGE, "version": "1.2.3"}, "urls": [item]}
+    )
+    monkeypatch.setattr(
+        r, "check_provenance", lambda *_: pytest.fail("must stop before provenance")
+    )
+    with pytest.raises(r.ReleaseIdentityError, match="downloaded file digest/size conflict"):
+        r.pypi_files(RELEASE, complete=False)
+    assert calls == [("GET", None, 30)]
+    assert slept == []
+    assert responses[0].isclosed() and streams[0].closed
 
 
 def test_identity_failure_has_its_own_recovery_entry_before_mutation(

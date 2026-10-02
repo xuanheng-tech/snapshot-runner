@@ -7,7 +7,7 @@ test log into local artifacts. It does not modify the inspected repository,
 automatically fix code, run tests, call a model, commit, or push. No model API is
 required. No API key is required.
 
-Current stable release: **2.5.5**.
+Current stable release: **2.5.6**.
 
 Use the same local CLI from a shell, from automation, or from any coding agent that
 permits the required local operations. Runner is vendor-neutral: it names, selects and
@@ -30,7 +30,7 @@ Install the published package from PyPI into a separate virtual environment:
 # Example using Python 3.12.13 or later in the supported 3.12 series.
 python3.12 --version
 python3.12 -m venv /absolute/path/to/runner-venv
-/absolute/path/to/runner-venv/bin/python -m pip install 'snapshot-runner==2.5.5'
+/absolute/path/to/runner-venv/bin/python -m pip install 'snapshot-runner==2.5.6'
 export PATH="/absolute/path/to/runner-venv/bin:$PATH"
 ```
 
@@ -331,7 +331,10 @@ A bare 403 reports an unknown forbidden cause, not an assumed rate limit. Typed 
 errors distinguish timeout, DNS, TLS, connection failure, and interrupted or invalid HTTP
 responses; an unclassified reason stays unknown. Only GET requests without a body retry
 typed timeouts, connection resets or incomplete responses, with at most two total attempts
-and a two-second wait between them. Other HTTP/network failures stop immediately;
+and a two-second wait between them.
+Declared-length responses that end early are classified as incomplete even when Python's
+bounded read returns short bytes without raising. Transfer framing follows the HTTP
+library, and the response size limit remains 8 MiB. Other HTTP/network failures stop immediately;
 requests with a body or a non-GET method are never replayed. A missing document returns `None`;
 PyPI propagation polling remains limited to 12 logical reads and 11 waits, with at most
 24 HTTP attempts when each logical read first encounters a retryable transport failure.

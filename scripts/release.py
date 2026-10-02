@@ -303,6 +303,10 @@ def request(url: str, *, token: str = "", method: str = "GET", data: dict | None
             operation = urllib.request.Request(url, data=body, headers=headers, method=method)
             with urllib.request.urlopen(operation, timeout=30) as response:
                 raw = response.read(8 * 1024 * 1024 + 1)
+                # Bounded HTTPResponse reads can silently return a short declared-length body.
+                remaining = getattr(response, "length", None)
+                if len(raw) <= 8 * 1024 * 1024 and isinstance(remaining, int) and remaining > 0:
+                    raise http.client.IncompleteRead(raw, remaining)
         except urllib.error.HTTPError as exc:
             if exc.code == 404 and method == "GET":
                 return None

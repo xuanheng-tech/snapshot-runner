@@ -5,6 +5,15 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.5.6 - 2026-10-03
+
+- Release control: recognize premature EOF in declared-length HTTP responses after
+  bounded reads and reuse the existing incomplete-response classification and safe GET
+  retry. Partial responses are discarded and closed before another attempt. The 8 MiB
+  response limit, HTTP framing semantics, write-request boundary and identity checks
+  retain their existing behavior. Tests exercise real HTTPResponse parsing with
+  in-memory wire data rather than relying only on injected exceptions.
+
 ## 2.5.5 - 2026-10-02
 
 - Release control: GET requests without a body retry typed timeouts, connection resets
