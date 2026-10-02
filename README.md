@@ -266,8 +266,9 @@ environment variables read by the tool and imply no provider dependency.
 
 ## Development and releases
 
-The pinned development baseline is Python 3.12.13; CI also checks Python 3.13.14 and
-3.14.6. Use `uv` 0.12.1 or later in the 0.12 series, and `just`:
+The pinned development baseline is Python 3.12.13. GitHub CI checks Python 3.12.13,
+3.13.14 and 3.14.6; Gitea CI checks the 3.12.13 baseline in its non-root environment.
+Use `uv` 0.12.1 or later in the 0.12 series, and `just`:
 
 ```bash
 uv sync --frozen
@@ -293,8 +294,8 @@ checks versions and entry points, help, evidence collection and targeted reads, 
 artifact modes, safe argument errors, and unchanged target repository bytes and modes.
 Original wheel and sdist hashes must remain unchanged. Its source tree, test wheel,
 synthetic repositories, state and environments are removed on completion. `TMPDIR`, if
-set, must be outside the source checkout. Both CI providers run this gate on all three
-supported Python minors. To check existing artifacts, use
+set, must be outside the source checkout. GitHub runs this gate on all three supported
+Python minors; Gitea runs it on the 3.12.13 baseline. To check existing artifacts, use
 `just check-package --wheel /absolute/path/to/package.whl --sdist /absolute/path/to/package.tar.gz --expected-version X.Y.Z`.
 Either artifact option can be used alone to check only that input.
 

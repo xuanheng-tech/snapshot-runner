@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.12.13", "3.13.14", "3.14.6"]
+        python: ["3.12.13"]
     env:
       UV_PYTHON: ${{ matrix.python }}
     steps:
