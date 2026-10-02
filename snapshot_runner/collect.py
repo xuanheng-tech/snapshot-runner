@@ -1342,6 +1342,26 @@ def _is_body_refusal(gap: EvidenceGap) -> bool:
     return gap.kind == "file_refused" and gap.reason.startswith(BODY_REFUSED_REASON_PREFIX)
 
 
+def _limit_context_paths(
+    builder: SnapshotBuilder,
+    paths: list[str],
+    maximum: int,
+    *,
+    subject: str,
+    label: str,
+) -> list[str]:
+    """Preserve each channel's path order and gap vocabulary while applying its quota."""
+    selected = paths[:maximum]
+    if len(paths) > maximum:
+        builder.gap(
+            "file_count_limit",
+            subject,
+            f"{label} limited to {maximum} files",
+            len(paths) - maximum,
+        )
+    return selected
+
+
 def _append_context(
     builder: SnapshotBuilder,
     contexts: list[dict[str, object]],
@@ -1453,14 +1473,14 @@ def _add_context(
     for prepared in (*prepared_extensionless, *prepared_images):
         prepared_by_path.setdefault(prepared.path, []).append(prepared)
     local_cache: dict[tuple[str, str], _BoundedTextEvidence] = {}
-    if len(unique_paths) > max_context_files:
-        builder.gap(
-            "file_count_limit",
-            "changed-file-context",
-            f"context limited to {max_context_files} files",
-            len(unique_paths) - max_context_files,
-        )
-    for relative in unique_paths[:max_context_files]:
+    selected_paths = _limit_context_paths(
+        builder,
+        unique_paths,
+        max_context_files,
+        subject="changed-file-context",
+        label="context",
+    )
+    for relative in selected_paths:
         if is_yaml_content_path(relative):
             raise RunnerError(SNAPSHOT_COLLECTION_FAILED, YAML_CONTENT_REFUSED)
         if relative in handled_images:
@@ -1669,30 +1689,17 @@ def _add_branch_blob_context(
     contexts: list[dict[str, object]] = []
     prepared_by_path = {prepared.path: prepared for prepared in extensionless.contexts}
     prepared_by_path.update({prepared.path: prepared for prepared in images.contexts})
-    if len(target_paths) > MAX_CONTEXT_FILES:
-        builder.gap(
-            "file_count_limit",
-            "changed-file-context",
-            f"context limited to {MAX_CONTEXT_FILES} files",
-            len(target_paths) - MAX_CONTEXT_FILES,
-        )
-    for relative in target_paths[:MAX_CONTEXT_FILES]:
+    selected_paths = _limit_context_paths(
+        builder,
+        target_paths,
+        MAX_CONTEXT_FILES,
+        subject="changed-file-context",
+        label="context",
+    )
+    for relative in selected_paths:
         if is_yaml_content_path(relative):
             raise RunnerError(SNAPSHOT_COLLECTION_FAILED, YAML_CONTENT_REFUSED)
-        if relative in images.paths:
-            prepared = prepared_by_path.get(relative)
-            if prepared is not None:
-                _append_context(
-                    builder,
-                    contexts,
-                    prepared.path,
-                    prepared.content,
-                    0,
-                    source=prepared.source,
-                    executable=prepared.executable,
-                )
-            continue
-        if relative in extensionless.fallback_paths:
+        if relative in images.paths or relative in extensionless.fallback_paths:
             prepared = prepared_by_path.get(relative)
             if prepared is not None:
                 _append_context(
@@ -1957,14 +1964,13 @@ def _prepare_workspace_images(
 ) -> _PreparedImageEvidence:
     all_paths = list(dict.fromkeys([*staged_paths, *unstaged_paths, *untracked_paths]))
     image_paths = [path for path in all_paths if has_supported_raster_image_suffix(path)]
-    selected_paths = image_paths[:MAX_CONTEXT_FILES]
-    if len(image_paths) > MAX_CONTEXT_FILES:
-        builder.gap(
-            "file_count_limit",
-            "raster-image-evidence",
-            f"raster image evidence limited to {MAX_CONTEXT_FILES} files",
-            len(image_paths) - MAX_CONTEXT_FILES,
-        )
+    selected_paths = _limit_context_paths(
+        builder,
+        image_paths,
+        MAX_CONTEXT_FILES,
+        subject="raster-image-evidence",
+        label="raster image evidence",
+    )
     index_paths = [
         path for path in selected_paths if path in staged_paths or path in unstaged_paths
     ]
@@ -2053,14 +2059,13 @@ def _prepare_branch_images(
             if change.status != "D" and has_supported_raster_image_suffix(change.path)
         )
     )
-    selected_paths = target_paths[:MAX_CONTEXT_FILES]
-    if len(target_paths) > MAX_CONTEXT_FILES:
-        builder.gap(
-            "file_count_limit",
-            "raster-image-evidence",
-            f"raster image evidence limited to {MAX_CONTEXT_FILES} files",
-            len(target_paths) - MAX_CONTEXT_FILES,
-        )
+    selected_paths = _limit_context_paths(
+        builder,
+        target_paths,
+        MAX_CONTEXT_FILES,
+        subject="raster-image-evidence",
+        label="raster image evidence",
+    )
     blob_cache: dict[tuple[str, str], _BoundedTextEvidence] = {}
     contexts: list[_PreparedContext] = []
     for relative in selected_paths:
@@ -2097,14 +2102,13 @@ def _prepare_workspace_extensionless(
 ) -> _WorkspaceExtensionlessEvidence:
     all_paths = list(dict.fromkeys([*staged_paths, *unstaged_paths, *untracked_paths]))
     fallback_paths = [path for path in all_paths if _uses_extensionless_fallback(path)]
-    selected_paths = fallback_paths[:MAX_CONTEXT_FILES]
-    if len(fallback_paths) > MAX_CONTEXT_FILES:
-        builder.gap(
-            "file_count_limit",
-            "extensionless-file-evidence",
-            f"extensionless evidence limited to {MAX_CONTEXT_FILES} files",
-            len(fallback_paths) - MAX_CONTEXT_FILES,
-        )
+    selected_paths = _limit_context_paths(
+        builder,
+        fallback_paths,
+        MAX_CONTEXT_FILES,
+        subject="extensionless-file-evidence",
+        label="extensionless evidence",
+    )
     index_paths = [
         path for path in selected_paths if path in staged_paths or path in unstaged_paths
     ]
@@ -2285,14 +2289,13 @@ def _prepare_branch_extensionless(
         elif change.status in {"M", "T"}:
             requests.setdefault(change.path, []).append(("historical", merge_base_commit))
     fallback_paths = [path for path in requests if _uses_extensionless_fallback(path)]
-    selected_paths = fallback_paths[:MAX_CONTEXT_FILES]
-    if len(fallback_paths) > MAX_CONTEXT_FILES:
-        builder.gap(
-            "file_count_limit",
-            "extensionless-file-evidence",
-            f"extensionless evidence limited to {MAX_CONTEXT_FILES} files",
-            len(fallback_paths) - MAX_CONTEXT_FILES,
-        )
+    selected_paths = _limit_context_paths(
+        builder,
+        fallback_paths,
+        MAX_CONTEXT_FILES,
+        subject="extensionless-file-evidence",
+        label="extensionless evidence",
+    )
     blob_cache: dict[tuple[str, str], _BoundedTextEvidence] = {}
     accepted_diff_paths: set[str] = set()
     contexts: list[_PreparedContext] = []

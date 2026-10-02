@@ -5,6 +5,15 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.5.3 - 2026-10-02
+
+- Fixed: README contract and artifact declarations match the current producer security
+  epoch 5. Contract tests compare the documented current schema versions and epoch
+  with runtime declarations; historical epoch-4 compatibility remains unchanged.
+- Internal: share context-path count limits across ordinary text, extensionless text
+  and raster-image evidence, and combine identical prepared branch-context handling.
+  Path order, quotas, gap wording and canonical snapshot bytes remain unchanged.
+
 ## 2.5.2 - 2026-10-02
 
 - Fixed: bounded worktree and Git-blob file context preserves complete UTF-8 characters

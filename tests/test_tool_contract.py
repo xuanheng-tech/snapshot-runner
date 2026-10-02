@@ -7,10 +7,31 @@ from pathlib import Path
 
 import pytest
 
-from snapshot_runner import cli
+from snapshot_runner import artifact, cli, collect
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_COMMANDS = {"repo-status", "diff-audit", "branch-review", "test-triage", "read"}
+
+
+@pytest.mark.parametrize(
+    ("pattern", "expected"),
+    [
+        (r"Snapshot schema \*\*(\d+)\*\*", collect.SNAPSHOT_SCHEMA_VERSION),
+        (r"summary schema \*\*(\d+)\*\*", artifact.SUMMARY_SCHEMA_VERSION),
+        (r"evidence-read schema \*\*(\d+)\*\*", artifact.EVIDENCE_SCHEMA_VERSION),
+        (r"security\s+epoch \*\*(\d+)\*\*", collect.PRODUCER_SECURITY_EPOCH),
+        (
+            r"`snapshot\.json`: canonical full evidence, schema \*\*(\d+)\*\*",
+            collect.SNAPSHOT_SCHEMA_VERSION,
+        ),
+    ],
+    ids=("snapshot-schema", "summary-schema", "read-schema", "security-epoch", "artifact-schema"),
+)
+def test_readme_current_evidence_versions_match_runtime(pattern: str, expected: int) -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    declarations = re.findall(pattern, readme)
+    assert declarations, "README must declare the current evidence contract"
+    assert {int(version) for version in declarations} == {expected}
 
 
 @pytest.mark.parametrize("command", sorted(EXPECTED_COMMANDS))

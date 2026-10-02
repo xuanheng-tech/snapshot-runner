@@ -7,7 +7,7 @@ test log into local artifacts. It does not modify the inspected repository,
 automatically fix code, run tests, call a model, commit, or push. No model API is
 required. No API key is required.
 
-Current stable release: **2.5.2**.
+Current stable release: **2.5.3**.
 
 Use the same local CLI from a shell, from automation, or from any coding agent that
 permits the required local operations. Runner is vendor-neutral: it names, selects and
@@ -30,7 +30,7 @@ Install the published package from PyPI into a separate virtual environment:
 # Example using Python 3.12.13 or later in the supported 3.12 series.
 python3.12 --version
 python3.12 -m venv /absolute/path/to/runner-venv
-/absolute/path/to/runner-venv/bin/python -m pip install 'snapshot-runner==2.5.2'
+/absolute/path/to/runner-venv/bin/python -m pip install 'snapshot-runner==2.5.3'
 export PATH="/absolute/path/to/runner-venv/bin:$PATH"
 ```
 
@@ -177,7 +177,7 @@ there are no alias executables. The public CLI contract is recorded in
 `snapshot-runner <command>` form.
 
 Snapshot schema **2**, summary schema **2**, evidence-read schema **1** and security
-epoch **4** define the evidence contract. Release notes for interface changes are in
+epoch **5** define the current evidence contract. Release notes for interface changes are in
 [CHANGELOG.md](CHANGELOG.md).
 
 ## Artifacts and determinism
@@ -189,7 +189,7 @@ Runner uses the same requirements for the user's `.local/state` directory.
 A successful collection atomically publishes a directory under
 `$XDG_STATE_HOME/snapshot-runner/snapshots/<snapshot-id>/`:
 
-- `snapshot.json`: canonical full evidence, schema **2**, security epoch **4**.
+- `snapshot.json`: canonical full evidence, schema **2**, security epoch **5**.
 - `preview.txt`: short human-readable summary.
 - `meta.json`: sizes and SHA-256 hashes used to verify the artifacts.
 
