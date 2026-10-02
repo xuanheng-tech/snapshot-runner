@@ -7,7 +7,7 @@ test log into local artifacts. It does not modify the inspected repository,
 automatically fix code, run tests, call a model, commit, or push. No model API is
 required. No API key is required.
 
-Current stable release: **2.5.1**.
+Current stable release: **2.5.2**.
 
 Use the same local CLI from a shell, from automation, or from any coding agent that
 permits the required local operations. Runner is vendor-neutral: it names, selects and
@@ -30,7 +30,7 @@ Install the published package from PyPI into a separate virtual environment:
 # Example using Python 3.12.13 or later in the supported 3.12 series.
 python3.12 --version
 python3.12 -m venv /absolute/path/to/runner-venv
-/absolute/path/to/runner-venv/bin/python -m pip install 'snapshot-runner==2.5.1'
+/absolute/path/to/runner-venv/bin/python -m pip install 'snapshot-runner==2.5.2'
 export PATH="/absolute/path/to/runner-venv/bin:$PATH"
 ```
 
@@ -158,7 +158,9 @@ Oversized test logs are validated and sanitized in full before the 2 MiB head/ta
 capture, with a separate 16 MiB input-validation hard limit. Larger inputs fail closed.
 Both cuts retain only valid UTF-8; an omitted-byte count measures the sanitized middle,
 including incomplete UTF-8 characters removed at the cuts. Redaction counts include the
-full validated input, including text later omitted. Truncated Git text that cuts through
+full validated input, including text later omitted. Bounded file context from worktree
+files and sealed Git blobs also retains only complete UTF-8 characters and includes the
+incomplete character bytes in its omitted-byte count. Truncated Git text that cuts through
 a private-key boundary or a configured credential is withheld with a `git_output_refused`
 gap alongside the original output-limit gap.
 For unmerged index paths, `diff-audit` captures supported worktree context and records

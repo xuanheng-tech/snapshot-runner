@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import hashlib
 import json
 import os
@@ -645,6 +646,13 @@ def _open_repo_regular(
         os.close(directory_descriptor)
 
 
+def _decode_utf8_prefix(raw: bytes, *, truncated: bool) -> tuple[str, int]:
+    """Keep complete characters at a bounded cut; malformed retained bytes still fail."""
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
+    decoded = decoder.decode(raw, final=not truncated)
+    return decoded, len(decoder.getstate()[0])
+
+
 def _read_regular_file(
     repo_root: Path,
     relative_path: str,
@@ -692,9 +700,10 @@ def _read_regular_file(
     truncated = max(0, opened.st_size - maximum)
     raw = raw[:maximum]
     try:
-        decoded = raw.decode("utf-8", errors="strict")
+        decoded, pending_bytes = _decode_utf8_prefix(raw, truncated=bool(truncated))
     except UnicodeDecodeError:
         return None, opened.st_size, "non-UTF-8 file refused"
+    truncated += pending_bytes
     if truncated:
         cutoff_reason = _truncated_body_reason(decoded)
         if cutoff_reason is not None:
@@ -1637,9 +1646,10 @@ def _read_blob_prefix(
     if b"\0" in result.stdout:
         return None, entry.size, "binary Git blob refused"
     try:
-        decoded = result.stdout.decode("utf-8", errors="strict")
+        decoded, pending_bytes = _decode_utf8_prefix(result.stdout, truncated=bool(omitted))
     except UnicodeDecodeError:
         return None, entry.size, "non-UTF-8 Git blob refused"
+    omitted += pending_bytes
     if omitted:
         cutoff_reason = _truncated_body_reason(decoded)
         if cutoff_reason is not None:

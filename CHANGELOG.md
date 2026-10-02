@@ -5,6 +5,12 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.5.2 - 2026-10-02
+
+- Fixed: bounded worktree and Git-blob file context preserves complete UTF-8 characters
+  when a size cut lands inside a character, rather than refusing the entire valid file.
+  Omitted-byte counts include the incomplete character; malformed retained text and
+  unsafe secret boundaries remain refused.
 - Development and release control: explicitly validate and extract the original sdist
   outside Git, check required source/build/license files and package identity, and build
   a separate PEP 517 test wheel without local source overrides. Run the installed-command

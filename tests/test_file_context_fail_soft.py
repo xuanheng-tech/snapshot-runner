@@ -485,3 +485,88 @@ def test_only_body_refusals_are_shielded_from_the_cap() -> None:
     assert not any(gap in kept for gap in [*path_losses, *limits])
     assert len(kept) == cap
     assert [gap.subject for gap in kept[: cap - 3]] == [gap.subject for gap in noise]
+
+
+@pytest.mark.parametrize("task", ["diff-audit", "branch-review"])
+@pytest.mark.parametrize(
+    ("character", "cut"),
+    [
+        (character, cut)
+        for character in ("é", "中", "😀")
+        for cut in range(1, len(character.encode()))
+    ],
+)
+def test_utf8_cut_keeps_complete_characters_and_counts_every_omitted_byte(
+    repository: Path, task: str, character: str, cut: int
+) -> None:
+    header = "Unicode: 中é😀\n".encode()
+    filler = b"plain note\n" * (collect.MAX_FILE_BYTES // 11 + 1)
+    prefix = header + filler[: collect.MAX_FILE_BYTES - cut - len(header)]
+    payload = prefix + character.encode() + b" tail\n"
+    (repository / "notes.txt").write_bytes(payload)
+    if task == "branch-review":
+        _git(repository, "-c", "core.hooksPath=/dev/null", "checkout", "-b", "change")
+        _commit(repository, "add multilingual notes")
+
+    envelope = _envelope(_prepare(repository, task, "main" if task == "branch-review" else None))
+
+    contexts = [entry for entry in envelope["data"]["file_context"] if entry["path"] == "notes.txt"]
+    assert contexts, "a valid UTF-8 source must retain its complete prefix"
+    assert contexts[0]["content"] == prefix.decode()
+    limit = next(gap for gap in envelope["evidence_gaps"] if gap["kind"] == "file_limit")
+    assert limit["subject"] == "notes.txt"
+    assert limit["omitted_bytes"] == len(payload) - len(prefix)
+    assert "notes.txt" not in _refused(envelope)
+    assert (repository / "notes.txt").read_bytes() == payload
+
+
+def _read_bounded_prefix(
+    repository: Path, kind: str, payload: bytes, maximum: int
+) -> tuple[str | None, int, str | None]:
+    (repository / "notes.txt").write_bytes(payload)
+    if kind == "worktree":
+        return collect._read_regular_file(repository, "notes.txt", maximum)
+    result = subprocess.run(
+        [GIT, "-C", os.fspath(repository), "hash-object", "-w", "--no-filters", "--", "notes.txt"],
+        capture_output=True,
+        timeout=30,
+        check=True,
+    )
+    entry = collect._TreeEntry(
+        "100644", "blob", result.stdout.decode().strip(), len(payload), "notes.txt"
+    )
+    return collect._read_blob_prefix(git.GitRunner(repository), entry, maximum)
+
+
+@pytest.mark.parametrize("kind", ["worktree", "blob"])
+@pytest.mark.parametrize("invalid", [b"\xff", b"\xe4x", b"\xf0\x80\x80\x80"])
+def test_malformed_bytes_inside_a_truncated_prefix_still_refuse_the_body(
+    repository: Path, kind: str, invalid: bytes
+) -> None:
+    payload = b"start " + invalid + b" tail" * 10
+    content, omitted, reason = _read_bounded_prefix(repository, kind, payload, 32)
+    assert content is None and reason in {"non-UTF-8 file refused", "non-UTF-8 Git blob refused"}
+    assert omitted == len(payload)
+
+
+@pytest.mark.parametrize("kind", ["worktree", "blob"])
+@pytest.mark.parametrize("incomplete", [b"\xc3", b"\xe4\xb8", b"\xf0\x9f\x98"])
+def test_an_incomplete_character_at_real_eof_still_refuses_the_body(
+    repository: Path, kind: str, incomplete: bytes
+) -> None:
+    payload = b"start " + incomplete
+    content, omitted, reason = _read_bounded_prefix(repository, kind, payload, 32)
+    assert content is None and reason in {"non-UTF-8 file refused", "non-UTF-8 Git blob refused"}
+    assert omitted == len(payload)
+
+
+@pytest.mark.parametrize("kind", ["worktree", "blob"])
+def test_utf8_cut_still_checks_the_retained_secret_boundary(repository: Path, kind: str) -> None:
+    begin, _, end = PRIVATE_KEY.splitlines(keepends=True)
+    prefix = begin.encode() + b"x" * (63 - len(begin.encode()))
+    assert len(prefix) == 63
+    payload = prefix + "中".encode() + end.encode()
+    content, omitted, reason = _read_bounded_prefix(repository, kind, payload, 64)
+    assert content is None
+    assert reason == collect.TRUNCATED_BODY_REFUSAL_REASONS[security.SECRET_BOUNDARY_CUTOFF]
+    assert omitted == len(payload)
