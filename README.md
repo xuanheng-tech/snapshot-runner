@@ -7,7 +7,7 @@ test log into local artifacts. It does not modify the inspected repository,
 automatically fix code, run tests, call a model, commit, or push. No model API is
 required. No API key is required.
 
-Current stable release: **2.5.6**.
+Current stable release: **2.5.7**.
 
 Use the same local CLI from a shell, from automation, or from any coding agent that
 permits the required local operations. Runner is vendor-neutral: it names, selects and
@@ -30,7 +30,7 @@ Install the published package from PyPI into a separate virtual environment:
 # Example using Python 3.12.13 or later in the supported 3.12 series.
 python3.12 --version
 python3.12 -m venv /absolute/path/to/runner-venv
-/absolute/path/to/runner-venv/bin/python -m pip install 'snapshot-runner==2.5.6'
+/absolute/path/to/runner-venv/bin/python -m pip install 'snapshot-runner==2.5.7'
 export PATH="/absolute/path/to/runner-venv/bin:$PATH"
 ```
 
@@ -242,9 +242,11 @@ Changed JPEG, PNG, and WebP files yield type, size, and SHA-256 evidence, not im
 or visual interpretation. Unknown extensionless files have a bounded UTF-8 fallback;
 arbitrary binary and unknown-extension contents are not collected as text.
 Ordinary source text includes Python, JavaScript/TypeScript, C/C++, Go, Rust, Java,
-Kotlin, Swift, Ruby and C#. CSV diff bodies and `.gitattributes` are limited to complete
-UTF-8 versions of at most 64 KiB, validated from the actual HEAD/index/worktree or sealed
-branch blobs; deleted files do not need a live replacement. Common source suffixes are
+Kotlin, Swift, Ruby and C#. CSV versions used in `diff-audit` and `branch-review`, and
+`.gitattributes` versions, must be complete UTF-8 text of at most 64 KiB, validated from
+the actual HEAD/index/worktree or sealed branch blobs. Omitted ordinary CSV file
+context remains an explicit evidence gap; branch deletions retain metadata-only evidence.
+Deleted files do not need a live replacement. Common source suffixes are
 registered in producer epoch 5; stored epoch-4 artifacts retain their original rules.
 
 Workspace diffs share the snapshot's 8 MiB budget, including JSON escaping. Batching

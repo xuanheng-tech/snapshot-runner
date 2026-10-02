@@ -5,6 +5,15 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.5.7 - 2026-10-03
+
+- Fixed: branch-review includes bounded CSV additions, modifications and supported
+  renames in its unified diff. CSV versions are validated from the sealed merge-base
+  and target HEAD with the existing 64 KiB, UTF-8 and regular-file restrictions, so
+  dirty or missing worktree copies do not affect the evidence. Existing content
+  sanitization, ordinary CSV file-context gaps and metadata-only branch deletions
+  retain their behavior; stored artifacts keep their existing schema and security era.
+
 ## 2.5.6 - 2026-10-03
 
 - Release control: recognize premature EOF in declared-length HTTP responses after

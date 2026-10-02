@@ -3843,7 +3843,9 @@ def collect_branch_review(
                 )
             continue
         if all(
-            is_relevant_text_path(path) or path in extensionless.accepted_diff_paths
+            is_relevant_text_path(path)
+            or path in extensionless.accepted_diff_paths
+            or _uses_bounded_csv_diff(path)
             for path in paths
         ):
             diff_paths.extend(paths)

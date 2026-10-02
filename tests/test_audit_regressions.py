@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -144,6 +145,241 @@ def test_branch_attributes_diff_does_not_read_dirty_worktree(repository: Path) -
     (repository / ".gitattributes").unlink()
     snapshot = _prepare(repository, "branch-review", "base")
     assert "+*.py -text\n" in snapshot.envelope["data"]["diff"]
+
+
+@pytest.mark.parametrize("name", ["records.csv", "records.CSV"])
+@pytest.mark.parametrize("modified", [False, True], ids=("added", "modified"))
+def test_branch_csv_safe_additions_and_modifications_include_the_sealed_diff(
+    repository: Path, name: str, modified: bool, capsys: pytest.CaptureFixture[str]
+) -> None:
+    if modified:
+        (repository / name).write_text("name,value\nold,1\n", encoding="utf-8")
+        _commit(repository)
+    _git(repository, "branch", "base")
+    (repository / name).write_text("name,value\nnew,2\n", encoding="utf-8")
+    _commit(repository)
+
+    snapshot = _prepare(repository, "branch-review", "base")
+    data = snapshot.envelope["data"]
+    assert f"diff --git a/{name} b/{name}\n" in data["diff"]
+    assert "+new,2\n" in data["diff"]
+    if modified:
+        assert "-old,1\n" in data["diff"]
+    assert data["file_context"] == []
+    assert any(
+        gap["kind"] == "file_refused" and gap["subject"] == name
+        for gap in snapshot.envelope["evidence_gaps"]
+    )
+    assert not any(
+        gap["kind"] == "diff_file_refused" and gap["subject"] == name
+        for gap in snapshot.envelope["evidence_gaps"]
+    )
+    assert (
+        artifact._load_snapshot(snapshot.snapshot_id, repository).snapshot_bytes
+        == snapshot.snapshot_bytes
+    )
+    assert (
+        cli.main(
+            ["read", snapshot.snapshot_id, "--repo", os.fspath(repository), "--path", name],
+            neutral=True,
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    read = json.loads(captured.out)
+    assert captured.err == "" and read["found"]
+    assert read["snapshot_id"] == snapshot.snapshot_id
+    assert "+new,2" in json.dumps(read["evidence"])
+
+
+@pytest.mark.parametrize(
+    ("old_name", "new_name"),
+    [("old.csv", "new.csv"), ("old.CSV", "new.CSV"), ("old.csv", "new.py"), ("old.py", "new.csv")],
+)
+def test_branch_csv_renames_keep_both_path_identities(
+    repository: Path, old_name: str, new_name: str
+) -> None:
+    (repository / old_name).write_text("name,value\nsealed,1\n", encoding="utf-8")
+    _commit(repository)
+    _git(repository, "branch", "base")
+    _git(repository, "mv", old_name, new_name)
+    _commit(repository)
+
+    snapshot = _prepare(repository, "branch-review", "base")
+    diff = snapshot.envelope["data"]["diff"]
+    assert f"rename from {old_name}\n" in diff
+    assert f"rename to {new_name}\n" in diff
+    assert "similarity index 100%\n" in diff
+    assert not any(gap["kind"] == "diff_file_refused" for gap in snapshot.envelope["evidence_gaps"])
+
+
+@pytest.mark.parametrize("version", ["base", "head"])
+@pytest.mark.parametrize(
+    "unsafe",
+    [b"old\0body\n", b"x" * (64 * 1024 + 1), b"\xff\n"],
+    ids=("nul", "over-limit", "non-utf8"),
+)
+def test_branch_csv_rejects_unsafe_sealed_versions(
+    repository: Path, version: str, unsafe: bytes
+) -> None:
+    safe = b"name,value\nsafe,1\n"
+    (repository / "records.csv").write_bytes(unsafe if version == "base" else safe)
+    _commit(repository)
+    _git(repository, "branch", "base")
+    (repository / "records.csv").write_bytes(safe if version == "base" else unsafe)
+    _commit(repository)
+
+    with pytest.raises(security.RunnerError, match="bounded diff text Git version was refused"):
+        _prepare(repository, "branch-review", "base")
+    assert not (repository.parent / "state" / "snapshot-runner").exists()
+
+
+@pytest.mark.parametrize("version", ["base", "head"])
+def test_branch_csv_accepts_the_exact_64_kib_sealed_boundary(
+    repository: Path, version: str
+) -> None:
+    prefix = b"name,value\n"
+    large = prefix + b"x" * (64 * 1024 - len(prefix) - 1) + b"\n"
+    small = prefix + b"small,1\n"
+    (repository / "records.csv").write_bytes(large if version == "base" else small)
+    _commit(repository)
+    _git(repository, "branch", "base")
+    (repository / "records.csv").write_bytes(small if version == "base" else large)
+    _commit(repository)
+
+    snapshot = _prepare(repository, "branch-review", "base")
+    line_prefix = "-" if version == "base" else "+"
+    assert line_prefix + large.decode().splitlines()[1] + "\n" in snapshot.envelope["data"]["diff"]
+
+
+@pytest.mark.parametrize("worktree", ["dirty", "deleted"])
+def test_branch_csv_ignores_dirty_or_missing_current_worktree_content(
+    repository: Path, worktree: str
+) -> None:
+    (repository / "records.csv").write_text("name,value\nold,1\n", encoding="utf-8")
+    _commit(repository)
+    _git(repository, "branch", "base")
+    (repository / "records.csv").write_text("name,value\nsealed,2\n", encoding="utf-8")
+    _commit(repository)
+    target_head = _git(repository, "rev-parse", "HEAD").decode().strip()
+    if worktree == "dirty":
+        (repository / "records.csv").write_bytes(b"DIRTY_CSV_CANARY\0\xff\n")
+    else:
+        (repository / "records.csv").unlink()
+
+    snapshot = _prepare(repository, "branch-review", "base")
+    assert snapshot.envelope["data"]["target_head"] == target_head
+    assert "+sealed,2\n" in snapshot.envelope["data"]["diff"]
+    assert b"DIRTY_CSV_CANARY" not in snapshot.snapshot_bytes
+    assert (
+        artifact._load_snapshot(snapshot.snapshot_id, repository).snapshot_bytes
+        == snapshot.snapshot_bytes
+    )
+
+
+@pytest.mark.parametrize("sensitive_version", ["base", "head"])
+def test_branch_csv_rename_does_not_admit_a_sensitive_old_or_new_path(
+    repository: Path, sensitive_version: str
+) -> None:
+    old_name = ".env.audit.csv" if sensitive_version == "base" else "safe.csv"
+    new_name = ".env.audit.csv" if sensitive_version == "head" else "safe.csv"
+    (repository / old_name).write_text("name,value\nsafe,1\n", encoding="utf-8")
+    _commit(repository)
+    _git(repository, "branch", "base")
+    _git(repository, "mv", old_name, new_name)
+    _commit(repository)
+
+    with pytest.raises(security.RunnerError, match="sensitive path refused"):
+        _prepare(repository, "branch-review", "base")
+    assert not (repository.parent / "state" / "snapshot-runner").exists()
+
+
+def test_branch_csv_redacts_synthetic_credentials_and_absolute_paths(repository: Path) -> None:
+    _git(repository, "branch", "base")
+    token = "sk-proj-" + "A" * 24
+    absolute_path = "/srv/synthetic-factor/records.csv"
+    (repository / "records.csv").write_text(
+        f"name,value\ntoken,{token}\npath,{absolute_path}\n", encoding="utf-8"
+    )
+    _commit(repository)
+
+    snapshot = _prepare(repository, "branch-review", "base")
+    diff = snapshot.envelope["data"]["diff"]
+    assert "[REDACTED_OPENAI_TOKEN]" in diff and "<ABS_PATH:" in diff
+    assert token.encode() not in snapshot.snapshot_bytes
+    assert absolute_path.encode() not in snapshot.snapshot_bytes
+
+
+def test_branch_csv_private_key_body_fails_closed(repository: Path) -> None:
+    _git(repository, "branch", "base")
+    marker = "SYNTHETIC_CSV_PRIVATE_KEY_BODY"
+    begin = "-----" + "BEGIN PRIVATE KEY" + "-----"
+    end = "-----" + "END PRIVATE KEY" + "-----"
+    (repository / "records.csv").write_text(
+        f"kind,value\npem,{begin}\n{marker}\n{end}\n", encoding="utf-8"
+    )
+    _commit(repository)
+
+    with pytest.raises(security.RunnerError, match="sanitize branch-diff"):
+        _prepare(repository, "branch-review", "base")
+    assert not (repository.parent / "state" / "snapshot-runner").exists()
+
+
+def test_branch_csv_symlink_cannot_be_used_as_bounded_text(repository: Path) -> None:
+    _git(repository, "branch", "base")
+    (repository / "records.csv").symlink_to("sample.py")
+    _commit(repository)
+
+    with pytest.raises(security.RunnerError, match="bounded diff text Git version was refused"):
+        _prepare(repository, "branch-review", "base")
+    assert not (repository.parent / "state" / "snapshot-runner").exists()
+
+
+@pytest.mark.parametrize(("old_name", "new_name"), [("old.csv", "new.dat"), ("old.dat", "new.csv")])
+def test_branch_csv_rename_keeps_unknown_extension_refusal(
+    repository: Path, old_name: str, new_name: str
+) -> None:
+    marker = "UNSUPPORTED_RENAME_BODY_CANARY"
+    (repository / old_name).write_text(marker + "\n", encoding="utf-8")
+    _commit(repository)
+    _git(repository, "branch", "base")
+    _git(repository, "mv", old_name, new_name)
+    _commit(repository)
+
+    snapshot = _prepare(repository, "branch-review", "base")
+    assert snapshot.envelope["data"]["diff"] == ""
+    assert marker.encode() not in snapshot.snapshot_bytes
+    assert any(
+        gap["kind"] == "diff_file_refused" and gap["subject"] == new_name
+        for gap in snapshot.envelope["evidence_gaps"]
+    )
+
+
+@pytest.mark.parametrize("raw", [b"safe\n", b"bad\0\n", b"\xff\n", b"x" * (64 * 1024 + 1)])
+def test_branch_csv_deletion_remains_sealed_metadata_only(repository: Path, raw: bytes) -> None:
+    marker = b"DELETED_CSV_BODY_CANARY\n"
+    body = marker + raw
+    (repository / "records.csv").write_bytes(body)
+    _commit(repository)
+    base = _git(repository, "rev-parse", "HEAD").decode().strip()
+    blob = _git(repository, "rev-parse", "HEAD:records.csv").decode().strip()
+    _git(repository, "branch", "base")
+    (repository / "records.csv").unlink()
+    _commit(repository)
+
+    snapshot = _prepare(repository, "branch-review", "base")
+    assert snapshot.envelope["data"]["diff"] == ""
+    assert snapshot.envelope["data"]["file_context"] == []
+    assert snapshot.envelope["data"]["deleted_files"] == [
+        {
+            "path": "records.csv",
+            "status": "deleted",
+            "blob_oid": blob,
+            "blob_size": len(body),
+            "blob_commit": base,
+        }
+    ]
+    assert marker.strip() not in snapshot.snapshot_bytes
 
 
 @pytest.mark.parametrize("body", [b"old\0body\n", b"x" * (64 * 1024 + 1), b"\xff\n"])
