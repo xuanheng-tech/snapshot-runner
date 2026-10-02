@@ -87,64 +87,198 @@ def test_http_failure_uses_evidence_and_safe_recovery_without_replay(
 
 @pytest.mark.parametrize("method", ["GET", "POST"])
 def test_only_get_404_is_missing_evidence(monkeypatch: pytest.MonkeyPatch, method: str) -> None:
+    calls = []
+
     def open_request(*_args, **_kwargs):
+        calls.append("request")
         raise r.urllib.error.HTTPError("https://example.invalid", 404, "fixture", None, None)
 
     monkeypatch.setattr(r.urllib.request, "urlopen", open_request)
+    monkeypatch.setattr(r.time, "sleep", lambda _: pytest.fail("404 must not replay here"))
     if method == "GET":
         assert r.request("https://example.invalid", method=method) is None
     else:
         with pytest.raises(r.ReleaseError, match="HTTP_REQUEST_REJECTED.*status 404"):
             r.request("https://example.invalid", method=method)
+    assert calls == ["request"]
 
 
 @pytest.mark.parametrize(
-    ("failure", "category"),
+    ("failure", "category", "attempts"),
     [
-        (r.urllib.error.URLError(TimeoutError("SYNTHETIC_RELEASE_MARKER")), "NETWORK_TIMEOUT"),
-        (TimeoutError("SYNTHETIC_RELEASE_MARKER"), "NETWORK_TIMEOUT"),
+        (r.urllib.error.URLError(TimeoutError("SYNTHETIC_RELEASE_MARKER")), "NETWORK_TIMEOUT", 2),
+        (TimeoutError("SYNTHETIC_RELEASE_MARKER"), "NETWORK_TIMEOUT", 2),
         (
             r.urllib.error.URLError(socket.gaierror(-2, "SYNTHETIC_RELEASE_MARKER")),
             "NETWORK_DNS_FAILED",
+            1,
         ),
         (
             r.urllib.error.URLError(ssl.SSLCertVerificationError(1, "SYNTHETIC_RELEASE_MARKER")),
             "NETWORK_TLS_VERIFICATION_FAILED",
+            1,
         ),
-        (ssl.SSLError(1, "SYNTHETIC_RELEASE_MARKER"), "NETWORK_TLS_FAILED"),
+        (ssl.SSLError(1, "SYNTHETIC_RELEASE_MARKER"), "NETWORK_TLS_FAILED", 1),
         (
             r.urllib.error.URLError(ConnectionRefusedError("SYNTHETIC_RELEASE_MARKER")),
             "NETWORK_CONNECTION_FAILED",
+            1,
         ),
-        (ConnectionResetError("SYNTHETIC_RELEASE_MARKER"), "NETWORK_CONNECTION_FAILED"),
-        (OSError(errno.ENETUNREACH, "SYNTHETIC_RELEASE_MARKER"), "NETWORK_CONNECTION_FAILED"),
-        (r.urllib.error.URLError("SYNTHETIC_RELEASE_MARKER"), "NETWORK_CAUSE_UNKNOWN"),
-        (OSError(errno.EIO, "SYNTHETIC_RELEASE_MARKER"), "NETWORK_CAUSE_UNKNOWN"),
-        (r.http.client.IncompleteRead(b"SYNTHETIC_RELEASE_MARKER"), "NETWORK_RESPONSE_INCOMPLETE"),
-        (r.http.client.BadStatusLine("SYNTHETIC_RELEASE_MARKER"), "NETWORK_HTTP_PROTOCOL_FAILED"),
+        (ConnectionResetError("SYNTHETIC_RELEASE_MARKER"), "NETWORK_CONNECTION_FAILED", 2),
+        (
+            r.urllib.error.URLError(ConnectionResetError("SYNTHETIC_RELEASE_MARKER")),
+            "NETWORK_CONNECTION_FAILED",
+            2,
+        ),
+        (OSError(errno.ENETUNREACH, "SYNTHETIC_RELEASE_MARKER"), "NETWORK_CONNECTION_FAILED", 1),
+        (r.urllib.error.URLError("SYNTHETIC_RELEASE_MARKER"), "NETWORK_CAUSE_UNKNOWN", 1),
+        (OSError(errno.EIO, "SYNTHETIC_RELEASE_MARKER"), "NETWORK_CAUSE_UNKNOWN", 1),
+        (
+            r.http.client.IncompleteRead(b"SYNTHETIC_RELEASE_MARKER"),
+            "NETWORK_RESPONSE_INCOMPLETE",
+            2,
+        ),
+        (
+            r.urllib.error.URLError(r.http.client.IncompleteRead(b"SYNTHETIC_RELEASE_MARKER")),
+            "NETWORK_RESPONSE_INCOMPLETE",
+            2,
+        ),
+        (
+            r.urllib.error.URLError(
+                r.urllib.error.URLError(TimeoutError("SYNTHETIC_RELEASE_MARKER"))
+            ),
+            "NETWORK_CAUSE_UNKNOWN",
+            1,
+        ),
+        (
+            r.http.client.BadStatusLine("SYNTHETIC_RELEASE_MARKER"),
+            "NETWORK_HTTP_PROTOCOL_FAILED",
+            1,
+        ),
     ],
 )
-def test_network_failure_uses_typed_evidence_without_private_details_or_replay(
+def test_network_failure_uses_typed_evidence_and_bounded_safe_recovery(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     failure: OSError | r.http.client.HTTPException,
     category: str,
+    attempts: int,
 ) -> None:
     calls = []
+    slept = []
 
     def open_request(*_args, **_kwargs):
         calls.append("request")
         raise failure
 
     monkeypatch.setattr(r.urllib.request, "urlopen", open_request)
-    monkeypatch.setattr(r.time, "sleep", lambda _: pytest.fail("network errors must not replay"))
+    monkeypatch.setattr(r.time, "sleep", slept.append)
     with pytest.raises(r.ReleaseError) as raised:
         r.request("https://example.invalid/SYNTHETIC_RELEASE_MARKER")
     assert str(raised.value).startswith(category + ":")
     assert "recovery:" in str(raised.value)
     assert "SYNTHETIC_RELEASE_MARKER" not in str(raised.value)
-    assert calls == ["request"]
+    assert calls == ["request"] * attempts
+    assert slept == [2] * (attempts - 1)
     assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("stage", ["open", "read"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        TimeoutError("SYNTHETIC_RELEASE_MARKER"),
+        r.urllib.error.URLError(TimeoutError("SYNTHETIC_RELEASE_MARKER")),
+        ConnectionResetError("SYNTHETIC_RELEASE_MARKER"),
+        r.urllib.error.URLError(ConnectionResetError("SYNTHETIC_RELEASE_MARKER")),
+        r.http.client.IncompleteRead(b"SYNTHETIC_RELEASE_MARKER"),
+        r.urllib.error.URLError(r.http.client.IncompleteRead(b"SYNTHETIC_RELEASE_MARKER")),
+    ],
+)
+def test_bodyless_get_recovers_from_one_transient_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    stage: str,
+    failure: OSError | r.http.client.HTTPException,
+) -> None:
+    payload = b"complete response"
+    calls = []
+    slept = []
+    limits = []
+    responses = []
+
+    class Body(io.BytesIO):
+        def read(self, limit: int) -> bytes:
+            limits.append(limit)
+            if stage == "read" and len(calls) == 1:
+                raise failure
+            return super().read(limit)
+
+    def open_request(operation, **kwargs):
+        assert all(response.closed for response in responses)
+        calls.append(
+            (operation.get_method(), operation.full_url, operation.data, kwargs["timeout"])
+        )
+        if stage == "open" and len(calls) == 1:
+            raise failure
+        response = Body(b"discarded partial" if len(calls) == 1 else payload)
+        responses.append(response)
+        return response
+
+    monkeypatch.setattr(r.urllib.request, "urlopen", open_request)
+    monkeypatch.setattr(r.time, "sleep", slept.append)
+    url = "https://example.invalid/SYNTHETIC_RELEASE_MARKER"
+    assert r.request(url) == payload
+    assert calls == [("GET", url, None, 30)] * 2
+    assert slept == [2]
+    assert limits == [8 * 1024 * 1024 + 1] * (1 if stage == "open" else 2)
+    assert all(response.closed for response in responses)
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize(
+    ("method", "data"), [("POST", {"fixture": True}), ("PATCH", None), ("GET", {})]
+)
+@pytest.mark.parametrize(
+    "failure",
+    [
+        r.urllib.error.URLError(TimeoutError("SYNTHETIC_RELEASE_MARKER")),
+        ConnectionResetError("SYNTHETIC_RELEASE_MARKER"),
+        r.http.client.IncompleteRead(b"SYNTHETIC_RELEASE_MARKER"),
+    ],
+)
+def test_transient_failure_does_not_replay_writes_or_get_with_a_body(
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    data: dict | None,
+    failure: OSError | r.http.client.HTTPException,
+) -> None:
+    calls = []
+
+    def open_request(operation, **_kwargs):
+        calls.append((operation.get_method(), operation.data))
+        raise failure
+
+    monkeypatch.setattr(r.urllib.request, "urlopen", open_request)
+    monkeypatch.setattr(r.time, "sleep", lambda _: pytest.fail("must not replay this request"))
+    with pytest.raises(r.ReleaseError, match="^NETWORK_"):
+        r.request("https://example.invalid", method=method, data=data)
+    assert calls == [(method, None if data is None else json.dumps(data).encode())]
+
+
+def test_invalid_json_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    responses = []
+
+    def open_request(*_args, **_kwargs):
+        response = io.BytesIO(b"{invalid JSON")
+        responses.append(response)
+        return response
+
+    monkeypatch.setattr(r.urllib.request, "urlopen", open_request)
+    monkeypatch.setattr(r.time, "sleep", lambda _: pytest.fail("invalid JSON must not retry"))
+    with pytest.raises(json.JSONDecodeError):
+        r.api("https://example.invalid")
+    assert len(responses) == 1 and responses[0].closed
 
 
 def test_invalid_http_configuration_withholds_private_values(
@@ -154,24 +288,80 @@ def test_invalid_http_configuration_withholds_private_values(
         raise ValueError("SYNTHETIC_RELEASE_MARKER")
 
     monkeypatch.setattr(r.urllib.request, "urlopen", open_request)
+    monkeypatch.setattr(
+        r.time, "sleep", lambda _: pytest.fail("invalid configuration must not retry")
+    )
     with pytest.raises(r.ReleaseError) as raised:
         r.request("https://example.invalid/SYNTHETIC_RELEASE_MARKER")
     assert str(raised.value).startswith("HTTP_REQUEST_INVALID:")
     assert "SYNTHETIC_RELEASE_MARKER" not in str(raised.value)
 
 
-def test_response_read_failure_has_the_same_safe_network_boundary(
+@pytest.mark.parametrize(
+    ("failure", "category"),
+    [
+        (TimeoutError("SYNTHETIC_RELEASE_MARKER"), "NETWORK_TIMEOUT"),
+        (ConnectionResetError("SYNTHETIC_RELEASE_MARKER"), "NETWORK_CONNECTION_FAILED"),
+        (r.http.client.IncompleteRead(b"SYNTHETIC_RELEASE_MARKER"), "NETWORK_RESPONSE_INCOMPLETE"),
+    ],
+)
+def test_response_read_exhaustion_has_the_same_safe_network_boundary(
     monkeypatch: pytest.MonkeyPatch,
+    failure: OSError | r.http.client.HTTPException,
+    category: str,
 ) -> None:
+    responses = []
+    slept = []
+
     class InterruptedBody(io.BytesIO):
         def read(self, _limit: int) -> bytes:
-            raise r.http.client.IncompleteRead(b"SYNTHETIC_RELEASE_MARKER")
+            raise failure
 
-    monkeypatch.setattr(r.urllib.request, "urlopen", lambda *_, **__: InterruptedBody())
+    def open_request(*_args, **_kwargs):
+        response = InterruptedBody()
+        responses.append(response)
+        return response
+
+    monkeypatch.setattr(r.urllib.request, "urlopen", open_request)
+    monkeypatch.setattr(r.time, "sleep", slept.append)
     with pytest.raises(r.ReleaseError) as raised:
         r.request("https://example.invalid")
-    assert str(raised.value).startswith("NETWORK_RESPONSE_INCOMPLETE:")
+    assert str(raised.value).startswith(category + ":")
     assert "SYNTHETIC_RELEASE_MARKER" not in str(raised.value)
+    assert len(responses) == 2 and all(response.closed for response in responses)
+    assert slept == [2]
+
+
+@pytest.mark.parametrize(
+    ("interrupted", "size"),
+    [(True, 8 * 1024 * 1024), (True, 8 * 1024 * 1024 + 1), (False, 8 * 1024 * 1024 + 1)],
+)
+def test_get_retry_preserves_the_response_size_limit(
+    monkeypatch: pytest.MonkeyPatch, interrupted: bool, size: int
+) -> None:
+    payload = b"x" * size
+    responses = []
+    slept = []
+
+    class InterruptedBody(io.BytesIO):
+        def read(self, _limit: int) -> bytes:
+            raise r.http.client.IncompleteRead(b"discarded partial")
+
+    def open_request(*_args, **_kwargs):
+        response = InterruptedBody() if interrupted and not responses else io.BytesIO(payload)
+        responses.append(response)
+        return response
+
+    monkeypatch.setattr(r.urllib.request, "urlopen", open_request)
+    monkeypatch.setattr(r.time, "sleep", slept.append)
+    if size == 8 * 1024 * 1024:
+        assert r.request("https://example.invalid") == payload
+    else:
+        with pytest.raises(r.ReleaseError, match="response exceeds 8 MiB"):
+            r.request("https://example.invalid")
+    assert len(responses) == (2 if interrupted else 1)
+    assert all(response.closed for response in responses)
+    assert slept == ([2] if interrupted else [])
 
 
 def test_identity_failure_has_its_own_recovery_entry_before_mutation(
@@ -1088,8 +1278,16 @@ def test_release_closure_gives_up_after_bounded_propagation_attempts(
     assert len(slept) == r.PROPAGATION_ATTEMPTS - 1
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        r.ReleaseError("PyPI project/version conflict"),
+        r.ReleaseIdentityError("PyPI provenance conflict"),
+    ],
+)
 def test_propagation_polling_does_not_retry_api_errors(
     monkeypatch: pytest.MonkeyPatch,
+    failure: r.ReleaseError,
 ) -> None:
     """Only a missing document is retried; a real failure surfaces immediately."""
     slept: list[float] = []
@@ -1099,12 +1297,60 @@ def test_propagation_polling_does_not_retry_api_errors(
     def load() -> None:
         nonlocal calls
         calls += 1
-        raise r.ReleaseError("PyPI project/version conflict")
+        raise failure
 
     with pytest.raises(r.ReleaseError, match="conflict"):
         r.poll(load)
     assert calls == 1
     assert slept == []
+
+
+def test_propagation_http_attempts_are_bounded_and_each_get_has_its_own_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    slept = []
+
+    def open_request(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls % 2:
+            raise TimeoutError("SYNTHETIC_RELEASE_MARKER")
+        if calls <= 24:
+            raise r.urllib.error.HTTPError("https://example.invalid", 404, "fixture", None, None)
+        return io.BytesIO(b'{"published": true}')
+
+    monkeypatch.setattr(r.urllib.request, "urlopen", open_request)
+    monkeypatch.setattr(r.time, "sleep", slept.append)
+
+    def load():
+        return r.api("https://example.invalid")
+
+    assert r.poll(load) is None
+    assert calls == 24
+    assert slept == [2, 15] * 11 + [2]
+    assert load() == {"published": True}
+    assert calls == 26
+    assert slept == [2, 15] * 11 + [2, 2]
+
+
+def test_propagation_stops_after_get_transport_retries_are_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    slept = []
+
+    def open_request(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise TimeoutError("SYNTHETIC_RELEASE_MARKER")
+
+    monkeypatch.setattr(r.urllib.request, "urlopen", open_request)
+    monkeypatch.setattr(r.time, "sleep", slept.append)
+    with pytest.raises(r.ReleaseError, match="^NETWORK_TIMEOUT:"):
+        r.poll(lambda: r.api("https://example.invalid"))
+    assert calls == 2
+    assert slept == [2]
 
 
 def test_record_closure_waits_but_build_and_pending_do_not(

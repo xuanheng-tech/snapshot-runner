@@ -5,6 +5,14 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.5.5 - 2026-10-02
+
+- Release control: GET requests without a body retry typed timeouts, connection resets
+  and incomplete responses once, including failures while reading the response. Other
+  failures and write requests still stop immediately; diagnostics withhold private
+  details. PyPI propagation polling retains its missing-document-only contract and
+  bounded attempt count, without rebuilding or reuploading original artifacts.
+
 ## 2.5.4 - 2026-10-02
 
 - Fixed: branch-review captures complete unified diffs beyond the default 2 MiB Git

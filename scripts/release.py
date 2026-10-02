@@ -48,6 +48,8 @@ PROPAGATION_DELAY_SECONDS = 15
 PUBLIC_GIT_ATTEMPTS = 3
 PUBLIC_GIT_DELAY_SECONDS = 2
 PUBLIC_GIT_TIMEOUT_SECONDS = 60
+HTTP_GET_ATTEMPTS = 2
+HTTP_GET_DELAY_SECONDS = 2
 
 
 class ReleaseError(ValueError):
@@ -295,24 +297,33 @@ def request(url: str, *, token: str = "", method: str = "GET", data: dict | None
     body = None if data is None else json.dumps(data).encode()
     if body is not None:
         headers["Content-Type"] = "application/json"
-    try:
-        operation = urllib.request.Request(url, data=body, headers=headers, method=method)
-        with urllib.request.urlopen(operation, timeout=30) as response:
-            raw = response.read(8 * 1024 * 1024 + 1)
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404 and method == "GET":
-            return None
-        raise _http_failure(exc) from None
-    except (OSError, http.client.HTTPException) as exc:
-        raise _network_failure(exc) from None
-    except ValueError:
-        raise ReleaseError(
-            "HTTP_REQUEST_INVALID: release HTTP request configuration invalid; "
-            "recovery: check the API URL and the existing client's authorization configuration"
-        ) from None
-    if len(raw) > 8 * 1024 * 1024:
-        raise ReleaseError("release response exceeds 8 MiB")
-    return raw
+    attempts = HTTP_GET_ATTEMPTS if method == "GET" and data is None else 1
+    for attempt in range(attempts):
+        try:
+            operation = urllib.request.Request(url, data=body, headers=headers, method=method)
+            with urllib.request.urlopen(operation, timeout=30) as response:
+                raw = response.read(8 * 1024 * 1024 + 1)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404 and method == "GET":
+                return None
+            raise _http_failure(exc) from None
+        except (OSError, http.client.HTTPException) as exc:
+            reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+            if attempt + 1 == attempts or not isinstance(
+                reason, (TimeoutError, ConnectionResetError, http.client.IncompleteRead)
+            ):
+                raise _network_failure(exc) from None
+        except ValueError:
+            raise ReleaseError(
+                "HTTP_REQUEST_INVALID: release HTTP request configuration invalid; "
+                "recovery: check the API URL and the existing client's authorization configuration"
+            ) from None
+        else:
+            if len(raw) > 8 * 1024 * 1024:
+                raise ReleaseError("release response exceeds 8 MiB")
+            return raw
+        time.sleep(HTTP_GET_DELAY_SECONDS)
+    raise AssertionError("unreachable release HTTP retry state")
 
 
 def api(url: str, **kwargs):
