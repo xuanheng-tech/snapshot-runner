@@ -867,6 +867,97 @@ def test_original_distribution_acceptance_gates_receipt_and_upload_outputs(
         assert "built=true" in output.read_text()
 
 
+@pytest.mark.parametrize(
+    ("default_notes", "override", "valid"),
+    [
+        pytest.param("n", None, True, id="default-minimum"),
+        pytest.param("n" * 8192, None, True, id="default-maximum"),
+        pytest.param("source notes", "n" * 8192, True, id="override-maximum"),
+        pytest.param("n" * 8192, "", True, id="empty-override-fallback"),
+        pytest.param("n" * 8193, None, False, id="default-too-long"),
+        pytest.param("source notes", "n" * 8193, False, id="override-too-long"),
+        pytest.param("", None, False, id="empty-default"),
+        pytest.param(None, "", False, id="invalid-default-fallback"),
+    ],
+)
+def test_build_notes_are_validated_before_publication_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    default_notes: str | None,
+    override: str | None,
+    valid: bool,
+) -> None:
+    release = {**RELEASE, "notes": default_notes}
+    dist, receipt, output = (tmp_path / name for name in ("dist", "receipt.json", "outputs"))
+    hashes = dict.fromkeys(r.filenames(release["version"]), "e" * 64)
+    built_notes, hashed_paths = [], []
+
+    def build(actual, destination):
+        assert destination == dist
+        built_notes.append(actual["notes"])
+        return True
+
+    def artifact_hashes(destination, version):
+        assert version == release["version"]
+        hashed_paths.append(destination)
+        return hashes
+
+    monkeypatch.setattr(r, "public_identity", lambda *_: dict(release))
+    monkeypatch.setattr(
+        r,
+        "control_identity",
+        lambda: {key: RELEASE[key] for key in ("control_commit", "control_ref", "build_run_id")},
+    )
+    monkeypatch.setattr(r, "build", build)
+    monkeypatch.setattr(r, "artifact_hashes", artifact_hashes)
+    if override is None:
+        monkeypatch.delenv("RELEASE_NOTES", raising=False)
+    else:
+        monkeypatch.setenv("RELEASE_NOTES", override)
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    result = r.main(
+        ["build", TAG, "--expected-sha", SHA, "--dist", str(dist), "--receipt", str(receipt)]
+    )
+    captured = capsys.readouterr()
+    assert result == (0 if valid else 1)
+    if not valid:
+        assert captured.out == "" and "release notes" in captured.err
+        assert built_notes == hashed_paths == []
+        assert not dist.exists() and not receipt.exists() and not output.exists()
+        return
+    assert captured.err == ""
+    assert built_notes == [override or default_notes]
+    assert hashed_paths == [dist]
+    assert output.read_text() == "built=true\n"
+    recorded = json.loads(receipt.read_text())
+    assert recorded["notes"] == (override or default_notes)
+    monkeypatch.setattr(
+        r,
+        "api",
+        lambda *_, **__: {
+            "head_sha": RELEASE["control_commit"],
+            "head_branch": "master",
+            "path": ".github/workflows/publish-pypi.yml",
+            "head_repository": {"full_name": r.PUBLIC_REPOSITORY},
+            "event": "workflow_dispatch",
+        },
+    )
+    monkeypatch.delenv("PUBLIC_GITHUB_TOKEN", raising=False)
+    assert r.receipt_identity(recorded)["notes"] == recorded["notes"]
+
+
+@pytest.mark.parametrize("notes", ["", "n" * 8193, None], ids=["empty", "too-long", "non-string"])
+def test_receipt_notes_are_rejected_before_provenance_read(monkeypatch, notes) -> None:
+    receipt = r.record_identity(
+        {**RELEASE, "notes": notes}, dict.fromkeys(r.filenames("1.2.3"), "e" * 64)
+    )
+    monkeypatch.setattr(r, "public_identity", lambda *_: dict(RELEASE))
+    monkeypatch.setattr(r, "api", lambda *_, **__: pytest.fail("must reject receipt before API"))
+    with pytest.raises(r.ReleaseError, match="malformed release receipt"):
+        r.receipt_identity(receipt)
+
+
 @pytest.mark.parametrize("conflict", [None, "control", "source", "workflow", "ref", "unknown"])
 def test_receipt_separates_control_and_source_provenance(monkeypatch, conflict) -> None:
     hashes = dict.fromkeys(r.filenames("1.2.3"), "e" * 64)

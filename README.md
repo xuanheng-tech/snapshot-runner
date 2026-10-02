@@ -7,7 +7,7 @@ test log into local artifacts. It does not modify the inspected repository,
 automatically fix code, run tests, call a model, commit, or push. No model API is
 required. No API key is required.
 
-Current stable release: **2.5.3**.
+Current stable release: **2.5.4**.
 
 Use the same local CLI from a shell, from automation, or from any coding agent that
 permits the required local operations. Runner is vendor-neutral: it names, selects and
@@ -30,7 +30,7 @@ Install the published package from PyPI into a separate virtual environment:
 # Example using Python 3.12.13 or later in the supported 3.12 series.
 python3.12 --version
 python3.12 -m venv /absolute/path/to/runner-venv
-/absolute/path/to/runner-venv/bin/python -m pip install 'snapshot-runner==2.5.3'
+/absolute/path/to/runner-venv/bin/python -m pip install 'snapshot-runner==2.5.4'
 export PATH="/absolute/path/to/runner-venv/bin:$PATH"
 ```
 
@@ -306,6 +306,8 @@ allowing upload. The default `uv build` already builds its wheel from the sdist;
 explicit source-archive gate also checks layout and a separate PEP 517 build outside Git.
 The extra test wheel stays in temporary storage. Upload and receipt hashes always use
 the unchanged original artifacts.
+Release notes must contain 1 through 8192 characters. An empty override uses the source
+changelog; invalid selected notes fail before building or writing publication outputs.
 
 For environments that permit direct public reads but share an exhausted proxy quota,
 set the Gitea Actions repository variable `RELEASE_PUBLIC_API_DIRECT=true`. The record

@@ -1,7 +1,8 @@
-"""D3: workspace diff batching keeps a large quoted-path diff collectable and complete."""
+"""Bounded workspace and branch diffs preserve complete, quoted-path evidence."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -62,7 +63,9 @@ def _repository(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     return repo
 
 
-def _prepare(repo: Path) -> artifact.SnapshotArtifact:
+def _prepare(
+    repo: Path, task: str = "diff-audit", argument: str | None = None
+) -> artifact.SnapshotArtifact:
     target_path, target_name, runner_path = runner._validate_target_repository_path(os.fspath(repo))
     target = git._validate_target_repository_context(
         target_path,
@@ -70,9 +73,9 @@ def _prepare(repo: Path) -> artifact.SnapshotArtifact:
         runner_path,
         artifact._state_home(target_path),
         GIT,
-        "diff-audit",
+        task,
     )
-    return runner._prepare_snapshot("diff-audit", None, target, GIT)
+    return runner._prepare_snapshot(task, argument, target, GIT)
 
 
 def _payload(snapshot: artifact.SnapshotArtifact) -> dict[str, object]:
@@ -308,3 +311,156 @@ def test_a_single_path_beyond_the_command_bound_still_refuses(monkeypatch, tmp_p
 
     with pytest.raises(security.RunnerError, match="truncated unified diff evidence was refused"):
         _prepare(repo)
+
+
+def _branch_diff(repo: Path) -> bytes:
+    result = git.GitRunner(repo).run(
+        (
+            "-c",
+            "core.quotePath=true",
+            "diff",
+            "--find-renames=50%",
+            "--no-ext-diff",
+            "--no-textconv",
+            "main..HEAD",
+            "--",
+        ),
+        maximum=UNCAPTURED_BOUND_BYTES,
+    )
+    assert result.returncode == 0 and not result.truncated
+    return result.stdout
+
+
+def _repository_files(repo: Path) -> dict[str, tuple[int, str]]:
+    return {
+        path.relative_to(repo).as_posix(): (
+            path.stat().st_mode,
+            hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+        for path in repo.rglob("*")
+        if path.is_file()
+    }
+
+
+@pytest.mark.parametrize("lines", [280, 400])
+def test_large_branch_diff_keeps_global_renames_and_complete_bytes(monkeypatch, tmp_path, lines):
+    repo = _grown_repo(monkeypatch, tmp_path, files=400, lines=lines)
+    # Equal sources/targets leave rename pairing to Git's global candidate set.
+    for name in ("a-old.py", "b-old.py"):
+        _write(repo, name, "IDENTICAL = 1\n" * 12)
+    _run_git(repo, "reset", "--hard", "HEAD")
+    _run_git(repo, "add", "--", "a-old.py", "b-old.py")
+    _commit(repo, "rename sources")
+    _run_git(repo, "switch", "--quiet", "-c", "feature")
+    for index in range(400):
+        growth = "".join(f"V{index}_{line} = {line:08d}\n" for line in range(lines))
+        _write(repo, f"批次目录/文件_{index:04d}.py", f"SEED = 0\n{growth}")
+    _run_git(repo, "mv", "--", "a-old.py", "z-new.py")
+    _run_git(repo, "mv", "--", "b-old.py", "y-new.py")
+    _write(repo, ":(glob)*[字]?.py", "LITERAL = 1\n")
+    _run_git(repo, "add", "-A", "--")
+    _commit(repo, "large branch")
+    reference = _branch_diff(repo)
+    assert 2 * 1024 * 1024 < len(reference) < 4 * 1024 * 1024
+    assert reference.count(b"similarity index 100%") == 2
+    before = _repository_files(repo)
+
+    snapshot = _prepare(repo, "branch-review", "main")
+
+    assert _field(snapshot, "diff").encode("utf-8") == reference
+    assert _field(snapshot, "diff").count("diff --git ") == 403
+    assert "git_output_limit" not in _gap_kinds(snapshot)
+    assert "snapshot_limit" not in _gap_kinds(snapshot)
+    assert _repository_files(repo) == before
+
+
+def test_large_branch_replacements_fit_without_evidence_gaps(monkeypatch, tmp_path):
+    repo = _repository(monkeypatch, tmp_path)
+    for marker in ("a", "b"):
+        for index in range(40):
+            body = "".join(f"V{index}_{line} = '{marker * 48}'\n" for line in range(600))
+            _write(repo, f"src/module_{index:02d}.py", body)
+        _run_git(repo, "add", "-A", "--")
+        _commit(repo, f"version {marker}")
+        if marker == "a":
+            _run_git(repo, "switch", "--quiet", "-c", "feature")
+    reference = _branch_diff(repo)
+    assert 2 * 1024 * 1024 < len(reference) < 4 * 1024 * 1024
+
+    snapshot = _prepare(repo, "branch-review", "main")
+
+    assert _field(snapshot, "diff").encode("utf-8") == reference
+    assert _gaps(snapshot) == []
+    assert len(snapshot.snapshot_bytes) < collect.MAX_SNAPSHOT_BYTES
+
+
+def test_small_branch_snapshot_matches_the_previous_capture_bound(monkeypatch, tmp_path):
+    repo = _grown_repo(monkeypatch, tmp_path, files=3, lines=10)
+    _run_git(repo, "switch", "--quiet", "-c", "feature")
+    _commit(repo, "small branch")
+    current = _prepare(repo, "branch-review", "main")
+    original = git.GitRunner.run
+
+    def previous_capture(self, arguments, *, maximum=MAX_COMMAND_BYTES):
+        if "core.quotePath=true" in arguments and "--find-renames=50%" in arguments:
+            maximum = MAX_COMMAND_BYTES
+        return original(self, arguments, maximum=maximum)
+
+    monkeypatch.setattr(git.GitRunner, "run", previous_capture)
+    previous = _prepare(repo, "branch-review", "main")
+    assert current.snapshot_bytes == previous.snapshot_bytes
+    assert current.snapshot_id == previous.snapshot_id
+
+
+def test_branch_over_the_shared_budget_publishes_no_artifact(monkeypatch, tmp_path):
+    repo = _grown_repo(monkeypatch, tmp_path, files=1, lines=1)
+    _run_git(repo, "switch", "--quiet", "-c", "feature")
+    _write(repo, "批次目录/文件_0000.py", "VALUE = 1\n" * (collect.MAX_SNAPSHOT_BYTES // 9))
+    _run_git(repo, "add", "-A", "--")
+    _commit(repo, "over budget")
+    before = _repository_files(repo)
+
+    with pytest.raises(security.RunnerError, match="remaining snapshot content budget"):
+        _prepare(repo, "branch-review", "main")
+
+    assert not list((tmp_path / "state").rglob("snapshot.json"))
+    assert _repository_files(repo) == before
+
+
+def test_branch_capture_accounts_for_metadata_and_json_escaping(monkeypatch, tmp_path):
+    repo = _grown_repo(monkeypatch, tmp_path, files=1, lines=1)
+    _run_git(repo, "switch", "--quiet", "-c", "feature")
+    _write(repo, "批次目录/文件_0000.py", 'VALUE = "' + "\\" * 1000 + '"\n')
+    _run_git(repo, "add", "-A", "--")
+    _commit(repo, "escaped content")
+    reference = _branch_diff(repo)
+    monkeypatch.setattr(collect, "SNAPSHOT_CONTENT_BUDGET", len(reference) + 600)
+    original = git.GitRunner.run
+    limits = []
+
+    def probe(self, arguments, *, maximum=MAX_COMMAND_BYTES):
+        result = original(self, arguments, maximum=maximum)
+        if "core.quotePath=true" in arguments and "--find-renames=50%" in arguments:
+            limits.append(maximum)
+            assert not result.truncated
+        return result
+
+    monkeypatch.setattr(git.GitRunner, "run", probe)
+    with pytest.raises(security.RunnerError, match="remaining snapshot content budget"):
+        _prepare(repo, "branch-review", "main")
+
+    assert len(limits) == 1
+    assert len(reference) <= limits[0] < collect.SNAPSHOT_CONTENT_BUDGET - 2
+    assert not list((tmp_path / "state").rglob("snapshot.json"))
+
+
+def test_branch_with_no_remaining_budget_does_not_run_git(monkeypatch, tmp_path):
+    builder = collect.SnapshotBuilder("branch-review", "repo", tmp_path)
+    builder.content_bytes = collect.SNAPSHOT_CONTENT_BUDGET - 2
+
+    def unexpected_git(*args, **kwargs):
+        pytest.fail("an exhausted branch budget must not start Git")
+
+    monkeypatch.setattr(git.GitRunner, "run", unexpected_git)
+    with pytest.raises(security.RunnerError, match="remaining snapshot content budget"):
+        collect._branch_unified_diff(git.GitRunner(tmp_path), builder, "main..HEAD", ["file.py"])

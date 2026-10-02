@@ -5,6 +5,16 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.5.4 - 2026-10-02
+
+- Fixed: branch-review captures complete unified diffs beyond the default 2 MiB Git
+  command bound when they fit the shared 8 MiB snapshot quota. A single global rename
+  candidate set preserves rename matching and existing patch bytes; metadata and JSON
+  escaping consume the same quota, and oversized diffs still refuse publication.
+- Release control: validate selected release notes against the receipt's 1–8192 character
+  bound before building or writing artifacts, receipts or workflow outputs. Empty note
+  overrides retain the source changelog fallback.
+
 ## 2.5.3 - 2026-10-02
 
 - Fixed: README contract and artifact declarations match the current producer security

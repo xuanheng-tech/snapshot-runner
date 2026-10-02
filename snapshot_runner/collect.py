@@ -2722,6 +2722,42 @@ def _workspace_unified_diff(
     return "".join(chunks)
 
 
+def _branch_unified_diff(
+    git: GitRunner,
+    builder: SnapshotBuilder,
+    range_spec: str,
+    paths: list[str],
+) -> str:
+    budget = max(0, SNAPSHOT_CONTENT_BUDGET - builder.content_bytes - 2)
+    if budget <= 0:
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            "unified diff exceeds remaining snapshot content budget",
+        )
+    # Keep one global rename candidate set. Raw capture is bounded by the shared
+    # quota; add_text applies the final sanitized, JSON-escaped content charge.
+    result = git.run(
+        (
+            "-c",
+            "core.quotePath=true",
+            "diff",
+            "--find-renames=50%",
+            "--no-ext-diff",
+            "--no-textconv",
+            range_spec,
+            "--",
+            *(f":(top,literal){path}" for path in paths),
+        ),
+        maximum=budget + 1,
+    )
+    if result.truncated:
+        raise RunnerError(
+            SNAPSHOT_COLLECTION_FAILED,
+            "unified diff exceeds remaining snapshot content budget",
+        )
+    return _decode_unified_diff(result, "branch-diff", builder)
+
+
 def _current_target_evidence(git: GitRunner, builder: SnapshotBuilder) -> TargetGitEvidence:
     ref_result = git.run(("symbolic-ref", "--quiet", "HEAD"), maximum=4096)
     if ref_result.truncated:
@@ -3826,30 +3862,6 @@ def collect_branch_review(
     _validate_branch_bounded_diff_text(
         builder, git, merge_base_commit, sealed_target.head, diff_changes
     )
-    unique_diff_paths = list(dict.fromkeys(diff_paths))
-    if unique_diff_paths:
-        diff = _decode_unified_diff(
-            git.run(
-                (
-                    "-c",
-                    "core.quotePath=true",
-                    "diff",
-                    "--find-renames=50%",
-                    "--no-ext-diff",
-                    "--no-textconv",
-                    range_spec,
-                    "--",
-                    *(f":(top,literal){path}" for path in unique_diff_paths),
-                )
-            ),
-            "branch-diff",
-            builder,
-        )
-    else:
-        diff = ""
-    _validate_branch_diff_paths(
-        diff, diff_changes, repo_root, "branch-diff", frozenset(builder.verified_diff_paths)
-    )
     seal = BranchReviewSeal(
         selected,
         commit,
@@ -3884,6 +3896,15 @@ def collect_branch_review(
         scan_mode=ScanMode.PLAIN_TEXT,
     )
     builder.add_text("commits", commits, source="branch-commits", scan_mode=ScanMode.PLAIN_TEXT)
+    unique_diff_paths = list(dict.fromkeys(diff_paths))
+    diff = (
+        _branch_unified_diff(git, builder, range_spec, unique_diff_paths)
+        if unique_diff_paths
+        else ""
+    )
+    _validate_branch_diff_paths(
+        diff, diff_changes, repo_root, "branch-diff", frozenset(builder.verified_diff_paths)
+    )
     builder.add_text(
         "diff",
         diff,

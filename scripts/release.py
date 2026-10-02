@@ -394,6 +394,10 @@ def control_identity() -> dict:
     return {"control_commit": commit, "control_ref": ref, "build_run_id": run_id}
 
 
+def _valid_notes(notes: object) -> bool:
+    return isinstance(notes, str) and 1 <= len(notes) <= 8192
+
+
 def receipt_identity(receipt: dict) -> dict:
     release = public_identity(
         receipt["tag"], receipt["package_source_commit"], receipt["tag_object"]
@@ -412,8 +416,7 @@ def receipt_identity(receipt: dict) -> dict:
         or re.fullmatch(r"[0-9a-f]{40}", release["control_commit"]) is None
         or re.fullmatch(r"[1-9]\d*", release["build_run_id"]) is None
         or release["control_ref"] not in ("refs/heads/master", f"refs/tags/{release['tag']}")
-        or not isinstance(release["notes"], str)
-        or not 1 <= len(release["notes"]) <= 8192
+        or not _valid_notes(release["notes"])
     ):
         raise ReleaseError("malformed release receipt")
     run = api(
@@ -785,6 +788,8 @@ def main(argv: list[str] | None = None) -> int:
             release = public_identity(args.tag, args.expected_sha, args.expected_tag_object or None)
             release.update(control_identity())
             release["notes"] = os.environ.get("RELEASE_NOTES") or release["notes"]
+            if not _valid_notes(release["notes"]):
+                raise ReleaseError("release notes must contain 1 to 8192 characters")
         elif args.receipt is not None:
             release = receipt_identity(json.loads(args.receipt.read_text(encoding="utf-8")))
             if args.tag is not None and args.tag != release["tag"]:
