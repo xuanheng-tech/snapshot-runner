@@ -5,6 +5,14 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.5.8 - 2026-10-03
+
+- Fixed: branch-review uses the sealed target commit's attributes for both change
+  classification and unified diffs. Modified, staged, deleted or untracked
+  `.gitattributes` files in the worktree no longer turn committed text changes into
+  binary-only evidence. Committed attribute behavior and stored artifact schemas
+  and security eras remain unchanged.
+
 ## 2.5.7 - 2026-10-03
 
 - Fixed: branch-review includes bounded CSV additions, modifications and supported

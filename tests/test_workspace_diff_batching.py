@@ -467,4 +467,6 @@ def test_branch_with_no_remaining_budget_does_not_run_git(monkeypatch, tmp_path)
 
     monkeypatch.setattr(git.GitRunner, "run", unexpected_git)
     with pytest.raises(security.RunnerError, match="remaining snapshot content budget"):
-        collect._branch_unified_diff(git.GitRunner(tmp_path), builder, "main..HEAD", ["file.py"])
+        collect._branch_unified_diff(
+            git.GitRunner(tmp_path), builder, "main..HEAD", ["file.py"], target_head="a" * 40
+        )

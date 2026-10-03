@@ -2727,6 +2727,8 @@ def _branch_unified_diff(
     builder: SnapshotBuilder,
     range_spec: str,
     paths: list[str],
+    *,
+    target_head: str,
 ) -> str:
     budget = max(0, SNAPSHOT_CONTENT_BUDGET - builder.content_bytes - 2)
     if budget <= 0:
@@ -2738,6 +2740,7 @@ def _branch_unified_diff(
     # quota; add_text applies the final sanitized, JSON-escaped content charge.
     result = git.run(
         (
+            f"--attr-source={target_head}",
             "-c",
             "core.quotePath=true",
             "diff",
@@ -3800,6 +3803,7 @@ def collect_branch_review(
     changes = _branch_changes(
         git.run(
             (
+                f"--attr-source={sealed_target.head}",
                 "diff",
                 "--name-status",
                 "-z",
@@ -3900,7 +3904,9 @@ def collect_branch_review(
     builder.add_text("commits", commits, source="branch-commits", scan_mode=ScanMode.PLAIN_TEXT)
     unique_diff_paths = list(dict.fromkeys(diff_paths))
     diff = (
-        _branch_unified_diff(git, builder, range_spec, unique_diff_paths)
+        _branch_unified_diff(
+            git, builder, range_spec, unique_diff_paths, target_head=sealed_target.head
+        )
         if unique_diff_paths
         else ""
     )

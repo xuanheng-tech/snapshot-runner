@@ -147,6 +147,46 @@ def test_branch_attributes_diff_does_not_read_dirty_worktree(repository: Path) -
     assert "+*.py -text\n" in snapshot.envelope["data"]["diff"]
 
 
+@pytest.mark.parametrize("directory", ["", "src"])
+@pytest.mark.parametrize("attribute_state", ["modified", "staged", "deleted", "untracked"])
+def test_branch_diff_uses_sealed_attributes_instead_of_workspace_or_index(
+    repository: Path, directory: str, attribute_state: str
+) -> None:
+    parent = repository / directory
+    parent.mkdir(exist_ok=True)
+    source = parent / "sample.py"
+    attributes = parent / ".gitattributes"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    if attribute_state != "untracked":
+        attributes.write_text(
+            "*.py -diff\n" if attribute_state == "deleted" else "*.py diff\n",
+            encoding="utf-8",
+        )
+    if directory or attribute_state != "untracked":
+        _commit(repository)
+    _git(repository, "branch", "base")
+    source.write_text("VALUE = 2\n", encoding="utf-8")
+    _commit(repository)
+    expected = _prepare(repository, "branch-review", "base")
+    expected_diff = expected.envelope["data"]["diff"]
+    if attribute_state == "deleted":
+        assert "Binary files" in expected_diff
+    else:
+        assert "+VALUE = 2\n" in expected_diff
+
+    if attribute_state == "deleted":
+        attributes.unlink()
+    else:
+        attributes.write_text("*.py -diff\n", encoding="utf-8")
+        if attribute_state == "staged":
+            _git(repository, "add", "--", attributes.relative_to(repository).as_posix())
+
+    observed = _prepare(repository, "branch-review", "base")
+    assert observed.snapshot_bytes == expected.snapshot_bytes
+    loaded = artifact._load_snapshot(observed.snapshot_id, repository)
+    assert loaded.snapshot_bytes == expected.snapshot_bytes
+
+
 @pytest.mark.parametrize("name", ["records.csv", "records.CSV"])
 @pytest.mark.parametrize("modified", [False, True], ids=("added", "modified"))
 def test_branch_csv_safe_additions_and_modifications_include_the_sealed_diff(

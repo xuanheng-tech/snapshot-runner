@@ -7,7 +7,7 @@ test log into local artifacts. It does not modify the inspected repository,
 automatically fix code, run tests, call a model, commit, or push. No model API is
 required. No API key is required.
 
-Current stable release: **2.5.7**.
+Current stable release: **2.5.8**.
 
 Use the same local CLI from a shell, from automation, or from any coding agent that
 permits the required local operations. Runner is vendor-neutral: it names, selects and
@@ -30,7 +30,7 @@ Install the published package from PyPI into a separate virtual environment:
 # Example using Python 3.12.13 or later in the supported 3.12 series.
 python3.12 --version
 python3.12 -m venv /absolute/path/to/runner-venv
-/absolute/path/to/runner-venv/bin/python -m pip install 'snapshot-runner==2.5.7'
+/absolute/path/to/runner-venv/bin/python -m pip install 'snapshot-runner==2.5.8'
 export PATH="/absolute/path/to/runner-venv/bin:$PATH"
 ```
 
@@ -218,6 +218,7 @@ This is a local evidence property: changes to refs, configuration, working files
 or collection limits can change the result. The state-directory path affects printed
 artifact references. A collection is not a filesystem-wide transaction; keep the target
 quiescent while collecting. Branch review explicitly seals its base and target identities.
+Its diffs use attributes from the target commit rather than working-tree or index copies.
 
 `--summary` emits bounded JSON derived from the canonical artifact. It does not change
 the snapshot, exit status, or safety checks. Inspect `complete`/`partial`, `truncated`,
