@@ -5,6 +5,13 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.5.9 - 2026-10-15
+
+- Fixed: capability preflight reads up to 1 MiB of Git configuration key names,
+  allowing repositories with substantial accumulated branch tracking metadata.
+  Oversized, failed or truncated reads still refuse collection; unsafe settings
+  after the previous 64 KiB boundary remain subject to the full preflight.
+
 ## 2.5.8 - 2026-10-03
 
 - Fixed: branch-review uses the sealed target commit's attributes for both change
@@ -171,7 +178,7 @@ public source baseline; it was not tagged or published to PyPI.
 - Fixed: a private key that the read budget cut in half no longer reaches a `file_context` as ordinary
   text. Both file-context readers cut a body to its budget and handed *only the retained prefix* to the
   sanitizer, while the private-key rule refuses only a block it can see closed. Measured on the parent: a
-  379 270-byte file whose `-----BEGIN OPENSSH PRIVATE KEY-----` opened at offset 240 000 published its
+  379 270-byte file whose OpenSSH private-key opening marker began at offset 240 000 published its
   whole 262 144-byte prefix with **22 108 bytes of key body**, and the same shape published 17 characters of a
   `ghp_` token and 5 of a bearer value under a benign `file_limit` gap. `security.truncated_secret_boundary()` now interrogates the prefix the reader is about to
   hand on -- a private-key opener with no closer in it, counted per label, or a credential run reaching

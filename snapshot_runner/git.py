@@ -28,6 +28,7 @@ from .security import (
 )
 
 MAX_GIT_OUTPUT_BYTES = 2 * 1024 * 1024
+MAX_GIT_CONFIG_NAME_BYTES = 1024 * 1024
 MAX_GIT_CONVERSION_OVERRIDES = 256
 GIT_TIMEOUT_SECONDS = 30.0
 MAX_GIT_PREFLIGHT_ENTRIES = 200_000
@@ -783,7 +784,7 @@ def _refuse_replace_refs(git: GitRunner) -> None:
 def _config_names(git: GitRunner, scope: str) -> tuple[str, ...]:
     result = git.run(
         ("config", scope, "--no-includes", "--name-only", "--null", "--list"),
-        maximum=64 * 1024,
+        maximum=MAX_GIT_CONFIG_NAME_BYTES,
     )
     if result.returncode != 0 or result.truncated or result.stderr:
         _git_capability_refused()

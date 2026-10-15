@@ -3663,6 +3663,43 @@ def test_absent_worktree_config_is_inert(tmp_path: Path) -> None:
     assert git._worktree_config_is_inert(tmp_path / "config.worktree") is True
 
 
+@pytest.mark.parametrize("unsafe_tail", [False, True])
+def test_config_names_beyond_64k_keep_full_capability_preflight(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, unsafe_tail: bool
+) -> None:
+    repo = tmp_path / "repo"
+    _initialize_git_capability_repo(repo)
+    with (repo / ".git" / "config").open("a", encoding="utf-8") as config:
+        for number in range(1200):
+            config.write(
+                f'[branch "synthetic-history-{number:04d}-' + "x" * 40 + '"]\n'
+                "\tremote = origin\n\tmerge = refs/heads/master\n"
+            )
+        if unsafe_tail:
+            config.write("[include]\n\tpath = /synthetic/never-read\n")
+    names = git._config_names(git.GitRunner(repo), "--local")
+    assert sum(len(name.encode()) + 1 for name in names) > 64 * 1024
+
+    if unsafe_tail:
+        with pytest.raises(security.RunnerError, match=git.GIT_CAPABILITY_REFUSED_ERROR):
+            _prepare_conversion_snapshot(monkeypatch, repo, tmp_path / "state")
+    else:
+        _artifact, payload = _prepare_conversion_snapshot(
+            monkeypatch, repo, tmp_path / "state", task="repo-status"
+        )
+        assert payload["truncated"] is False
+
+
+def test_config_name_capture_still_refuses_over_hard_limit(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _initialize_git_capability_repo(repo)
+    with (repo / ".git" / "config").open("a", encoding="utf-8") as config:
+        config.write('[branch "' + "x" * git.MAX_GIT_CONFIG_NAME_BYTES + '"]\n\tremote = origin\n')
+
+    with pytest.raises(security.RunnerError, match=git.GIT_CAPABILITY_REFUSED_ERROR):
+        git._config_names(git.GitRunner(repo), "--local")
+
+
 def test_empty_regular_worktree_config_is_inert(tmp_path: Path) -> None:
     """Git leaves this exact shape behind after a --worktree key is set and unset."""
     worktree_config = tmp_path / "config.worktree"
