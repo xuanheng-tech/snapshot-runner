@@ -7,7 +7,7 @@ test log into local artifacts. It does not modify the inspected repository,
 automatically fix code, run tests, call a model, commit, or push. No model API is
 required. No API key is required.
 
-Current stable release: **2.5.10**.
+Current stable release: **2.5.11**.
 
 Use the same local CLI from a shell, from automation, or from any coding agent that
 permits the required local operations. Runner is vendor-neutral: it names, selects and
@@ -30,7 +30,7 @@ Install the published package from PyPI into a separate virtual environment:
 # Example using Python 3.12.13 or later in the supported 3.12 series.
 python3.12 --version
 python3.12 -m venv /absolute/path/to/runner-venv
-/absolute/path/to/runner-venv/bin/python -m pip install 'snapshot-runner==2.5.10'
+/absolute/path/to/runner-venv/bin/python -m pip install 'snapshot-runner==2.5.11'
 export PATH="/absolute/path/to/runner-venv/bin:$PATH"
 ```
 
@@ -96,7 +96,11 @@ The path itself is never renamed, and `read --repo` derives the same display nam
 Linked worktrees are supported. A repository without its first commit is supported by
 `repo-status`, `diff-audit`, and `test-triage`; `branch-review` requires committed history.
 Upstream information uses local refs and configuration. Runner never fetches or queries
-the live remote. `repo-status` reports the current local branch; its historical
+the live remote. `repo-status` resolves the first configured merge target through the
+remote's exact or wildcard fetch mappings, including negative exclusions. This also works
+before the branch's first commit or before its tracking ref exists. A missing mapping is
+reported as `not configured`; unavailable commit counts remain `not available`.
+`repo-status` reports the current local branch; its historical
 `local_branches` artifact field contains that scoped branch identity.
 
 **Successful test-log collection does not mean the tests passed.** `test-triage` does not
@@ -180,6 +184,29 @@ Snapshot schema **2**, summary schema **2**, evidence-read schema **1** and secu
 epoch **5** define the current evidence contract. Release notes for interface changes are in
 [CHANGELOG.md](CHANGELOG.md).
 
+Compatibility policy for the 2.x series:
+
+- Keep the documented public command names, option meanings, exit codes and JSON field
+  meanings compatible. Exit **0** means collection or reading succeeded; exit **2** means
+  an argument or workflow failure. A successful collection may still contain partial evidence.
+  Consumers must inspect completeness fields and must not parse human-readable error messages.
+- Consumers of summary and evidence-read JSON should ignore unknown object fields and
+  check the schema version. Removing fields or changing their meaning requires a new
+  incompatible contract; exact snapshot-format validators remain pinned to their own era.
+- Keep registered schema-2 artifacts from security epochs 4 and 5 readable throughout 2.x.
+  Removing a supported era requires advance deprecation notes and a major release. An urgent
+  security refusal must identify the affected cases explicitly in release notes. Stored
+  bytes are never silently migrated or rewritten.
+- Software, CLI, snapshot, summary, evidence-read and security-rule versions serve different
+  purposes. A corrective collection change may alter new snapshot bytes and IDs without
+  changing their schema. Determinism applies under the same producer version and inputs;
+  identical IDs across software versions are not promised.
+
+The JSON contract is the integration surface. Python modules are implementation details.
+Support covers the verified environments listed above; other platforms and Git capabilities
+need explicit acceptance before a release claims them. This policy does not promise fixes
+for every older package release or a security-response deadline.
+
 ## Artifacts and determinism
 
 `XDG_STATE_HOME` must already exist, belong to the current user, have mode `0700`, and
@@ -236,7 +263,12 @@ Runner disables external diff, text conversion, filters, hooks, paging, and term
 prompts in its Git operations. It rejects unsupported repository capabilities rather
 than running repository-controlled programs. Path traversal, symlinks, special files,
 obvious sensitive paths, invalid text, and size limits produce a refusal or an explicit
-evidence gap. `repo-status` accepts YAML path metadata without collecting YAML bodies;
+evidence gap. For ordinary supported source paths, a regular-file/symlink type change
+retains both native delete/add patch sections; link text is evidence and link targets are
+never followed. The unavailable symlink file context remains an explicit gap. Bounded CSV
+and attribute-file restrictions still apply. Summary `diff_files` counts patch sections
+across the captured channels, so one path can contribute more than one section.
+`repo-status` accepts YAML path metadata without collecting YAML bodies;
 content collection in `diff-audit`, `branch-review` and `test-triage` still refuses YAML.
 
 Changed JPEG, PNG, and WebP files yield type, size, and SHA-256 evidence, not image bytes
@@ -299,6 +331,29 @@ set, must be outside the source checkout. GitHub runs this gate on all three sup
 Python minors; Gitea runs it on the 3.12.13 baseline. To check existing artifacts, use
 `just check-package --wheel /absolute/path/to/package.whl --sdist /absolute/path/to/package.tar.gz --expected-version X.Y.Z`.
 Either artifact option can be used alone to check only that input.
+
+For a repeatable usability baseline against an installed version, run:
+
+```bash
+uv run --frozen python scripts/check_scenarios.py \
+  --executable /absolute/path/to/runner-venv/bin/snapshot-runner --repeat 3
+```
+
+This opt-in development check exercises 18 small, offline synthetic scenarios: ordinary
+and unborn worktrees, exact-path scope, quoted paths, long branches, custom upstream
+mapping, committed renames, staged/unstaged/committed type changes, extensionless text,
+unsupported binary content, bounded context/logs and the YAML refusal boundary. It checks
+expected completeness, repeated snapshot identity, targeted reads, unchanged target file
+bytes/modes/timestamps and absence of symlink-target content. Refusals and explicit gaps
+that match the declared boundary count as expected outcomes, not successful full coverage.
+The JSON result reports per-scenario success and collection median/maximum elapsed time,
+summary/read/snapshot bytes and final snapshot-store size. When `/usr/bin/time` is present,
+it also records maximum RSS in KiB; otherwise RSS is null. RSS is the largest individual
+process high-water mark, not simultaneous aggregate process-tree memory. Final store size
+does not measure peak temporary-clone disk use, and byte counts are not model token counts.
+Fixtures and measurements are removed on completion; `TMPDIR` must be outside the checkout.
+Compare versions under the same interpreter and host load. These samples establish a
+baseline; they impose no timing thresholds and do not represent large-repository performance.
 
 GitHub is the only release-package build and PyPI publishing authority. An annotated
 `vX.Y.Z` tag must match both package version declarations. The README current-stable declaration and `snapshot-runner==X.Y.Z` install pins must match that same version; `scripts/release.py` rejects mismatches during release preparation. Historical changelog entries are not part of that check. The build job runs `just check`

@@ -518,21 +518,28 @@ def _validate_workspace_diff_paths(
 ) -> tuple[tuple[str | None, str | None], ...]:
     changes = _parsed_unified_diff_changes(raw, repository_root, source, verified_paths)
     expected = list(dict.fromkeys(expected_paths))
-    observed: list[str] = []
+    by_path: dict[str, list[tuple[str | None, str | None]]] = {}
     for old_path, new_path in changes:
-        for path in (old_path, new_path):
-            if path is not None and path not in observed:
-                observed.append(path)
-    if (
-        len(changes) != len(expected)
-        or len(observed) != len(expected)
-        or set(observed) != set(expected)
+        path = old_path or new_path
+        if path is None or (old_path is not None and new_path is not None and old_path != new_path):
+            raise RunnerError(
+                SNAPSHOT_COLLECTION_FAILED,
+                "unified diff paths do not match Git workspace metadata",
+            )
+        by_path.setdefault(path, []).append((old_path, new_path))
+    if set(by_path) != set(expected) or any(
+        len(sections) != 1 and sections != [(path, None), (None, path)]
+        for path, sections in by_path.items()
     ):
         raise RunnerError(
             SNAPSHOT_COLLECTION_FAILED,
             "unified diff paths do not match Git workspace metadata",
         )
-    return changes
+    # Git represents a file-type change as delete/add sections for one path. Keep
+    # both patches, but do not mistake their deletion half for a net deleted file.
+    return tuple(
+        sections[0] if len(sections) == 1 else (path, path) for path, sections in by_path.items()
+    )
 
 
 def _validate_branch_diff_paths(
@@ -552,6 +559,8 @@ def _validate_branch_diff_paths(
             expected.append((change.path, None))
         elif kind == "R":
             expected.append((change.old_path, change.path))
+        elif kind == "T":
+            expected.extend(((change.path, None), (None, change.path)))
         else:
             expected.append((change.path, change.path))
     if len(observed) != len(expected) or sorted(observed, key=repr) != sorted(expected, key=repr):
@@ -2839,52 +2848,93 @@ def _display_branch(current_ref: str | None) -> str:
     return current_ref.removeprefix("refs/heads/")
 
 
-def _single_repository_config_value(git: GitRunner, key: str) -> str | None:
+def _repository_config_values(git: GitRunner, key: str) -> tuple[str, ...]:
     result = git.run(
         ("config", "--no-includes", "--null", "--get-all", key),
         maximum=4096,
     )
     if result.returncode == 1 and not result.stdout and not result.stderr and not result.truncated:
-        return None
-    if result.returncode != 0 or result.truncated or result.stderr:
+        return ()
+    if (
+        result.returncode != 0
+        or result.truncated
+        or result.stderr
+        or not result.stdout.endswith(b"\0")
+    ):
         raise RunnerError(
             SNAPSHOT_COLLECTION_FAILED, "unable to determine configured upstream target"
         )
     values = result.stdout.split(b"\0")
     if values and values[-1] == b"":
         values.pop()
-    if len(values) != 1:
-        raise RunnerError(
-            SNAPSHOT_COLLECTION_FAILED, "unable to determine configured upstream target"
-        )
     try:
-        value = values[0].decode("utf-8", errors="strict")
+        decoded = tuple(value.decode("utf-8", errors="strict") for value in values)
     except UnicodeDecodeError as exc:
         raise RunnerError(
             SNAPSHOT_COLLECTION_FAILED, "unable to determine configured upstream target"
         ) from exc
-    if not value or any(character in value for character in ("\x00", "\r", "\n")):
+    if not decoded or any(
+        not value or any(character in value for character in ("\x00", "\r", "\n"))
+        for value in decoded
+    ):
         raise RunnerError(
             SNAPSHOT_COLLECTION_FAILED, "unable to determine configured upstream target"
         )
-    return value
+    return decoded
+
+
+def _refspec_capture(pattern: str, reference: str) -> str | None:
+    if "*" not in pattern:
+        return "" if pattern == reference else None
+    if pattern.count("*") == 1:
+        prefix, suffix = pattern.split("*")
+        if (
+            reference.startswith(prefix)
+            and reference.endswith(suffix)
+            and len(reference) >= len(prefix) + len(suffix)
+        ):
+            return reference[len(prefix) : len(reference) - len(suffix) if suffix else None]
+    return None
 
 
 def _configured_upstream_target(git: GitRunner, current_ref: str) -> str | None:
     branch = _display_branch(current_ref)
-    remote = _single_repository_config_value(git, f"branch.{branch}.remote")
-    merge = _single_repository_config_value(git, f"branch.{branch}.merge")
-    if remote is None and merge is None:
+    remotes = _repository_config_values(git, f"branch.{branch}.remote")
+    merges = _repository_config_values(git, f"branch.{branch}.merge")
+    if not merges:
         return None
-    if remote is None or merge is None or not merge.startswith("refs/heads/"):
+    # Git takes the last remote value and the first merge target. Resolve the
+    # fetch mapping from config even for an unborn branch or a missing local ref.
+    remote = remotes[-1] if remotes else "origin"
+    merge = merges[0]
+    if not merge.startswith("refs/heads/"):
         raise RunnerError(
             SNAPSHOT_COLLECTION_FAILED, "unable to determine configured upstream target"
         )
-    merge_branch = merge.removeprefix("refs/heads/")
-    target_ref = merge if remote == "." else f"refs/remotes/{remote}/{merge_branch}"
+    target_ref = merge if remote == "." else None
+    if remote != ".":
+        refspecs = _repository_config_values(git, f"remote.{remote}.fetch")
+        if any(
+            spec.startswith("^") and _refspec_capture(spec[1:], merge) is not None
+            for spec in refspecs
+        ):
+            return None
+        for refspec in refspecs:
+            if refspec.startswith("^"):
+                continue
+            source, separator, destination = refspec.removeprefix("+").partition(":")
+            if not separator or not destination:
+                continue
+            capture = _refspec_capture(source, merge)
+            if capture is not None and source.count("*") == destination.count("*") <= 1:
+                target_ref = destination.replace("*", capture)
+            if target_ref is not None:
+                break
+    if target_ref is None:
+        return None
     validation = git.run(("check-ref-format", target_ref), maximum=4096)
     if (
-        not merge_branch
+        not target_ref.startswith("refs/")
         or validation.returncode != 0
         or validation.truncated
         or validation.stdout
@@ -2893,7 +2943,10 @@ def _configured_upstream_target(git: GitRunner, current_ref: str) -> str | None:
         raise RunnerError(
             SNAPSHOT_COLLECTION_FAILED, "unable to determine configured upstream target"
         )
-    return merge_branch if remote == "." else f"{remote}/{merge_branch}"
+    for prefix in ("refs/remotes/", "refs/heads/"):
+        if target_ref.startswith(prefix):
+            return target_ref[len(prefix) :]
+    return target_ref
 
 
 def _upstream_ahead_behind(git: GitRunner, head: str | None) -> str:

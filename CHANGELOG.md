@@ -5,6 +5,21 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.5.11 - 2026-10-19
+
+- Fixed: repo-status resolves configured upstream names through exact and wildcard
+  fetch refspecs, including negative exclusions, instead of assuming a remote-name
+  namespace. Unborn branches and missing tracking refs retain configuration evidence;
+  absent mappings or merge targets no longer prevent ordinary status collection.
+- Fixed: ordinary source-file type changes preserve Git's paired delete/add patch
+  sections in workspace and branch reviews. Duplicate or unrelated patch sections
+  remain refused, symlink targets are never followed, and a replacement regular file
+  retains its file context. Existing CSV and attribute-file restrictions remain enforced.
+- Development: added an opt-in 18-scenario installed-CLI baseline with completeness,
+  deterministic identity, targeted-read and read-only checks, elapsed time, optional RSS
+  and output/store byte measurements. Documented the 2.x compatibility policy and the
+  distinction between patch-section counts and distinct paths.
+
 ## 2.5.10 - 2026-10-19
 
 - Fixed: capability preflight applies the 255-byte conversion-driver name limit only

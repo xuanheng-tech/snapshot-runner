@@ -55,6 +55,182 @@ def _prepare(repo: Path, task: str = "diff-audit", base: str | None = None):
     return cli._prepare_snapshot(task, base, target, "/usr/bin/git")
 
 
+@pytest.mark.parametrize(
+    ("remote", "fetch", "expected"),
+    [
+        ("origin", "+refs/heads/*:refs/remotes/origin/*", "origin/main"),
+        ("origin", "+refs/heads/*:refs/remotes/tracking/*", "tracking/main"),
+        ("origin", "+refs/heads/main:refs/remotes/tracking/stable", "tracking/stable"),
+        (".", None, "base"),
+    ],
+)
+@pytest.mark.parametrize("unborn", [False, True])
+def test_repo_status_respects_configured_upstream_refspec(
+    repository: Path, remote: str, fetch: str | None, expected: str, unborn: bool
+) -> None:
+    repo = repository
+    head = _git(repo, "rev-parse", "HEAD").decode().strip()
+    if remote == ".":
+        _git(repo, "branch", "base")
+    else:
+        _git(repo, "config", "remote.origin.url", "https://example.invalid/fixture.git")
+        assert fetch is not None
+        _git(repo, "config", "remote.origin.fetch", fetch)
+        _git(repo, "update-ref", f"refs/remotes/{expected}", head)
+    _git(repo, "config", "branch.main.remote", remote)
+    _git(
+        repo,
+        "config",
+        "branch.main.merge",
+        "refs/heads/base" if remote == "." else "refs/heads/main",
+    )
+    if unborn:
+        _git(repo, "update-ref", "-d", "refs/heads/main")
+    else:
+        assert _git(repo, "rev-parse", "--abbrev-ref", "@{upstream}").decode().strip() == expected
+
+    before = (repo / ".git" / "config").read_bytes()
+    snapshot = _prepare(repo, "repo-status")
+    assert snapshot.envelope["data"]["upstream"] == expected
+    assert snapshot.envelope["data"]["ahead_behind"] == ("not available" if unborn else "0 / 0")
+    assert snapshot.envelope["evidence_gaps"] == []
+    assert (repo / ".git" / "config").read_bytes() == before
+
+
+@pytest.mark.parametrize("channel", ["unstaged", "staged", "branch"])
+@pytest.mark.parametrize("direction", ["to-link", "to-file"])
+def test_type_change_preserves_both_patch_sections_without_following_links(
+    repository: Path, channel: str, direction: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = repository
+    path = repo / "sample.py"
+    outside = repo.parent / "outside.py"
+    outside.write_text("TYPE_CHANGE_OUTSIDE_BODY_CANARY\n", encoding="utf-8")
+    if direction == "to-file":
+        path.unlink()
+        path.symlink_to(outside)
+        _commit(repo)
+    _git(repo, "branch", "base")
+    path.unlink()
+    if direction == "to-link":
+        path.symlink_to(outside)
+    else:
+        path.write_text("VALUE = 42\n", encoding="utf-8")
+    (repo / "healthy.py").write_text("HEALTHY = True\n", encoding="utf-8")
+    if channel != "unstaged":
+        _git(repo, "add", "sample.py", "healthy.py")
+    if channel == "branch":
+        _commit(repo)
+    task = "branch-review" if channel == "branch" else "diff-audit"
+    snapshot = _prepare(repo, task, "base" if channel == "branch" else None)
+    field = "diff" if channel == "branch" else f"{channel}_diff"
+    diff = snapshot.envelope["data"][field]
+    changes = security.unified_diff_path_changes(diff, repository_root=repo)
+    assert changes.count(("sample.py", None)) == 1
+    assert changes.count((None, "sample.py")) == 1
+    assert b"TYPE_CHANGE_OUTSIDE_BODY_CANARY" not in snapshot.snapshot_bytes
+    contexts = {item["path"]: item["content"] for item in snapshot.envelope["data"]["file_context"]}
+    assert contexts["healthy.py"] == "HEALTHY = True\n"
+    if direction == "to-file":
+        assert contexts["sample.py"] == "VALUE = 42\n"
+    else:
+        assert "sample.py" not in contexts
+        assert any(gap["subject"] == "sample.py" for gap in snapshot.envelope["evidence_gaps"])
+    assert (
+        artifact._load_snapshot(snapshot.snapshot_id, repo).snapshot_bytes
+        == snapshot.snapshot_bytes
+    )
+    assert (
+        cli.main(
+            ["read", snapshot.snapshot_id, "--repo", str(repo), "--path", "sample.py"], neutral=True
+        )
+        == 0
+    )
+    evidence = json.loads(capsys.readouterr().out)
+    assert "deleted file mode" in json.dumps(evidence)
+    assert "new file mode" in json.dumps(evidence)
+
+
+@pytest.mark.parametrize("missing", ["tracking-ref", "merge", "fetch"])
+def test_repo_status_handles_absent_upstream_evidence(repository: Path, missing: str) -> None:
+    repo = repository
+    _git(repo, "config", "remote.origin.url", "https://example.invalid/fixture.git")
+    _git(repo, "config", "branch.main.remote", "origin")
+    if missing != "merge":
+        _git(repo, "config", "branch.main.merge", "refs/heads/main")
+    if missing != "fetch":
+        _git(repo, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/tracking/*")
+    expected = "tracking/main" if missing == "tracking-ref" else "not configured"
+    snapshot = _prepare(repo, "repo-status")
+    assert snapshot.envelope["data"]["upstream"] == expected
+    assert snapshot.envelope["data"]["ahead_behind"] == "not available"
+    assert snapshot.envelope["evidence_gaps"] == []
+
+
+@pytest.mark.parametrize(
+    ("refspecs", "expected"),
+    [
+        (["+refs/heads/ma*in:refs/remotes/tracking/pre*post"], "tracking/prepost"),
+        (
+            [
+                "+refs/heads/other:refs/remotes/tracking/other",
+                "+refs/heads/main:refs/remotes/tracking/prepost",
+            ],
+            "tracking/prepost",
+        ),
+        (["^refs/heads/main", "+refs/heads/main:refs/remotes/tracking/prepost"], None),
+        (["+refs/heads/main:refs/remotes/tracking/prepost", "^refs/heads/m*"], None),
+        (
+            ["^refs/heads/other", "+refs/heads/main:refs/remotes/tracking/prepost"],
+            "tracking/prepost",
+        ),
+        (["refs/heads/main", "+refs/heads/main:refs/remotes/tracking/prepost"], "tracking/prepost"),
+    ],
+)
+def test_upstream_fetch_patterns_match_native_git(
+    repository: Path, refspecs: list[str], expected: str | None
+) -> None:
+    repo = repository
+    _git(repo, "config", "remote.origin.url", "https://example.invalid/fixture.git")
+    for refspec in refspecs:
+        _git(repo, "config", "--add", "remote.origin.fetch", refspec)
+    _git(repo, "config", "branch.main.remote", "origin")
+    _git(repo, "config", "branch.main.merge", "refs/heads/main")
+    _git(repo, "update-ref", "refs/remotes/tracking/prepost", "HEAD")
+    native = git.GitRunner(repo).run(("rev-parse", "--abbrev-ref", "@{upstream}"))
+    if expected is None:
+        assert native.returncode != 0
+    else:
+        assert native.returncode == 0 and native.stdout.decode().strip() == expected
+    assert _prepare(repo, "repo-status").envelope["data"]["upstream"] == (
+        expected or "not configured"
+    )
+
+
+@pytest.mark.parametrize("alteration", ["extra-add", "extra-delete", "reversed", "unrelated"])
+def test_type_change_does_not_admit_duplicate_or_unrelated_patch_sections(
+    repository: Path, alteration: str
+) -> None:
+    deletion = "diff --git a/sample.py b/sample.py\ndeleted file mode 100644\n"
+    addition = "diff --git a/sample.py b/sample.py\nnew file mode 120000\n"
+    raw = deletion + addition
+    if alteration == "extra-add":
+        raw += addition
+    elif alteration == "extra-delete":
+        raw = deletion + raw
+    elif alteration == "reversed":
+        raw = addition + deletion
+    else:
+        raw += "diff --git a/other.py b/other.py\nnew file mode 100644\n"
+    with pytest.raises(security.RunnerError, match="do not match Git workspace metadata"):
+        collect._validate_workspace_diff_paths(raw, ["sample.py"], repository, "fixture")
+    if alteration != "reversed":
+        with pytest.raises(security.RunnerError, match="do not match Git branch metadata"):
+            collect._validate_branch_diff_paths(
+                raw, [collect._BranchPathChange("T", "sample.py")], repository, "fixture"
+            )
+
+
 def test_preview_and_summary_ignore_an_incomplete_status_record() -> None:
     data = {"status_short": " M sample.py\nM"}
     counts = artifact._summary_status_counts(data)
