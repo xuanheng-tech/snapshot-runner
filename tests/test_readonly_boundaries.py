@@ -3700,6 +3700,73 @@ def test_config_name_capture_still_refuses_over_hard_limit(tmp_path: Path) -> No
         git._config_names(git.GitRunner(repo), "--local")
 
 
+@pytest.mark.parametrize("task", ["repo-status", "diff-audit", "branch-review"])
+@pytest.mark.parametrize(
+    "branch_name",
+    [
+        "/".join(("a" * 80, "b" * 80, "c" * 93)),
+        "/".join(("a" * 80, "b" * 80, "c" * 94)),
+        "/".join(("中" * 40, "文" * 40, "字" * 31)),
+        "/".join(("a" * 80, "b" * 80, "c" * 94)) + ".topic",
+    ],
+    ids=["255-bytes", "256-bytes", "utf8-over-255-bytes", "dotted-subsection"],
+)
+def test_long_branch_tracking_config_preserves_snapshot_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    task: str,
+    branch_name: str,
+) -> None:
+    repo = tmp_path / "repo"
+    _initialize_branch_review_test_repo(repo)
+    (repo / "safe.py").write_text("value = 3\n", encoding="utf-8")
+    argument = "feature/example" if task == "branch-review" else None
+    before, _payload = _prepare_conversion_snapshot(
+        monkeypatch, repo, tmp_path / "before", task=task, task_argument=argument
+    )
+
+    _run_test_git(repo, "check-ref-format", "--branch", branch_name)
+    _run_test_git(repo, "config", "--local", f"branch.{branch_name}.remote", "origin")
+    _run_test_git(repo, "config", "--local", f"branch.{branch_name}.merge", "refs/heads/main")
+
+    after, payload = _prepare_conversion_snapshot(
+        monkeypatch, repo, tmp_path / "after", task=task, task_argument=argument
+    )
+    assert after.snapshot_bytes == before.snapshot_bytes
+    assert payload["truncated"] is False
+    assert payload["evidence_gaps"] == []
+
+
+@pytest.mark.parametrize("key", ["filter.{}.clean", "diff.{}.textconv"])
+@pytest.mark.parametrize(
+    ("driver", "accepted"),
+    [("x" * 255, True), ("x" * 256, False), ("中" * 85, True), ("中" * 86, False)],
+    ids=["255-bytes", "256-bytes", "utf8-255-bytes", "utf8-over-255-bytes"],
+)
+def test_conversion_driver_name_limits_still_prevent_external_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    key: str,
+    driver: str,
+    accepted: bool,
+) -> None:
+    repo = tmp_path / "repo"
+    _initialize_git_capability_repo(repo)
+    canary, marker = _write_external_canary(tmp_path)
+    _run_test_git(repo, "config", "--local", key.format(driver), os.fspath(canary))
+
+    if accepted:
+        _artifact, payload = _prepare_conversion_snapshot(
+            monkeypatch, repo, tmp_path / "state", task="repo-status"
+        )
+        assert payload["truncated"] is False
+        assert not marker.exists()
+    else:
+        _assert_capability_prepare_rejected_before_content(
+            monkeypatch, repo, tmp_path / "state", marker
+        )
+
+
 def test_empty_regular_worktree_config_is_inert(tmp_path: Path) -> None:
     """Git leaves this exact shape behind after a --worktree key is set and unset."""
     worktree_config = tmp_path / "config.worktree"

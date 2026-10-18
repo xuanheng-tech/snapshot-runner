@@ -5,6 +5,13 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.5.10 - 2026-10-19
+
+- Fixed: capability preflight applies the 255-byte conversion-driver name limit only
+  to `filter` and `diff` configuration sections. Valid long branch tracking metadata,
+  including UTF-8 and dotted names, no longer blocks repository evidence collection.
+  Conversion-driver bounds, unsafe configuration checks and capture limits remain enforced.
+
 ## 2.5.9 - 2026-10-15
 
 - Fixed: capability preflight reads up to 1 MiB of Git configuration key names,

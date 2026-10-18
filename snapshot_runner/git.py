@@ -855,6 +855,9 @@ def _conversion_policy(config_names: tuple[str, ...]) -> GitConversionPolicy:
             continue
         if len(parts) < 3 or len(parts) != len(normalized_parts):
             continue
+        section = normalized_parts[0]
+        if section not in {"filter", "diff"}:
+            continue
         driver = ".".join(parts[1:-1])
         if (
             not driver
@@ -862,7 +865,6 @@ def _conversion_policy(config_names: tuple[str, ...]) -> GitConversionPolicy:
             or any(character in driver for character in ("\x00", "\r", "\n"))
         ):
             _git_capability_refused()
-        section = normalized_parts[0]
         variable = normalized_parts[-1]
         if section == "filter" and variable in {"clean", "smudge", "process", "required"}:
             disabled_type = {
