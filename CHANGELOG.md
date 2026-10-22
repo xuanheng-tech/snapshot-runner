@@ -5,6 +5,10 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+- Docs: explain why Ubuntu 24.04's system Python 3.12.3 is below the verified 3.12.13 floor
+  (the nested `prepare` entry's argument parsing differs and the test suite fails there) and
+  show a `uv`-managed interpreter for that platform. No package change.
+
 ## 2.5.11 - 2026-10-19
 
 - Fixed: repo-status resolves configured upstream names through exact and wildcard
