@@ -36,6 +36,9 @@ except ModuleNotFoundError:
     from changelog import extract_tag
 
 PUBLIC_REPOSITORY = "xuanheng-tech/snapshot-runner"
+# Release control runs from the default branch. Receipts written before the rename to
+# `main` keep their original `master` ref and must stay verifiable.
+CONTROL_BRANCH_REFS = ("refs/heads/main", "refs/heads/master")
 PACKAGE = "snapshot-runner"
 ARCHIVE = PACKAGE.replace("-", "_")
 GITHUB_API = "https://api.github.com"
@@ -430,7 +433,7 @@ def receipt_identity(receipt: dict) -> dict:
         or any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in hashes.values())
         or re.fullmatch(r"[0-9a-f]{40}", release["control_commit"]) is None
         or re.fullmatch(r"[1-9]\d*", release["build_run_id"]) is None
-        or release["control_ref"] not in ("refs/heads/master", f"refs/tags/{release['tag']}")
+        or release["control_ref"] not in (*CONTROL_BRANCH_REFS, f"refs/tags/{release['tag']}")
         or not _valid_notes(release["notes"])
     ):
         raise ReleaseError("malformed release receipt")
