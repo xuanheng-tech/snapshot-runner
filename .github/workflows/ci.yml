@@ -30,3 +30,16 @@ jobs:
       - run: just check
       - name: Check installed distributions
         run: just check-package
+
+  shared-quality:
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12.13", "3.13.14", "3.14.6"]
+    uses: xuanheng-tech/release-tools/.github/workflows/python-quality.yml@18813cd95ba053cf7da5023ceba851d70222271c
+    with:
+      python-version: ${{ matrix.python }}
+      uv-version: "0.12.1"
+      check-package: true
