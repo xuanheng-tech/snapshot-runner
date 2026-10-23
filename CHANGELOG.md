@@ -5,6 +5,10 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+- Release control: rename the default branch to `main`. Receipts accept `refs/heads/main`
+  and, for releases recorded before the rename, `refs/heads/master`. Gitea workflows accept both
+  branches until its default branch is renamed, and record recovery checks out the repository
+  default branch.
 - Docs: explain why Ubuntu 24.04's system Python 3.12.3 is below the verified 3.12.13 floor
   (the nested `prepare` entry's argument parsing differs and the test suite fails there) and
   show a `uv`-managed interpreter for that platform. No package change.

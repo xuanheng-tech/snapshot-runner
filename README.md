@@ -416,7 +416,7 @@ remote identities before recovery. These diagnostics do not change the explicit 
 option or the existing release-recovery workflows.
 
 When release-control code needs repair before a first upload, dispatch `publish-pypi`
-from `master` with the existing tag, exact annotated tag object, and exact source commit.
+from `main` with the existing tag, exact annotated tag object, and exact source commit.
 Control and source use separate checkouts. Remote identity and the fetched raw tag object
 are authoritative even if a checkout action changes its local tag ref. The publication
 artifact and Release receipt separately record the package-source commit, release-control

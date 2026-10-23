@@ -26,7 +26,7 @@ jobs:
         with:
           # Recovery executes current release control; package identity comes
           # exclusively from the original GitHub build receipt and raw tag.
-          ref: master
+          ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
           # The built-in job actor is used only for an exact missing public tag.
           token: ${{ github.token }}

@@ -1406,6 +1406,35 @@ def test_receipt_separates_control_and_source_provenance(monkeypatch, conflict) 
         assert actual["files"] == hashes
 
 
+@pytest.mark.parametrize(
+    ("control_ref", "accepted"),
+    [("refs/heads/main", True), ("refs/heads/master", True), ("refs/heads/feature", False)],
+)
+def test_receipt_accepts_current_and_pre_rename_control_branches(
+    monkeypatch, control_ref: str, accepted: bool
+) -> None:
+    release = {**RELEASE, "control_ref": control_ref}
+    hashes = dict.fromkeys(r.filenames("1.2.3"), "e" * 64)
+    receipt = r.record_identity(release, hashes)
+    monkeypatch.setattr(r, "public_identity", lambda *_: dict(RELEASE))
+    monkeypatch.setattr(
+        r,
+        "api",
+        lambda *_, **__: {
+            "head_sha": RELEASE["control_commit"],
+            "head_branch": control_ref.split("/", 2)[2],
+            "path": ".github/workflows/publish-pypi.yml",
+            "head_repository": {"full_name": r.PUBLIC_REPOSITORY},
+            "event": "workflow_dispatch",
+        },
+    )
+    if accepted:
+        assert r.receipt_identity(receipt)["control_ref"] == control_ref
+    else:
+        with pytest.raises(r.ReleaseError, match="malformed release receipt"):
+            r.receipt_identity(receipt)
+
+
 def test_receipt_file_mutation_blocks_before_upload(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "dist"
     hashes = artifacts(source)
