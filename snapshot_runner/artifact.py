@@ -24,6 +24,7 @@ from .security import (
     ARTIFACT_PUBLISH_FAILED,
     ARTIFACT_VALIDATION_FAILED,
     REPOSITORY_VALIDATION_FAILED,
+    RUNNER_STATE_DIRECTORY,
     RunnerError,
     ScanMode,
     ScanModeBinding,
@@ -108,8 +109,11 @@ def _state_home(target_repo: Path | None = None) -> Path:
         target_repository = target_repo.resolve(strict=True) if target_repo is not None else None
     except OSError as exc:
         raise RunnerError(REPOSITORY_VALIDATION_FAILED, "unable to resolve state home") from exc
-    if _paths_overlap(resolved, runner_repository) or (
-        target_repository is not None and _paths_overlap(resolved, target_repository)
+    # Only the Runner-owned subtree receives writes; a repository may live elsewhere under the
+    # state home (for example ~/.local/state/<tool>/<repo>) without overlapping it.
+    controlled_root = resolved / RUNNER_STATE_DIRECTORY
+    if _paths_overlap(controlled_root, runner_repository) or (
+        target_repository is not None and _paths_overlap(controlled_root, target_repository)
     ):
         raise RunnerError(
             REPOSITORY_VALIDATION_FAILED,
@@ -133,7 +137,7 @@ def _state_home(target_repo: Path | None = None) -> Path:
 
 
 def snapshot_output_root(target_repo: Path | None = None) -> Path:
-    return _state_home(target_repo) / "snapshot-runner" / "snapshots"
+    return _state_home(target_repo) / RUNNER_STATE_DIRECTORY / "snapshots"
 
 
 def _snapshot_sanitization_paths(extra_paths: tuple[Path, ...] = ()) -> tuple[Path, ...]:
@@ -166,7 +170,7 @@ def _ensure_private_state_directory(
 ) -> None:
     state_home = _state_home(target_repo)
     _validate_owned_private_directory(state_home, "state home")
-    controlled_root = state_home / "snapshot-runner"
+    controlled_root = state_home / RUNNER_STATE_DIRECTORY
     try:
         controlled_root.mkdir(mode=0o700, exist_ok=True)
     except OSError as exc:

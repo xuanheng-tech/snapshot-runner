@@ -17,6 +17,7 @@ from .security import (
     GIT_COMMAND_FAILED,
     GIT_PREFLIGHT_FAILED,
     REPOSITORY_VALIDATION_FAILED,
+    RUNNER_STATE_DIRECTORY,
     SNAPSHOT_COLLECTION_FAILED,
     RunnerError,
 )
@@ -1053,7 +1054,14 @@ def _validate_state_git_boundaries(
         protected.extend(
             (runner_paths.worktree_root, runner_paths.git_dir, runner_paths.git_common_dir)
         )
-    if any(_paths_overlap(state_home, path) for path in protected):
+    # A non-bare common dir sits in the main worktree, which shares the target's object store.
+    protected.extend(
+        paths.git_common_dir.parent
+        for paths in (target_paths, runner_paths)
+        if paths is not None and paths.git_common_dir.name == ".git"
+    )
+    controlled_root = state_home / RUNNER_STATE_DIRECTORY
+    if any(_paths_overlap(controlled_root, path) for path in protected):
         raise RunnerError(REPOSITORY_VALIDATION_FAILED, STATE_GIT_BOUNDARY_ERROR)
 
 

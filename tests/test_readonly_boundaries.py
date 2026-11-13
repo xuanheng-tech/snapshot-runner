@@ -2328,17 +2328,20 @@ def test_runner_root_is_shared_by_target_and_state_validation(
     monkeypatch.setattr(artifact_module, "REPOSITORY_ROOT", runner_repo)
     monkeypatch.setattr(runner, "_installed_runner_root", lambda: None)
     assert runner._validated_runner_worktree_path() == runner_repo
-    for candidate in (container, runner_repo, runner_repo / "state"):
+    for candidate in (runner_repo, runner_repo / "state"):
         monkeypatch.setenv("XDG_STATE_HOME", os.fspath(candidate))
         with pytest.raises(runner.RunnerError, match="outside and separate"):
             artifact_module._state_home()
+    container.chmod(0o700)
+    monkeypatch.setenv("XDG_STATE_HOME", os.fspath(container))
+    assert artifact_module._state_home() == container
     separate = tmp_path / "state"
     separate.mkdir(mode=0o700)
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(separate))
     assert artifact_module._state_home() == separate
 
 
-@pytest.mark.parametrize("relation", ["target", "target-child", "target-parent"])
+@pytest.mark.parametrize("relation", ["target", "target-child"])
 def test_state_home_is_separate_from_target_and_runner(
     monkeypatch: pytest.MonkeyPatch,
     target_repository: git.ValidatedTargetRepository,
@@ -2347,11 +2350,27 @@ def test_state_home_is_separate_from_target_and_runner(
     candidates = {
         "target": target_repository.path,
         "target-child": target_repository.path / "state",
-        "target-parent": target_repository.path.parent,
     }
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(candidates[relation]))
     with pytest.raises(runner.RunnerError, match="outside and separate"):
         artifact_module._state_home(target_repository.path)
+
+
+def test_target_may_live_under_state_home_outside_runner_subtree(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    target = state / "other-tool" / "repo"
+    target.mkdir(parents=True)
+    monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state))
+    assert artifact_module._state_home(target) == state
+
+    inside_runner_state = state / artifact_module.RUNNER_STATE_DIRECTORY / "repo"
+    inside_runner_state.mkdir(parents=True)
+    with pytest.raises(runner.RunnerError, match="outside and separate"):
+        artifact_module._state_home(inside_runner_state)
 
 
 def test_path_level_state_failure_runs_zero_git_commands_and_creates_no_artifact(

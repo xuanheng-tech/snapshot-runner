@@ -1,3 +1,3 @@
 """Snapshot Runner runtime."""
 
-__version__ = "2.5.12"
+__version__ = "2.5.13"

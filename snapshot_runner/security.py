@@ -38,6 +38,8 @@ class RunnerError(RuntimeError):
         super().__init__(message)
 
 
+#: The only state-home subdirectory the Runner writes.
+RUNNER_STATE_DIRECTORY = "snapshot-runner"
 REPOSITORY_VALIDATION_FAILED = "REPOSITORY_VALIDATION_FAILED"
 ARTIFACT_VALIDATION_FAILED = "ARTIFACT_VALIDATION_FAILED"
 ARTIFACT_PUBLISH_FAILED = "ARTIFACT_PUBLISH_FAILED"

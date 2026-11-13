@@ -5,6 +5,14 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.5.13 - 2026-11-13
+
+- Fixed: a target repository may live under the state home (for example
+  `~/.local/state/<tool>/<repo>`). Overlap checks now compare only the Runner-owned
+  `<state>/snapshot-runner` subtree with the target, Runner and Git administration paths,
+  plus the main worktree that holds a shared non-bare common dir. A state home inside a
+  repository or Git directory is still refused.
+
 ## 2.5.12
 
 - Complete the GitHub and Gitea default-branch migration to `main` and remove the temporary
