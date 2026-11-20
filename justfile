@@ -23,6 +23,11 @@ test-triage *args:
     #!/usr/bin/env bash
     exec uv run --no-cache --frozen --no-sync python -m snapshot_runner.cli prepare test-triage "$@"
 
+# Read targeted evidence from an existing local snapshot
+read *args:
+    #!/usr/bin/env bash
+    exec uv run --no-cache --frozen --no-sync python -m snapshot_runner.cli read "$@"
+
 # prepare-only fixed fail-closed sentinel
 analyze-snapshot *args:
     #!/usr/bin/env bash

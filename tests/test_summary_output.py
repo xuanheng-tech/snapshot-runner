@@ -255,7 +255,7 @@ def test_summary_public_entry_emits_bounded_json_for_all_four_commands(
     assert summary["warnings"] == []
     assert summary["warnings_omitted"] == 0
     assert set(summary["result"]) == result_keys
-    if task in {"repo-status", "branch-review"}:
+    if task in {"repo-status", "diff-audit", "branch-review"}:
         assert isinstance(summary["head"], str)
     else:
         assert summary["head"] is None

@@ -20,7 +20,7 @@ MAX_SCOPE_PATH_BYTES = 32 * 1024
 MAX_SCOPE_FILE_BYTES = 8 * 1024 * 1024
 MAX_SCOPE_TOTAL_BYTES = 16 * 1024 * 1024
 REVIEW_SCOPE_MODE = "isolated-clone"
-TEMP_ROOT = Path("/tmp") / f"snapshot-runner-{os.getuid()}"
+TEMP_ROOT = Path(os.path.realpath(tempfile.gettempdir())) / f"snapshot-runner-{os.getuid()}"
 
 
 @dataclass(frozen=True, slots=True)

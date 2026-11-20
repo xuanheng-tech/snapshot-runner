@@ -144,7 +144,11 @@ def test_a_frozen_era_does_not_read_the_live_constants(
     """
     frozen = security_module.SCAN_RULES_V2
     assert frozen.token_patterns is not security_module.KNOWN_TOKEN_PATTERNS
-    assert frozen.absolute_path_re.pattern == security_module.ABSOLUTE_PATH_RE.pattern
+    assert frozen.absolute_path_re.pattern != security_module.ABSOLUTE_PATH_RE.pattern
+    assert (
+        security_module.SCAN_RULES_EPOCH_6.absolute_path_re.pattern
+        == security_module.ABSOLUTE_PATH_RE.pattern
+    )
     assert frozen.yaml_text_suffixes is not security_module.YAML_TEXT_SUFFIXES
 
     monkeypatch.setattr(
@@ -267,7 +271,7 @@ def test_the_sanitizer_reuses_the_rules_of_the_era_being_read(
     )
     later = replace(
         era_4,
-        producer_security_epoch=5,
+        producer_security_epoch=UNREGISTERED_EPOCH,
         rules=later_rules,
         security_notice=era_4.security_notice.replace("version: 2.", "version: 3."),
     )
@@ -371,7 +375,7 @@ def test_each_pinned_rule_field_is_actually_era_dependent(
     later_rules = replace(era_4.rules, classifier_version=3, **{field: value})
     later = replace(
         era_4,
-        producer_security_epoch=5,
+        producer_security_epoch=UNREGISTERED_EPOCH,
         rules=later_rules,
         security_notice=era_4.security_notice.replace("version: 2.", "version: 3."),
     )

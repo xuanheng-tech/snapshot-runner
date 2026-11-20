@@ -55,8 +55,8 @@ def test_public_cli_contract_and_package_are_consistent() -> None:
         project = tomllib.load(stream)["project"]
 
     assert contract["schema_version"] == 1
-    # contract_version 3 records the addition of the targeted-evidence read subcommand.
-    assert contract["contract_version"] == 3
+    # contract_version 4 adds read --fields, --offset, and --limit options.
+    assert contract["contract_version"] == 4
     assert contract["tool_name"] == "snapshot-runner"
     assert contract["tool_version"] == project["version"]
     assert {command["name"] for command in contract["commands"]} == EXPECTED_COMMANDS
@@ -70,14 +70,16 @@ def test_public_cli_contract_and_package_are_consistent() -> None:
         for name, command in commands.items()
         if name != "diff-audit"
     )
-    assert {"--field", "--path"} <= set(commands["read"]["flags"])
+    assert {"--field", "--fields", "--path", "--offset", "--limit"} <= set(
+        commands["read"]["flags"]
+    )
     assert set(commands["read"]["result_statuses"]) == {
         "complete",
         "partial",
         "workflow_failed",
     }
     assert all(
-        not {"--field", "--path"} & set(command["flags"])
+        not {"--field", "--fields", "--path", "--offset", "--limit"} & set(command["flags"])
         for name, command in commands.items()
         if name != "read"
     )

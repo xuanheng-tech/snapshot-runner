@@ -795,6 +795,8 @@ def _validate_snapshot_envelope(value: object, verifier: ArtifactVerifier) -> di
             "baseline_oid",
             "initial_publication",
             "review_scope",
+            "head",
+            "current_branch",
         },
         "branch-review": {"conversion_safety"},
         "test-triage": set(),
@@ -850,6 +852,19 @@ def _validate_snapshot_envelope(value: object, verifier: ArtifactVerifier) -> di
                     "repository-status upstream schema is invalid",
                 )
     if task == "diff-audit":
+        if "head" in data and (
+            not isinstance(data["head"], str)
+            or (data["head"] != "unborn" and SNAPSHOT_GIT_OID_RE.fullmatch(data["head"]) is None)
+        ):
+            raise RunnerError(ARTIFACT_VALIDATION_FAILED, "diff head schema is invalid")
+        if "current_branch" in data and (
+            not isinstance(data["current_branch"], str)
+            or not data["current_branch"]
+            or len(data["current_branch"]) > 4096
+            or "\n" in data["current_branch"]
+            or "\r" in data["current_branch"]
+        ):
+            raise RunnerError(ARTIFACT_VALIDATION_FAILED, "diff branch schema is invalid")
         baseline_fields = {"baseline_kind", "baseline_oid"}
         present_baseline_fields = set(data) & baseline_fields
         if present_baseline_fields and (
@@ -857,6 +872,7 @@ def _validate_snapshot_envelope(value: object, verifier: ArtifactVerifier) -> di
             or data["baseline_kind"] != "empty_tree"
             or not isinstance(data["baseline_oid"], str)
             or SNAPSHOT_GIT_OID_RE.fullmatch(data["baseline_oid"]) is None
+            or ("head" in data and data["head"] != "unborn")
         ):
             raise RunnerError(ARTIFACT_VALIDATION_FAILED, "diff baseline schema is invalid")
         if "initial_publication" in data and present_baseline_fields != baseline_fields:

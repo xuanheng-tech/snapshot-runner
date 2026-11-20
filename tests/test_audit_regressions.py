@@ -704,7 +704,7 @@ def test_common_source_languages_are_text_under_the_new_era_only(
     _commit(repository)
     (repository / name).write_text("new\n", encoding="utf-8")
     snapshot = _prepare(repository)
-    assert snapshot.verifier.producer_security_epoch == 5
+    assert snapshot.verifier.producer_security_epoch == 6
     assert f"diff --git a/{name} b/{name}\n" in snapshot.envelope["data"]["unstaged_diff"]
     assert any(entry["path"] == name for entry in snapshot.envelope["data"]["file_context"])
     with (

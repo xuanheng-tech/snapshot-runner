@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import codecs
+import contextlib
 import hashlib
 import os
 import re
 import selectors
+import shutil
+import signal
 import stat
 import subprocess
 import time
@@ -20,6 +24,7 @@ from .security import (
     RUNNER_STATE_DIRECTORY,
     SNAPSHOT_COLLECTION_FAILED,
     RunnerError,
+    truncated_secret_boundary,
 )
 from .security import (
     canonical_owned_directory as _canonical_owned_directory,
@@ -56,6 +61,8 @@ class GitResult:
     returncode: int
     truncated: bool
     operation: str = "git"
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +136,7 @@ class GitCapabilityFingerprint:
 
 
 GIT_OID_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+GIT_ABBREV_OID_RE = re.compile(r"[0-9a-f]{7,64}")
 HEAD_STATE_ATTACHED = "attached"
 HEAD_STATE_DETACHED = "detached"
 HEAD_STATE_UNBORN = "unborn"
@@ -242,11 +250,23 @@ class ValidatedTargetRepository:
             raise RunnerError(REPOSITORY_VALIDATION_FAILED, TARGET_REPOSITORY_INVALID_ERROR)
 
 
+def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+    if process.pid > 0:
+        with contextlib.suppress(OSError, AttributeError):
+            if os.getpgid(process.pid) == process.pid:
+                os.killpg(process.pid, signal.SIGKILL)
+                return
+    with contextlib.suppress(OSError):
+        process.kill()
+
+
 class GitRunner:
     """Execute only runner-owned Git argv and capture bounded output."""
 
     _PREFIX = (
         "--no-pager",
+        "-c",
+        "core.quotePath=true",
         "-c",
         "core.hooksPath=/dev/null",
         "-c",
@@ -335,6 +355,7 @@ class GitRunner:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             shell=False,
+            start_new_session=True,
         )
         assert process.stdout is not None
         assert process.stderr is not None
@@ -345,12 +366,14 @@ class GitRunner:
         selector.register(process.stderr, selectors.EVENT_READ, "stderr")
         stdout = bytearray()
         stderr = bytearray()
-        truncated = False
+        stdout_truncated = False
+        stderr_truncated = False
+        stop_reading = False
         deadline = time.monotonic() + GIT_TIMEOUT_SECONDS
         try:
-            while selector.get_map():
+            while selector.get_map() and not stop_reading:
                 if time.monotonic() >= deadline:
-                    process.kill()
+                    _terminate_process_group(process)
                     raise RunnerError(GIT_COMMAND_FAILED, "fixed Git command exceeded its timeout")
                 for key, _events in selector.select(0.05):
                     chunk = os.read(key.fd, 64 * 1024)
@@ -360,25 +383,48 @@ class GitRunner:
                     target = stdout if key.data == "stdout" else stderr
                     room = maximum - len(target)
                     if room <= 0:
-                        truncated = True
-                        process.kill()
-                        continue
+                        if key.data == "stdout":
+                            stdout_truncated = True
+                        else:
+                            stderr_truncated = True
+                        _terminate_process_group(process)
+                        stop_reading = True
+                        break
                     target.extend(chunk[:room])
                     if len(chunk) > room:
-                        truncated = True
-                        process.kill()
+                        if key.data == "stdout":
+                            stdout_truncated = True
+                        else:
+                            stderr_truncated = True
+                        _terminate_process_group(process)
+                        stop_reading = True
+                        break
+            if stop_reading and process.poll() is None:
+                _terminate_process_group(process)
             returncode = process.wait(timeout=1)
         finally:
             selector.close()
             if process.poll() is None:
-                process.kill()
+                _terminate_process_group(process)
                 process.wait(timeout=1)
+            for stream in (process.stdout, process.stderr):
+                with contextlib.suppress(OSError):
+                    stream.close()
+        truncated = stdout_truncated or stderr_truncated
         operation = (
             arguments[0]
             if arguments and re.fullmatch(r"[a-z][a-z-]*", arguments[0]) is not None
             else "command"
         )
-        return GitResult(bytes(stdout), bytes(stderr), returncode, truncated, operation)
+        return GitResult(
+            bytes(stdout),
+            bytes(stderr),
+            returncode,
+            truncated,
+            operation,
+            stdout_truncated=stdout_truncated,
+            stderr_truncated=stderr_truncated,
+        )
 
     def hash_blob(
         self,
@@ -416,6 +462,7 @@ class GitRunner:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             shell=False,
+            start_new_session=True,
         )
         assert process.stdout is not None
         assert process.stderr is not None
@@ -429,11 +476,12 @@ class GitRunner:
         stderr = bytearray()
         byte_size = 0
         exceeded = False
+        stop_reading = False
         deadline = time.monotonic() + GIT_TIMEOUT_SECONDS
         try:
-            while selector.get_map():
+            while selector.get_map() and not stop_reading:
                 if time.monotonic() >= deadline:
-                    process.kill()
+                    _terminate_process_group(process)
                     raise RunnerError(GIT_COMMAND_FAILED, "fixed Git command exceeded its timeout")
                 for key, _events in selector.select(0.05):
                     chunk = os.read(key.fd, 64 * 1024)
@@ -444,26 +492,32 @@ class GitRunner:
                         byte_size += len(chunk)
                         if byte_size > maximum:
                             exceeded = True
-                            process.kill()
-                            continue
+                            _terminate_process_group(process)
+                            stop_reading = True
+                            break
                         digest.update(chunk)
                         if len(prefix) < 16:
                             prefix.extend(chunk[: 16 - len(prefix)])
                         continue
                     room = 16 * 1024 - len(stderr)
                     if room <= 0 or len(chunk) > room:
-                        process.kill()
+                        _terminate_process_group(process)
                         raise RunnerError(
                             SNAPSHOT_COLLECTION_FAILED,
                             "Git blob digest stderr exceeded its bound",
                         )
                     stderr.extend(chunk)
+            if stop_reading and process.poll() is None:
+                _terminate_process_group(process)
             returncode = process.wait(timeout=1)
         finally:
             selector.close()
             if process.poll() is None:
-                process.kill()
+                _terminate_process_group(process)
                 process.wait(timeout=1)
+            for stream in (process.stdout, process.stderr):
+                with contextlib.suppress(OSError):
+                    stream.close()
         if exceeded:
             raise RunnerError(SNAPSHOT_COLLECTION_FAILED, "Git blob digest exceeded its bound")
         if returncode != 0 or stderr or byte_size != expected_size:
@@ -1349,11 +1403,20 @@ def _revalidate_branch_review_seal(
 
 
 def _find_executable(name: str) -> str:
-    path = TRUSTED_EXECUTABLES.get(name)
-    if path is None:
+    preferred = TRUSTED_EXECUTABLES.get(name)
+    if preferred is None:
         raise RunnerError(
             REPOSITORY_VALIDATION_FAILED, f"required executable is unavailable: {name}"
         )
+    path: Path | None = None
+    if preferred.exists():
+        path = preferred
+    else:
+        located = shutil.which(name)
+        if located is not None:
+            path = Path(located)
+    if path is None:
+        raise RunnerError(REPOSITORY_VALIDATION_FAILED, f"unable to inspect executable: {name}")
     try:
         path_stat = path.stat()
         resolved = path.resolve(strict=True)
@@ -1377,12 +1440,14 @@ def _find_executable(name: str) -> str:
 MAX_GIT_OPERATION_METADATA_BYTES = 64 * 1024
 
 
-def _read_git_metadata_file(
+def _read_git_metadata_file_bounded(
     path: Path,
     *,
     max_bytes: int = MAX_GIT_OPERATION_METADATA_BYTES,
     description: str = "metadata file",
-) -> str:
+    normalize_crlf: bool = False,
+    truncate_to_limit: bool = False,
+) -> tuple[str, bool]:
     """Safely and boundedly read a repository metadata file without executing code."""
     try:
         st = path.lstat()
@@ -1403,7 +1468,7 @@ def _read_git_metadata_file(
             SNAPSHOT_COLLECTION_FAILED,
             f"unsafe active Git operation metadata: {path.name} is not a regular file",
         )
-    if st.st_size > max_bytes:
+    if not truncate_to_limit and st.st_size > max_bytes:
         raise RunnerError(
             SNAPSHOT_COLLECTION_FAILED,
             f"active Git operation metadata {path.name} exceeds size limit",
@@ -1428,8 +1493,9 @@ def _read_git_metadata_file(
             raise RunnerError(
                 SNAPSHOT_COLLECTION_FAILED, "active Git operation metadata changed during safe open"
             )
+        read_limit = max_bytes if truncate_to_limit else max_bytes + 1
         chunks: list[bytes] = []
-        remaining = max_bytes + 1
+        remaining = read_limit
         while remaining:
             chunk = os.read(descriptor, remaining)
             if not chunk:
@@ -1437,7 +1503,8 @@ def _read_git_metadata_file(
             chunks.append(chunk)
             remaining -= len(chunk)
         data = b"".join(chunks)
-        if identity(os.fstat(descriptor)) != identity(opened) or len(data) != opened.st_size:
+        expected_size = min(opened.st_size, max_bytes) if truncate_to_limit else opened.st_size
+        if identity(os.fstat(descriptor)) != identity(opened) or len(data) != expected_size:
             raise RunnerError(
                 SNAPSHOT_COLLECTION_FAILED, "active Git operation metadata changed while reading"
             )
@@ -1451,7 +1518,8 @@ def _read_git_metadata_file(
             os.close(descriptor)
         if directory_descriptor is not None:
             os.close(directory_descriptor)
-    if len(data) > max_bytes:
+    was_truncated = truncate_to_limit and opened.st_size > max_bytes
+    if not truncate_to_limit and len(data) > max_bytes:
         raise RunnerError(
             SNAPSHOT_COLLECTION_FAILED,
             f"active Git operation metadata {path.name} exceeds size limit",
@@ -1462,17 +1530,34 @@ def _read_git_metadata_file(
             f"malformed active Git operation metadata: null byte in {path.name}",
         )
     try:
-        text = data.decode("utf-8", errors="strict")
+        if was_truncated:
+            text = codecs.getincrementaldecoder("utf-8")(errors="strict").decode(data, final=False)
+        else:
+            text = data.decode("utf-8", errors="strict")
     except UnicodeError as exc:
         raise RunnerError(
             SNAPSHOT_COLLECTION_FAILED,
             f"malformed active Git operation metadata: {path.name} is not valid UTF-8",
         ) from exc
+    if normalize_crlf:
+        text = text.replace("\r\n", "\n")
     if "\r" in text:
         raise RunnerError(
             SNAPSHOT_COLLECTION_FAILED,
             f"malformed active Git operation metadata: carriage return in {path.name}",
         )
+    return text, was_truncated
+
+
+def _read_git_metadata_file(
+    path: Path,
+    *,
+    max_bytes: int = MAX_GIT_OPERATION_METADATA_BYTES,
+    description: str = "metadata file",
+) -> str:
+    text, _was_truncated = _read_git_metadata_file_bounded(
+        path, max_bytes=max_bytes, description=description
+    )
     return text
 
 
@@ -1522,10 +1607,18 @@ def _parse_merge_operation(git_dir: Path) -> dict[str, object]:
             )
     result: dict[str, object] = {"type": "merge", "heads": lines}
     if os.path.lexists(git_dir / "MERGE_MSG"):
-        msg = _read_git_metadata_file(
-            git_dir / "MERGE_MSG", max_bytes=4096, description="MERGE_MSG"
+        raw_msg, was_truncated = _read_git_metadata_file_bounded(
+            git_dir / "MERGE_MSG",
+            max_bytes=4096,
+            description="MERGE_MSG",
+            normalize_crlf=True,
+            truncate_to_limit=True,
         )
-        result["message"] = msg[:2048]
+        msg = raw_msg[:2048]
+        if (was_truncated or len(raw_msg) > 2048) and truncated_secret_boundary(msg) is not None:
+            msg = ""
+        if msg or not (was_truncated or len(raw_msg) > 2048):
+            result["message"] = msg
     if os.path.lexists(git_dir / "MERGE_MODE"):
         mode = _read_git_metadata_file(
             git_dir / "MERGE_MODE", max_bytes=256, description="MERGE_MODE"
@@ -1815,7 +1908,34 @@ def _parse_bisect_operation(git_dir: Path) -> dict[str, object]:
     return {"type": "bisect", "start": start}
 
 
-def detect_active_git_operation(git_dir: Path) -> dict[str, object] | None:
+def _resolve_sequencer_commit(
+    git_dir: Path,
+    raw_oid: str,
+    *,
+    git_runner: GitRunner | None = None,
+) -> str | None:
+    if GIT_OID_RE.fullmatch(raw_oid) is not None:
+        return raw_oid
+    if GIT_ABBREV_OID_RE.fullmatch(raw_oid) is None:
+        return None
+    runner = git_runner if git_runner is not None else GitRunner(git_dir, _find_executable("git"))
+    result = runner.run(("rev-parse", "--verify", f"{raw_oid}^{{commit}}"), maximum=256)
+    if (
+        result.returncode != 0
+        or result.truncated
+        or result.stderr
+        or not result.stdout.endswith(b"\n")
+    ):
+        return None
+    resolved = result.stdout.removesuffix(b"\n").decode("utf-8", errors="strict")
+    return resolved if GIT_OID_RE.fullmatch(resolved) is not None else None
+
+
+def detect_active_git_operation(
+    git_dir: Path,
+    *,
+    git_runner: GitRunner | None = None,
+) -> dict[str, object] | None:
     """Read-only structured detection for active Git operations from repository metadata.
 
     Fails closed on ambiguous, malformed, or unsafe metadata.
@@ -1866,15 +1986,26 @@ def detect_active_git_operation(git_dir: Path) -> dict[str, object] | None:
                         head_text = _read_git_metadata_file(
                             head_path, max_bytes=128, description="sequencer head"
                         ).removesuffix("\n")
-                        if GIT_OID_RE.fullmatch(head_text) is not None:
-                            return {"type": "revert", "head": head_text}
+                        resolved = _resolve_sequencer_commit(
+                            git_dir, head_text, git_runner=git_runner
+                        )
+                        if resolved is not None:
+                            return {"type": "revert", "head": resolved}
                     parts = first_line.split()
-                    if len(parts) >= 2 and GIT_OID_RE.fullmatch(parts[1]) is not None:
-                        return {"type": "revert", "head": parts[1]}
+                    if len(parts) >= 2:
+                        resolved = _resolve_sequencer_commit(
+                            git_dir, parts[1], git_runner=git_runner
+                        )
+                        if resolved is not None:
+                            return {"type": "revert", "head": resolved}
                 elif first_line.startswith("pick "):
                     parts = first_line.split()
-                    if len(parts) >= 2 and GIT_OID_RE.fullmatch(parts[1]) is not None:
-                        return {"type": "cherry-pick", "head": parts[1]}
+                    if len(parts) >= 2:
+                        resolved = _resolve_sequencer_commit(
+                            git_dir, parts[1], git_runner=git_runner
+                        )
+                        if resolved is not None:
+                            return {"type": "cherry-pick", "head": resolved}
                 raise RunnerError(
                     SNAPSHOT_COLLECTION_FAILED,
                     "ambiguous active Git operation metadata: unknown sequencer operation",

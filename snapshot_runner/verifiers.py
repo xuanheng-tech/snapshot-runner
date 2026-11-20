@@ -43,6 +43,7 @@ from .schema_v2 import SCHEMA_V2, SnapshotFormat
 from .security import (
     ARTIFACT_PUBLISH_FAILED,
     SCAN_RULES_EPOCH_5,
+    SCAN_RULES_EPOCH_6,
     SCAN_RULES_V2,
     SNAPSHOT_COLLECTION_FAILED,
     RunnerError,
@@ -102,6 +103,13 @@ _VERIFIER_EPOCH_5 = replace(
     _VERIFIER_EPOCH_4,
     producer_security_epoch=5,
     rules=SCAN_RULES_EPOCH_5,
+    is_current=False,
+)
+
+_VERIFIER_EPOCH_6 = replace(
+    _VERIFIER_EPOCH_5,
+    producer_security_epoch=6,
+    rules=SCAN_RULES_EPOCH_6,
     is_current=True,
 )
 
@@ -124,9 +132,9 @@ def _registry(
     return table
 
 
-_VERIFIERS = _registry((_VERIFIER_EPOCH_4, _VERIFIER_EPOCH_5))
+_VERIFIERS = _registry((_VERIFIER_EPOCH_4, _VERIFIER_EPOCH_5, _VERIFIER_EPOCH_6))
 
-CURRENT_VERIFIER = _VERIFIER_EPOCH_5
+CURRENT_VERIFIER = _VERIFIER_EPOCH_6
 
 
 def maximum_meta_bytes() -> int:

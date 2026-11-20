@@ -663,7 +663,7 @@ def test_prepare_publishes_content_addressed_private_snapshot(
     meta = json.loads((artifact.directory / "meta.json").read_bytes())
     assert envelope["schema_version"] == collect.SNAPSHOT_SCHEMA_VERSION == 2
     assert meta["schema_version"] == artifact_module.SNAPSHOT_META_SCHEMA_VERSION == 2
-    assert envelope["producer_security_epoch"] == collect.PRODUCER_SECURITY_EPOCH == 5
+    assert envelope["producer_security_epoch"] == collect.PRODUCER_SECURITY_EPOCH == 6
     assert meta["producer_security_epoch"] == collect.PRODUCER_SECURITY_EPOCH
     preview = (artifact.directory / "preview.txt").read_text(encoding="utf-8")
     assert preview.startswith("MANUAL REVIEW REQUIRED BEFORE UPLOAD\n")
@@ -1219,10 +1219,13 @@ def test_existing_state_home_requires_directory_owner_and_private_mode(
 ) -> None:
     state = tmp_path / "state"
     state.mkdir(mode=0o700)
-    state.chmod(0o755)
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state))
-    with pytest.raises(runner.RunnerError, match="mode 0700"):
-        artifact_module._state_home()
+    state.chmod(0o755)
+    assert artifact_module._state_home() == state
+    for writable_mode in (0o775, 0o777):
+        state.chmod(writable_mode)
+        with pytest.raises(runner.RunnerError, match="writable by group or others"):
+            artifact_module._state_home()
     state.chmod(0o700)
     actual_uid = os.getuid()
     monkeypatch.setattr(runner.os, "getuid", lambda: actual_uid + 1)
@@ -2191,7 +2194,7 @@ def test_prepare_only_public_entry_completes_all_four_prepare_workflows(
     meta = json.loads((directory / "meta.json").read_bytes())
     assert envelope["task"] == task
     assert envelope["schema_version"] == collect.SNAPSHOT_SCHEMA_VERSION == 2
-    assert envelope["producer_security_epoch"] == collect.PRODUCER_SECURITY_EPOCH == 5
+    assert envelope["producer_security_epoch"] == collect.PRODUCER_SECURITY_EPOCH == 6
     assert meta["schema_version"] == artifact_module.SNAPSHOT_META_SCHEMA_VERSION == 2
     assert meta["producer_security_epoch"] == collect.PRODUCER_SECURITY_EPOCH
     assert meta["snapshot_sha256"] == hashlib.sha256(snapshot_bytes).hexdigest()

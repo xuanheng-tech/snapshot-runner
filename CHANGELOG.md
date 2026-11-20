@@ -5,6 +5,39 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.6.0 - 2026-11-20
+
+- Changed: bumped public CLI contract to `contract_version` **4** and registered security
+  **epoch 6** (`PRODUCER_SECURITY_EPOCH = 6`, `SCAN_RULES_EPOCH_6`, `_VERIFIER_EPOCH_6`) while
+  preserving frozen epoch-4 and epoch-5 verifiers and snapshot schema **2** compatibility.
+- Added: `read --fields` (comma-separated batch field read) and `--offset`/`--limit` bounded string
+  slicing with static safe `ARGUMENT_ERROR` usage fallback, updated `read --help`, and a `justfile`
+  `read` recipe.
+- Added: `head` and `current_branch` optional task fields to `diff-audit` snapshots and `--summary`
+  `head` output (keeping historical epoch-4/epoch-5 `diff-audit` artifacts valid).
+- Fixed: `ABSOLUTE_PATH_RE` no longer corrupts HTML/JSX closing tags (`</div>`); `AUTH_HEADER_RE`
+  handles JSON/quoted values while preserving closing quotes and eliminates false positives on type
+  annotations, `None`, and function-call expressions; expanded `KNOWN_TOKEN_PATTERNS` and
+  `_CREDENTIAL_MARKER_RE` for Slack tokens, Stripe keys/webhooks, JWTs, GitHub fine-grained PATs,
+  and cloud credentials; `_redact_absolute_paths` uses path-boundary matching and ignores `/`.
+- Fixed: unified diff `@@` trailing heading context is sanitized rather than failing on control
+  checks or leaking paths, and shared `' '` context lines are no longer double-counted in
+  redactions; `_json_text_prefix` avoids splitting `[REDACTED_*]` placeholders.
+- Fixed: `GitRunner` separates `stdout_truncated`/`stderr_truncated`, never lets stderr truncation
+  or positive exit codes bypass failure handling, kills child process groups safely via
+  `start_new_session=True`, closes pipe streams in `finally` cleanly with zero `ResourceWarning`,
+  forces `-c core.quotePath=true`, and falls back to `PATH` lookup when `/usr/bin/git` is absent;
+  `_decode_git` cleanly decodes multi-byte UTF-8 boundary cuts.
+- Fixed: `_read_test_log` aligns oversized logs to `\n` boundaries when newlines exist and
+  `collect_test_triage` eliminates double sanitization/double counting; `branch-review` records a
+  `deleted_submodule` gap for removed `160000` gitlinks; `MERGE_MSG` handles CRLF and >4096 B
+  truncation; `sequencer/todo` resolves 7+ char abbreviated OIDs; `_configured_upstream_target`
+  accepts short `branch.<name>.merge`; `_atomic_write` fixes descriptor double-close; `_evidence_for_path`
+  matches `>256`-char gap subjects; cross-`HOME` `read` avoids ambient path injection and redundant
+  second invariant scans; `$XDG_STATE_HOME` accepts `0755`/`0700` while keeping `snapshot-runner/`
+  mode `0700`; `isolation.TEMP_ROOT` uses `os.path.realpath(tempfile.gettempdir())`; `ScanModeManifest.mode_for()`
+  is O(1); `git check-attr` is skipped when no attribute sources exist and conversion policy is empty.
+
 ## 2.5.13 - 2026-11-13
 
 - Fixed: a target repository may live under the state home (for example

@@ -11,7 +11,7 @@ import re
 import stat
 from collections import Counter
 from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -67,7 +67,14 @@ PEM_PRIVATE_KEY_BOUNDARY_RE = re.compile(
 )
 FILE_URI_RE = re.compile(r"(?i)\bfile://(?:localhost)?/(?:[^\s\x00\"'<>\\]|\\(?![\"']))+")
 AUTH_HEADER_RE = re.compile(
-    r"(?i)(?P<prefix>\b(?:proxy-)?authorization\s*[:=]\s*)(?P<value>[^\r\n]*)"
+    r"(?i)(?P<prefix>\b(?:proxy-)?authorization(?:\\?[\"'])?\s*[:=]\s*(?P<openq>\\\"|\\'|[\"'])?)"
+    r"(?P<value>"
+    r"(?(openq)"
+    r"(?:\[REDACTED(?:_[A-Z0-9_]+)?\]|(?:Bearer|Basic|Digest|Token|Api-?Key|OAuth|Negotiate|HOBA|Mutual|Bot|SSWS|AWS4-HMAC-SHA256)[ \t]+(?:[^\r\n\"'\\]|\\(?![\"']))+|(?!(?:true|false|null|none|undefined|required|optional|readonly|string|str|int|bool|float|bytes|any|object|dict|list)\b)[A-Za-z0-9._~+/=-]{6,})"
+    r"|"
+    r"(?:\[REDACTED(?:_[A-Z0-9_]+)?\]|(?:Bearer|Basic|Digest|Token|Api-?Key|OAuth|Negotiate|HOBA|Mutual|Bot|SSWS|AWS4-HMAC-SHA256)[ \t]+(?:[^\r\n\"'\\]|\\(?![\"']))+|(?!(?:true|false|null|undefined)\b)(?:(?=.*[0-9+/=-])[A-Za-z0-9._~+/=-]{8,}|[A-Za-z0-9+/=-]{16,})(?=$|[\r\n\s,;}\])\"'\\]))"
+    r"))"
+    r"(?(openq)(?=(?P=openq)))"
 )
 BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
 # A match may consume a backslash only when it is not the escape of a following
@@ -76,16 +83,38 @@ BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
 # Paths therefore end at an escape sequence exactly as they end at a quote,
 # while interior backslashes stay fully redacted.
 ABSOLUTE_PATH_RE = re.compile(
-    r"(?<![\w+.:/~-])/(?!/)"
+    r"(?<![\w+.:/~<-])/(?!/)"
     r"(?:(?:[^\s\x00\"'<>|\\]|\\(?![\"']))+/)*"
     r"(?:[^\s\x00\"'<>|,;:)\\]|\\(?![\"']))*"
 )
 
 KNOWN_TOKEN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("OPENAI_TOKEN", re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{16,}\b")),
-    ("GITHUB_TOKEN", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b")),
+    (
+        "GITHUB_TOKEN",
+        re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{22,})\b"),
+    ),
     ("AWS_ACCESS_KEY", re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")),
     ("GOOGLE_API_KEY", re.compile(r"\bAIza[A-Za-z0-9_-]{20,}\b")),
+    (
+        "SLACK_TOKEN",
+        re.compile(r"\b(?:xox[baprs]-[A-Za-z0-9-]{10,}|xapp-[0-9]+-[A-Za-z0-9-]{10,})\b"),
+    ),
+    (
+        "STRIPE_TOKEN",
+        re.compile(r"\b(?:sk_live|sk_test|rk_live|rk_test|whsec)_[A-Za-z0-9]{16,}\b"),
+    ),
+    ("JWT", re.compile(r"\beyJ[A-Za-z0-9_-]{6,}\.eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{8,}\b")),
+    (
+        "CLOUD_CREDENTIAL",
+        re.compile(
+            r"\b(?:glpat-[A-Za-z0-9_-]{16,}|npm_[A-Za-z0-9]{20,}|pypi-[A-Za-z0-9_-]{20,}|"
+            r"ya29\.[A-Za-z0-9_-]{16,}(?:\.[A-Za-z0-9_-]+)*|do[por]_v1_[a-f0-9]{32,}|"
+            r"hf_[A-Za-z0-9]{20,}|hvs\.[A-Za-z0-9_-]{20,}|"
+            r"SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|dapi[a-f0-9]{24,}|"
+            r"LTAI[A-Za-z0-9]{12,})\b"
+        ),
+    ),
 )
 
 SENSITIVE_FILE_SUFFIXES = frozenset({".pem", ".key", ".p12", ".pfx"})
@@ -412,6 +441,59 @@ SCAN_RULES_EPOCH_5 = replace(
     ),
 )
 
+# Epoch 6 hardens auth-header matching (quoted/JSON values and annotation FPs), HTML closing tag
+# exclusion on path redaction, and expanded secret-token patterns. Literals stay inline here so
+# historical epochs never drift from the live rule constants.
+SCAN_RULES_EPOCH_6 = replace(
+    SCAN_RULES_EPOCH_5,
+    token_patterns=(
+        ("OPENAI_TOKEN", re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{16,}\b")),
+        (
+            "GITHUB_TOKEN",
+            re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{22,})\b"),
+        ),
+        ("AWS_ACCESS_KEY", re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")),
+        ("GOOGLE_API_KEY", re.compile(r"\bAIza[A-Za-z0-9_-]{20,}\b")),
+        (
+            "SLACK_TOKEN",
+            re.compile(r"\b(?:xox[baprs]-[A-Za-z0-9-]{10,}|xapp-[0-9]+-[A-Za-z0-9-]{10,})\b"),
+        ),
+        (
+            "STRIPE_TOKEN",
+            re.compile(r"\b(?:sk_live|sk_test|rk_live|rk_test|whsec)_[A-Za-z0-9]{16,}\b"),
+        ),
+        (
+            "JWT",
+            re.compile(r"\beyJ[A-Za-z0-9_-]{6,}\.eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{8,}\b"),
+        ),
+        (
+            "CLOUD_CREDENTIAL",
+            re.compile(
+                r"\b(?:glpat-[A-Za-z0-9_-]{16,}|npm_[A-Za-z0-9]{20,}|pypi-[A-Za-z0-9_-]{20,}|"
+                r"ya29\.[A-Za-z0-9_-]{16,}(?:\.[A-Za-z0-9_-]+)*|do[por]_v1_[a-f0-9]{32,}|"
+                r"hf_[A-Za-z0-9]{20,}|hvs\.[A-Za-z0-9_-]{20,}|"
+                r"SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|dapi[a-f0-9]{24,}|"
+                r"LTAI[A-Za-z0-9]{12,})\b"
+            ),
+        ),
+    ),
+    auth_header_re=re.compile(
+        r"(?i)(?P<prefix>\b(?:proxy-)?authorization(?:\\?[\"'])?\s*[:=]\s*(?P<openq>\\\"|\\'|[\"'])?)"
+        r"(?P<value>"
+        r"(?(openq)"
+        r"(?:\[REDACTED(?:_[A-Z0-9_]+)?\]|(?:Bearer|Basic|Digest|Token|Api-?Key|OAuth|Negotiate|HOBA|Mutual|Bot|SSWS|AWS4-HMAC-SHA256)[ \t]+(?:[^\r\n\"'\\]|\\(?![\"']))+|(?!(?:true|false|null|none|undefined|required|optional|readonly|string|str|int|bool|float|bytes|any|object|dict|list)\b)[A-Za-z0-9._~+/=-]{6,})"
+        r"|"
+        r"(?:\[REDACTED(?:_[A-Z0-9_]+)?\]|(?:Bearer|Basic|Digest|Token|Api-?Key|OAuth|Negotiate|HOBA|Mutual|Bot|SSWS|AWS4-HMAC-SHA256)[ \t]+(?:[^\r\n\"'\\]|\\(?![\"']))+|(?!(?:true|false|null|undefined)\b)(?:(?=.*[0-9+/=-])[A-Za-z0-9._~+/=-]{8,}|[A-Za-z0-9+/=-]{16,})(?=$|[\r\n\s,;}\])\"'\\]))"
+        r"))"
+        r"(?(openq)(?=(?P=openq)))"
+    ),
+    absolute_path_re=re.compile(
+        r"(?<![\w+.:/~<-])/(?!/)"
+        r"(?:(?:[^\s\x00\"'<>|\\]|\\(?![\"']))+/)*"
+        r"(?:[^\s\x00\"'<>|,;:)\\]|\\(?![\"']))*"
+    ),
+)
+
 
 #: The rules this release writes new artifacts under, read from the live constants, so a rule edit
 #: above shows up here immediately and no longer moves any registered era. A read with no installed
@@ -524,23 +606,27 @@ class ScanModeBinding:
 class ScanModeManifest:
     classifier_version: int
     bindings: tuple[ScanModeBinding, ...]
+    _modes: MappingProxyType[tuple[str | int, ...], ScanMode] = field(
+        init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if self.classifier_version not in SUPPORTED_SCAN_CLASSIFIER_VERSIONS:
             raise SecurityError("scan mode classifier version is invalid")
-        seen: set[tuple[str | int, ...]] = set()
+        modes: dict[tuple[str | int, ...], ScanMode] = {}
         for binding in self.bindings:
             if not isinstance(binding, ScanModeBinding) or not isinstance(binding.mode, ScanMode):
                 raise SecurityError("scan mode manifest contains an invalid binding")
-            if binding.path in seen:
+            if binding.path in modes:
                 raise SecurityError("scan mode manifest contains duplicate paths")
-            seen.add(binding.path)
+            modes[binding.path] = binding.mode
+        object.__setattr__(self, "_modes", MappingProxyType(modes))
 
     def mode_for(self, path: tuple[str | int, ...]) -> ScanMode:
-        for binding in self.bindings:
-            if binding.path == path:
-                return binding.mode
-        raise SecurityError("scan mode manifest is missing a text path")
+        mode = self._modes.get(path)
+        if mode is None:
+            raise SecurityError("scan mode manifest is missing a text path")
+        return mode
 
 
 def paths_overlap(first: Path, second: Path) -> bool:
@@ -681,7 +767,9 @@ _CREDENTIAL_RUN_CHARACTERS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWX
 # has to be repeated in front of an anchor. A marker is a straddle only when the run that follows it
 # reaches the last character, which is what the bounds on the scan below decide.
 _CREDENTIAL_MARKER_RE = re.compile(
-    r"\b(?:sk-(?:proj-)?|gh[pousr]_|AIza|(?:AKIA|ASIA)|(?i:bearer)\s)"
+    r"\b(?:sk-(?:proj-)?|gh[pousr]_|github_pat_|AIza|(?:AKIA|ASIA)|(?i:bearer)\s|"
+    r"xox[baprs]-|xapp-|(?:sk|rk)_(?:live|test)_|whsec_|eyJ|"
+    r"glpat-|npm_|pypi-|ya29\.|do[por]_v1_|hf_|hvs\.|SG\.|dapi|LTAI)"
 )
 # Only this much of the text in front of the run is worth looking at: a marker that ends at or after the
 # run starts either sits inside the run or is one of these few characters away from it, and a credential
@@ -839,17 +927,23 @@ def _redact_absolute_paths(
     replacements: list[tuple[str, str, bool]] = []
     if repository_root is not None:
         repository = os.fspath(repository_root)
-        replacements.append((repository + os.sep, "", False))
-        replacements.append((repository, ".", False))
+        if repository.rstrip(os.sep):
+            if not repository.endswith(os.sep):
+                replacements.append((repository + os.sep, "", False))
+            replacements.append((repository, ".", False))
     for path in explicit_paths:
-        replacements.append((os.fspath(path), _safe_basename(os.fspath(path)), True))
+        raw_path = os.fspath(path)
+        if raw_path.rstrip(os.sep):
+            replacements.append((raw_path, _safe_basename(raw_path), True))
     replacements.sort(key=lambda item: len(item[0]), reverse=True)
     for original, replacement, is_security_replacement in replacements:
-        if original and original in redacted:
-            occurrences = redacted.count(original)
-            redacted = redacted.replace(original, replacement)
-            if is_security_replacement:
-                counts["ABSOLUTE_PATH"] += occurrences
+        if not original or original not in redacted:
+            continue
+        trailing = "" if original.endswith(os.sep) else r"(?![\w.-])"
+        boundary = re.compile(rf"(?<![\w+.:/~<-]){re.escape(original)}{trailing}")
+        redacted, occurrences = boundary.subn(lambda _match, target=replacement: target, redacted)
+        if is_security_replacement and occurrences:
+            counts["ABSOLUTE_PATH"] += occurrences
 
     def generic_path(match: re.Match[str]) -> str:
         raw = match.group(0)
@@ -1316,7 +1410,7 @@ def _parse_diff_range(raw: str, prefix: str) -> int:
     return int(count)
 
 
-def _parse_diff_hunk_header(line: str) -> tuple[int, int]:
+def _split_diff_hunk_header(line: str) -> tuple[int, int, str, str]:
     raw = _diff_line_text(line)
     if not raw.startswith("@@ "):
         raise SecurityError("unified diff hunk header is invalid")
@@ -1326,7 +1420,17 @@ def _parse_diff_hunk_header(line: str) -> tuple[int, int]:
     fields = raw[3:closing].split()
     if len(fields) != 2:
         raise SecurityError("unified diff hunk header ranges are invalid")
-    return _parse_diff_range(fields[0], "-"), _parse_diff_range(fields[1], "+")
+    return (
+        _parse_diff_range(fields[0], "-"),
+        _parse_diff_range(fields[1], "+"),
+        raw[: closing + 3],
+        raw[closing + 3 :],
+    )
+
+
+def _parse_diff_hunk_header(line: str) -> tuple[int, int]:
+    old_count, new_count, _header_prefix, _trailing = _split_diff_hunk_header(line)
+    return old_count, new_count
 
 
 def _sanitize_diff_payload(
@@ -1418,7 +1522,11 @@ def _process_unified_diff(
                 index += 1
                 continue
             if line.startswith("@@ "):
-                _validate_diff_control_line(line)
+                hunk_line = lines[index]
+                old_count, new_count, header_prefix, trailing_context = _split_diff_hunk_header(
+                    hunk_line
+                )
+                _validate_diff_control_line(header_prefix)
                 if not (saw_old_header and saw_new_header):
                     raise SecurityError("unified diff hunk precedes its file paths")
                 metadata_pair = (
@@ -1439,7 +1547,21 @@ def _process_unified_diff(
                 mode = _diff_mode(
                     old_side, new_side, repository_root, verify_live_diff_text=verify_live_diff_text
                 )
-                old_count, new_count = _parse_diff_hunk_header(lines[index])
+                if sanitize_payload and trailing_context:
+                    sanitized_trailing = sanitize_text(
+                        trailing_context,
+                        scan_mode=ScanMode.PLAIN_TEXT,
+                        repository_root=repository_root,
+                        explicit_paths=explicit_paths,
+                    )
+                    if "\n" in sanitized_trailing.text or "\r" in sanitized_trailing.text:
+                        raise SecurityError(
+                            "credential sanitization changed unified diff line boundaries"
+                        )
+                    for category, count in sanitized_trailing.redactions.items():
+                        counts[category] += count
+                    line_ending = hunk_line[len(_diff_line_text(hunk_line)) :]
+                    output[index] = header_prefix + sanitized_trailing.text + line_ending
                 index += 1
                 old_refs: list[int] = []
                 new_refs: list[int] = []
@@ -1476,17 +1598,19 @@ def _process_unified_diff(
                 if index < len(lines) and lines[index].startswith("\\ No newline at end of file"):
                     index += 1
                 if sanitize_payload:
+                    old_counts: Counter[str] = Counter()
+                    new_counts: Counter[str] = Counter()
                     sanitized_old = _sanitize_diff_payload(
                         "".join(old_payload),
                         mode,
-                        counts,
+                        old_counts,
                         repository_root=repository_root,
                         explicit_paths=explicit_paths,
                     )
                     sanitized_new = _sanitize_diff_payload(
                         "".join(new_payload),
                         mode,
-                        counts,
+                        new_counts,
                         repository_root=repository_root,
                         explicit_paths=explicit_paths,
                     )
@@ -1494,6 +1618,22 @@ def _process_unified_diff(
                         raise SecurityError(
                             "credential sanitization changed unified diff line boundaries"
                         )
+                    counts += old_counts + new_counts
+                    if context_refs:
+                        if len(old_refs) == len(context_refs):
+                            counts -= old_counts
+                        elif len(new_refs) == len(context_refs):
+                            counts -= new_counts
+                        else:
+                            context_counts: Counter[str] = Counter()
+                            _sanitize_diff_payload(
+                                "".join(lines[ref][1:] for ref in context_refs),
+                                mode,
+                                context_counts,
+                                repository_root=repository_root,
+                                explicit_paths=explicit_paths,
+                            )
+                            counts -= context_counts
                     replacements: dict[int, str] = {}
                     for line_index, payload in zip(old_refs, sanitized_old, strict=True):
                         replacements[line_index] = "-" + payload

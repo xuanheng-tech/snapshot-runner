@@ -131,8 +131,11 @@ def _state_home(target_repo: Path | None = None) -> Path:
         raise RunnerError(
             REPOSITORY_VALIDATION_FAILED, "state home must be owned by the current user"
         )
-    if stat.S_IMODE(state_stat.st_mode) != 0o700:
-        raise RunnerError(REPOSITORY_VALIDATION_FAILED, "state home must have mode 0700")
+    if (stat.S_IMODE(state_stat.st_mode) & 0o022) != 0:
+        raise RunnerError(
+            REPOSITORY_VALIDATION_FAILED,
+            "state home must not be writable by group or others",
+        )
     return normalized
 
 
@@ -169,7 +172,6 @@ def _ensure_private_state_directory(
     target_repo: Path | None = None,
 ) -> None:
     state_home = _state_home(target_repo)
-    _validate_owned_private_directory(state_home, "state home")
     controlled_root = state_home / RUNNER_STATE_DIRECTORY
     try:
         controlled_root.mkdir(mode=0o700, exist_ok=True)
@@ -527,8 +529,14 @@ def _build_summary_output(artifact: SnapshotArtifact, runner_version: str) -> by
         if task == "repo-status"
         else data.get("target_head")
         if task == "branch-review"
-        else "unborn"
-        if task == "diff-audit" and data.get("baseline_kind") == "empty_tree"
+        else (
+            data.get("head")
+            if isinstance(data.get("head"), str)
+            else "unborn"
+            if data.get("baseline_kind") == "empty_tree"
+            else None
+        )
+        if task == "diff-audit"
         else None
     )
     summary: dict[str, object] = {
@@ -692,8 +700,15 @@ def _evidence_for_path(
             for record in publication["files"]
             if isinstance(record, dict) and record.get("path") == target_path
         ]
+    targeted_subject = target_path[:256]
     targeted_gaps = [
-        gap for gap in gaps if isinstance(gap, dict) and gap.get("subject") == target_path
+        gap
+        for gap in gaps
+        if isinstance(gap, dict)
+        and (
+            gap.get("subject") == target_path
+            or (len(target_path) > 256 and gap.get("subject") == targeted_subject)
+        )
     ]
     diff_sections: dict[str, object] = {}
     matched_any = False
@@ -730,7 +745,10 @@ def _build_evidence_output(
     *,
     repository_root: Path,
     field: str | None = None,
+    fields: tuple[str, ...] | None = None,
     path: str | None = None,
+    offset: int | None = None,
+    limit: int | None = None,
 ) -> bytes:
     # The stored body is already loaded and validated; attributing it still runs the diff and path
     # rules over those bytes, so it must run under the same era that was used to validate them.
@@ -740,13 +758,17 @@ def _build_evidence_output(
         data = envelope.get("data")
         repository = envelope.get("repository")
         gaps = envelope.get("evidence_gaps")
+        selector_count = sum(item is not None for item in (field, fields, path))
         if (
             task != artifact.task
             or task not in TASKS
             or not isinstance(data, dict)
             or not isinstance(repository, str)
             or not isinstance(gaps, list)
-            or (field is not None and path is not None)
+            or selector_count > 1
+            or ((offset is not None or limit is not None) and field is None)
+            or (offset is not None and (isinstance(offset, bool) or offset < 0))
+            or (limit is not None and (isinstance(limit, bool) or limit < 0))
         ):
             raise RunnerError(ARTIFACT_VALIDATION_FAILED, "evidence source artifact is invalid")
         truncated = envelope.get("truncated") is True
@@ -767,7 +789,36 @@ def _build_evidence_output(
                     "evidence field selector does not match snapshot data",
                 )
             selector: dict[str, object] = {"kind": "field", "value": field}
-            evidence: dict[str, object] = {"field": field, "value": data[field]}
+            if offset is not None or limit is not None:
+                raw_value = data[field]
+                if not isinstance(raw_value, str):
+                    raise RunnerError(
+                        ARTIFACT_VALIDATION_FAILED,
+                        "evidence offset and limit selectors require a string field",
+                    )
+                total_length = len(raw_value)
+                start = min(offset if offset is not None else 0, total_length)
+                end = total_length if limit is None else min(start + limit, total_length)
+                evidence: dict[str, object] = {
+                    "field": field,
+                    "value": raw_value[start:end],
+                    "offset": start,
+                    "limit": limit,
+                    "total_length": total_length,
+                    "has_more": end < total_length,
+                }
+            else:
+                evidence = {"field": field, "value": data[field]}
+            found = True
+        elif fields is not None:
+            unique_fields = tuple(dict.fromkeys(fields))
+            if not unique_fields or any(name not in data for name in unique_fields):
+                raise RunnerError(
+                    ARTIFACT_VALIDATION_FAILED,
+                    "evidence field selector does not match snapshot data",
+                )
+            selector = {"kind": "fields", "values": list(unique_fields)}
+            evidence = {"fields": {name: data[name] for name in unique_fields}}
             found = True
         elif path is not None:
             selector = {"kind": "path", "value": path}
@@ -844,7 +895,14 @@ def _snapshot_data_scan_manifest(
     }
     for key in plain_fields[task]:
         bindings[(key,)] = ScanMode.PLAIN_TEXT
-    for key in ("upstream", "ahead_behind", "baseline_kind", "baseline_oid"):
+    for key in (
+        "upstream",
+        "ahead_behind",
+        "baseline_kind",
+        "baseline_oid",
+        "head",
+        "current_branch",
+    ):
         if key in data:
             bindings[(key,)] = ScanMode.PLAIN_TEXT
     conversion_safety = data.get("conversion_safety")
@@ -924,6 +982,7 @@ def _sanitize_validate_snapshot(
     repository_root: Path,
     *,
     extra_paths: tuple[Path, ...] = (),
+    include_ambient_paths: bool = True,
     expected_scan_manifest: ScanModeManifest | None = None,
     verify_live_diff_text: bool = True,
     verifier: ArtifactVerifier | None = None,
@@ -953,7 +1012,9 @@ def _sanitize_validate_snapshot(
             raise _runner_security_error(
                 exc, "artifact scan classifier manifest validation failed"
             ) from exc
-        explicit_paths = _snapshot_sanitization_paths(extra_paths)
+        explicit_paths = (
+            _snapshot_sanitization_paths(extra_paths) if include_ambient_paths else extra_paths
+        )
         try:
             normalized = sanitize_json_value(
                 protected,
@@ -968,22 +1029,23 @@ def _sanitize_validate_snapshot(
             _restore_snapshot_redactions(normalized, redactions), verifier
         )
 
-        invariant_input, invariant_redactions = _protect_snapshot_redactions(normalized)
-        try:
-            invariant_value = sanitize_json_value(
-                invariant_input,
-                scan_manifest=scan_manifest,
-                repository_root=repository_root,
-                explicit_paths=explicit_paths,
-                verify_live_diff_text=verify_live_diff_text,
-            )
-        except SecurityError as exc:
-            raise _runner_security_error(exc, "artifact invariant scan failed closed") from exc
-        invariant_value = _restore_snapshot_redactions(invariant_value, invariant_redactions)
-        if invariant_value != normalized:
-            raise RunnerError(
-                ARTIFACT_VALIDATION_FAILED, "artifact failed final secret or path invariants"
-            )
+        if verify_live_diff_text:
+            invariant_input, invariant_redactions = _protect_snapshot_redactions(normalized)
+            try:
+                invariant_value = sanitize_json_value(
+                    invariant_input,
+                    scan_manifest=scan_manifest,
+                    repository_root=repository_root,
+                    explicit_paths=explicit_paths,
+                    verify_live_diff_text=verify_live_diff_text,
+                )
+            except SecurityError as exc:
+                raise _runner_security_error(exc, "artifact invariant scan failed closed") from exc
+            invariant_value = _restore_snapshot_redactions(invariant_value, invariant_redactions)
+            if invariant_value != normalized:
+                raise RunnerError(
+                    ARTIFACT_VALIDATION_FAILED, "artifact failed final secret or path invariants"
+                )
     return normalized
 
 
@@ -1151,7 +1213,7 @@ def _load_snapshot_directory(
     envelope = _sanitize_validate_snapshot(
         envelope_value,
         active_root if active_root is not None else REPOSITORY_ROOT,
-        extra_paths=(directory,),
+        include_ambient_paths=False,
         verify_live_diff_text=False,
         verifier=verifier,
     )
@@ -1198,9 +1260,12 @@ def _atomic_write(path: Path, content: bytes, maximum: int) -> None:
         )
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(temporary_name)
+    unowned_fd: int | None = descriptor
     try:
         os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "wb") as output:
+        output_file = os.fdopen(descriptor, "wb")
+        unowned_fd = None
+        with output_file as output:
             output.write(content)
             output.flush()
             os.fsync(output.fileno())
@@ -1212,8 +1277,9 @@ def _atomic_write(path: Path, content: bytes, maximum: int) -> None:
         finally:
             os.close(directory_descriptor)
     except Exception:
-        with contextlib.suppress(OSError):
-            os.close(descriptor)
+        if unowned_fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(unowned_fd)
         with contextlib.suppress(OSError):
             temporary.unlink()
         raise

@@ -93,7 +93,10 @@
       "flags": [
         "--repo",
         "--field",
+        "--fields",
         "--path",
+        "--offset",
+        "--limit",
         "--version",
         "--help"
       ],
@@ -111,7 +114,7 @@
       ]
     }
   ],
-  "contract_version": 3,
+  "contract_version": 4,
   "flags": {
     "canonical_artifact": "snapshot.json",
     "evidence_read": "bounded_targeted_json_derived_from_canonical_artifact",
@@ -143,5 +146,5 @@
   ],
   "schema_version": 1,
   "tool_name": "snapshot-runner",
-  "tool_version": "2.5.13"
+  "tool_version": "2.6.0"
 }
