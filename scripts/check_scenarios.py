@@ -255,8 +255,8 @@ def check_case(
         snapshot_ids.add(summary["snapshot_id"])
     read_bytes = None
     if summary:
-        if task == "repo-status":
-            selector = ["--field", "head"]
+        if task == "repo-status" or name == "yaml-secret-boundary":
+            selector = ["--field", "status_short" if name == "yaml-secret-boundary" else "head"]
         elif task == "test-triage":
             selector = ["--field", "log"]
         else:
@@ -267,7 +267,6 @@ def check_case(
                 "binary": "unknown.bin",
                 "large-context": "large.txt",
                 "yaml-benign": "config.yaml",
-                "yaml-secret-boundary": "secrets.yml",
             }.get(name, "safe.py")
             selector = ["--path", path]
         read = run(
