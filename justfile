@@ -28,6 +28,11 @@ read *args:
     #!/usr/bin/env bash
     exec uv run --no-cache --frozen --no-sync python -m snapshot_runner.cli read "$@"
 
+# Prune old unreferenced snapshots from the private local snapshot store
+prune *args:
+    #!/usr/bin/env bash
+    exec uv run --no-cache --frozen --no-sync python -m snapshot_runner.cli prune "$@"
+
 # prepare-only fixed fail-closed sentinel
 analyze-snapshot *args:
     #!/usr/bin/env bash

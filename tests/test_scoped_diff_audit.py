@@ -314,11 +314,18 @@ def test_baseline_index_failure_cleans_temporary_clone(
 
 def test_collection_failure_cleans_temporary_clone(
     isolated_environment: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     repo, _state, temp_root = isolated_environment
-    (repo / "unsafe.yaml").write_text("unsafe: changed\n", encoding="utf-8")
+    (repo / "selected.py").write_text("SELECTED_CHANGE\n", encoding="utf-8")
 
+    def fail_collect(*_args: object, **_kwargs: object) -> object:
+        raise security.RunnerError(
+            security.SNAPSHOT_COLLECTION_FAILED, "synthetic collection failure"
+        )
+
+    monkeypatch.setattr(cli.collect_module, "collect_diff_audit", fail_collect)
     result = cli.main(
         [
             "prepare",
@@ -326,12 +333,12 @@ def test_collection_failure_cleans_temporary_clone(
             "--repo",
             os.fspath(repo),
             "--scope-path",
-            "unsafe.yaml",
+            "selected.py",
         ]
     )
 
     assert result == 2
-    assert security.YAML_CONTENT_REFUSED in capsys.readouterr().err
+    assert "synthetic collection failure" in capsys.readouterr().err
     _assert_no_task_directory(temp_root)
 
 

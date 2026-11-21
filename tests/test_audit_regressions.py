@@ -656,12 +656,16 @@ def test_generated_tree_stops_at_file_and_directory_quotas(repository: Path, mon
 
 def test_repo_status_accepts_yaml_metadata_without_reading_the_body(repository: Path) -> None:
     marker = "SYNTHETIC_YAML_BODY"
-    (repository / "settings.yaml").write_text(f"value: {marker}\n", encoding="utf-8")
+    (repository / "secrets.yaml").write_text(f"value: {marker}\n", encoding="utf-8")
     snapshot = _prepare(repository, "repo-status")
-    assert "settings.yaml" in snapshot.envelope["data"]["status_short"]
+    assert "secrets.yaml" in snapshot.envelope["data"]["status_short"]
     assert marker.encode() not in snapshot.snapshot_bytes
-    with pytest.raises(security.RunnerError, match=security.YAML_CONTENT_REFUSED):
-        _prepare(repository)
+    diff_snapshot = _prepare(repository)
+    assert marker.encode() not in diff_snapshot.snapshot_bytes
+    assert any(
+        gap["kind"] == "file_refused" and gap["subject"] == "secrets.yaml"
+        for gap in diff_snapshot.envelope["evidence_gaps"]
+    )
 
 
 @pytest.mark.parametrize("name", ["项目", "project with spaces", "中文 项目"])
@@ -704,7 +708,7 @@ def test_common_source_languages_are_text_under_the_new_era_only(
     _commit(repository)
     (repository / name).write_text("new\n", encoding="utf-8")
     snapshot = _prepare(repository)
-    assert snapshot.verifier.producer_security_epoch == 6
+    assert snapshot.verifier.producer_security_epoch == 7
     assert f"diff --git a/{name} b/{name}\n" in snapshot.envelope["data"]["unstaged_diff"]
     assert any(entry["path"] == name for entry in snapshot.envelope["data"]["file_context"])
     with (

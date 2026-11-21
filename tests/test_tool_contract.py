@@ -10,7 +10,7 @@ import pytest
 from snapshot_runner import artifact, cli, collect
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_COMMANDS = {"repo-status", "diff-audit", "branch-review", "test-triage", "read"}
+EXPECTED_COMMANDS = {"repo-status", "diff-audit", "branch-review", "test-triage", "read", "prune"}
 
 
 @pytest.mark.parametrize(
@@ -55,15 +55,29 @@ def test_public_cli_contract_and_package_are_consistent() -> None:
         project = tomllib.load(stream)["project"]
 
     assert contract["schema_version"] == 1
-    # contract_version 4 adds read --fields, --offset, and --limit options.
-    assert contract["contract_version"] == 4
+    # contract_version 5 adds the local_mutation `prune` snapshot-store retention command.
+    assert contract["contract_version"] == 5
     assert contract["tool_name"] == "snapshot-runner"
     assert contract["tool_version"] == project["version"]
     assert {command["name"] for command in contract["commands"]} == EXPECTED_COMMANDS
-    assert {command["operation_class"] for command in contract["commands"]} == {"read_only"}
+    assert {command["operation_class"] for command in contract["commands"]} == {
+        "read_only",
+        "local_mutation",
+    }
     statuses = {status for command in contract["commands"] for status in command["result_statuses"]}
     assert {"evidence_gap", "truncated"} <= statuses
     commands = {command["name"]: command for command in contract["commands"]}
+    assert commands["prune"]["operation_class"] == "local_mutation"
+    assert {
+        command["operation_class"] for name, command in commands.items() if name != "prune"
+    } == {"read_only"}
+    assert {
+        "--older-than-days",
+        "--keep",
+        "--keep-file",
+        "--keep-latest",
+        "--dry-run",
+    } <= set(commands["prune"]["flags"])
     assert "--scope-path" in commands["diff-audit"]["flags"]
     assert all(
         "--scope-path" not in command["flags"]

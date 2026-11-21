@@ -115,7 +115,7 @@ def test_collection_clis_preserve_evidence_and_target(workspace, task: str, entr
     artifact = Path(summary["artifact"])
     assert artifact.parts[-4:-2] == ("snapshot-runner", "snapshots")
     assert hashlib.sha256(artifact.read_bytes()).hexdigest() == summary["snapshot_id"]
-    assert json.loads(artifact.read_bytes())["producer_security_epoch"] == 6
+    assert json.loads(artifact.read_bytes())["producer_security_epoch"] == 7
     assert files(repo) == before
     # Determinism: an identical repeat reuses the same content-addressed artifact.
     repeat = invoke(entry, [*prefix, task, *args], env)

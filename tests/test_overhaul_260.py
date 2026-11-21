@@ -66,12 +66,13 @@ def isolated_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path
 
 
 def test_epoch_6_is_current_while_earlier_epochs_remain_frozen() -> None:
-    assert collect.PRODUCER_SECURITY_EPOCH == 6
-    assert verifiers.CURRENT_VERIFIER.producer_security_epoch == 6
+    assert collect.PRODUCER_SECURITY_EPOCH == 7
+    assert verifiers.CURRENT_VERIFIER.producer_security_epoch == 7
     assert verifiers.CURRENT_VERIFIER.is_current is True
     assert verifiers.verifier_for(2, 4).is_current is False
     assert verifiers.verifier_for(2, 5).is_current is False
-    assert verifiers.verifier_for(2, 6) is verifiers.CURRENT_VERIFIER
+    assert verifiers.verifier_for(2, 6).is_current is False
+    assert verifiers.verifier_for(2, 7) is verifiers.CURRENT_VERIFIER
 
     html_sample = "<div>hello</div>\n"
     with security.era_rules(verifiers.verifier_for(2, 5).rules):

@@ -128,6 +128,9 @@ SENSITIVE_EXACT_FILE_NAMES = frozenset(
         "secrets",
     }
 )
+SENSITIVE_YAML_NAME_RE = re.compile(
+    r"^(?:\.?|.*\.)(?:secrets?|credentials?|vault)(?:\.[^.]+)*\.ya?ml$"
+)
 ALLOWED_TEXT_SUFFIXES = frozenset(
     {
         ".py",
@@ -137,16 +140,35 @@ ALLOWED_TEXT_SUFFIXES = frozenset(
         ".txt",
         ".toml",
         ".json",
+        ".jsonc",
         ".jsonl",
+        ".yaml",
+        ".yml",
         ".sh",
         ".bash",
+        ".zsh",
+        ".fish",
+        ".ps1",
+        ".psd1",
+        ".psm1",
         ".sql",
         ".ini",
         ".cfg",
         ".conf",
+        ".service",
+        ".timer",
+        ".policy",
+        ".nft",
+        ".in",
         ".xml",
+        ".svg",
         ".html",
         ".css",
+        ".scss",
+        ".less",
+        ".astro",
+        ".vue",
+        ".svelte",
         ".js",
         ".mjs",
         ".cjs",
@@ -156,7 +178,14 @@ ALLOWED_TEXT_SUFFIXES = frozenset(
         ".tsx",
         ".jsx",
         ".lock",
+        ".mod",
+        ".sum",
         ".mako",
+        ".lark",
+        ".patch",
+        ".proto",
+        ".cmake",
+        ".mk",
         ".c",
         ".h",
         ".cc",
@@ -184,7 +213,7 @@ ALLOWED_EXTENSIONLESS_NAMES = frozenset(
         ".gitkeep",
     }
 )
-YAML_TEXT_SUFFIXES = frozenset({".yaml", ".yml"})
+YAML_TEXT_SUFFIXES: frozenset[str] = frozenset()
 RASTER_IMAGE_MEDIA_TYPES = {
     ".jpeg": "image/jpeg",
     ".jpg": "image/jpeg",
@@ -235,6 +264,7 @@ class SanitizerRules:
     absolute_path_re: re.Pattern[str]
     sensitive_file_suffixes: frozenset[str]
     sensitive_exact_file_names: frozenset[str]
+    sensitive_yaml_name_re: re.Pattern[str]
     allowed_text_suffixes: frozenset[str]
     allowed_extensionless_names: frozenset[str]
     yaml_text_suffixes: frozenset[str]
@@ -274,6 +304,7 @@ class SanitizerRules:
             self._pattern(self.raster_image_evidence_re),
             tuple(sorted(self.sensitive_file_suffixes)),
             tuple(sorted(self.sensitive_exact_file_names)),
+            self._pattern(self.sensitive_yaml_name_re),
             tuple(sorted(self.allowed_text_suffixes)),
             tuple(sorted(self.allowed_extensionless_names)),
             tuple(sorted(self.yaml_text_suffixes)),
@@ -329,6 +360,7 @@ SCAN_RULES_V2 = SanitizerRules(
     sensitive_exact_file_names=frozenset(
         {".env", ".netrc", "id_rsa", "id_ed25519", "credentials", "secrets"}
     ),
+    sensitive_yaml_name_re=re.compile(r"(?!x)x"),
     allowed_text_suffixes=frozenset(
         {
             ".py",
@@ -494,6 +526,48 @@ SCAN_RULES_EPOCH_6 = replace(
     ),
 )
 
+# Epoch 7 admits non-secret repository YAML and additional common UTF-8 source/config text
+# suffixes under the same redaction scanner while blocking secret-named YAML files explicitly.
+# Literals stay inline here so historical epochs never drift from the live rule constants.
+SCAN_RULES_EPOCH_7 = replace(
+    SCAN_RULES_EPOCH_6,
+    sensitive_yaml_name_re=re.compile(
+        r"^(?:\.?|.*\.)(?:secrets?|credentials?|vault)(?:\.[^.]+)*\.ya?ml$"
+    ),
+    allowed_text_suffixes=SCAN_RULES_EPOCH_6.allowed_text_suffixes
+    | frozenset(
+        {
+            ".jsonc",
+            ".yaml",
+            ".yml",
+            ".zsh",
+            ".fish",
+            ".ps1",
+            ".psd1",
+            ".psm1",
+            ".service",
+            ".timer",
+            ".policy",
+            ".nft",
+            ".in",
+            ".svg",
+            ".scss",
+            ".less",
+            ".astro",
+            ".vue",
+            ".svelte",
+            ".mod",
+            ".sum",
+            ".lark",
+            ".patch",
+            ".proto",
+            ".cmake",
+            ".mk",
+        }
+    ),
+    yaml_text_suffixes=frozenset(),
+)
+
 
 #: The rules this release writes new artifacts under, read from the live constants, so a rule edit
 #: above shows up here immediately and no longer moves any registered era. A read with no installed
@@ -508,6 +582,7 @@ CURRENT_RULES = SanitizerRules(
     absolute_path_re=ABSOLUTE_PATH_RE,
     sensitive_file_suffixes=SENSITIVE_FILE_SUFFIXES,
     sensitive_exact_file_names=SENSITIVE_EXACT_FILE_NAMES,
+    sensitive_yaml_name_re=SENSITIVE_YAML_NAME_RE,
     allowed_text_suffixes=ALLOWED_TEXT_SUFFIXES,
     allowed_extensionless_names=ALLOWED_EXTENSIONLESS_NAMES,
     yaml_text_suffixes=YAML_TEXT_SUFFIXES,
@@ -897,6 +972,7 @@ def _is_sensitive_path_component(component: str) -> bool:
         lowered in rules.sensitive_exact_file_names
         or lowered.startswith(rules.sensitive_file_prefixes)
         or _component_suffix(lowered) in rules.sensitive_file_suffixes
+        or rules.sensitive_yaml_name_re.fullmatch(lowered) is not None
     )
 
 

@@ -18,7 +18,7 @@ from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
 TASKS = ("repo-status", "diff-audit", "branch-review", "test-triage")
-COMMANDS = (*TASKS, "read")
+COMMANDS = (*TASKS, "read", "prune")
 
 
 class PackageCheckError(ValueError):
@@ -359,6 +359,16 @@ def check(wheel: Path, version: str, root: Path) -> dict[str, object]:
                 "value = 4" in json.dumps(read["evidence"]),
                 "installed evidence reader omitted changed content",
             )
+    prune_dry = json.loads(
+        cli("prune", "--older-than-days", "30", "--keep", snapshot_id, "--dry-run")
+    )
+    require(
+        prune_dry["status"] == "complete"
+        and prune_dry["dry_run"] is True
+        and prune_dry["runner_version"] == version
+        and prune_dry["pruned"] == 0,
+        "installed snapshot pruner mismatch",
+    )
     rejected = run(
         [executable, "repo-status", "--PACKAGE_CHECK_MARKER"],
         cwd=outside,

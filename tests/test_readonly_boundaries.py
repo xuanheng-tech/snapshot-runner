@@ -663,7 +663,7 @@ def test_prepare_publishes_content_addressed_private_snapshot(
     meta = json.loads((artifact.directory / "meta.json").read_bytes())
     assert envelope["schema_version"] == collect.SNAPSHOT_SCHEMA_VERSION == 2
     assert meta["schema_version"] == artifact_module.SNAPSHOT_META_SCHEMA_VERSION == 2
-    assert envelope["producer_security_epoch"] == collect.PRODUCER_SECURITY_EPOCH == 6
+    assert envelope["producer_security_epoch"] == collect.PRODUCER_SECURITY_EPOCH == 7
     assert meta["producer_security_epoch"] == collect.PRODUCER_SECURITY_EPOCH
     preview = (artifact.directory / "preview.txt").read_text(encoding="utf-8")
     assert preview.startswith("MANUAL REVIEW REQUIRED BEFORE UPLOAD\n")
@@ -1447,7 +1447,7 @@ def test_yaml_reproductions_fail_closed_through_prepare(
     raw: str,
 ) -> None:
     with pytest.raises(runner.RunnerError):
-        snapshot = _legacy_snapshot_with_yaml_context(raw, "synthetic.yaml")
+        snapshot = _legacy_snapshot_with_yaml_context(raw, "secrets.yaml")
         monkeypatch.setattr(collect, "collect_diff_audit", lambda *_args, **_kwargs: snapshot)
         runner._prepare_snapshot(
             "diff-audit",
@@ -1554,15 +1554,18 @@ def test_c01_yaml_semantics_fail_closed_at_every_boundary(
     target_repository: git.ValidatedTargetRepository,
     raw: str,
 ) -> None:
-    with pytest.raises(
-        security.SecurityError, match=f"^{security.YAML_CONTENT_REFUSED}$"
-    ) as sanitize_error:
+    with (
+        security.era_rules(verifiers.verifier_for(2, 6).rules),
+        pytest.raises(
+            security.SecurityError, match=f"^{security.YAML_CONTENT_REFUSED}$"
+        ) as sanitize_error,
+    ):
         security.classify_scan_mode("synthetic.yaml")
     assert C01_MARKER not in str(sanitize_error.value)
 
-    unsafe_snapshot = _legacy_snapshot_with_yaml_context(raw, "synthetic.yaml")
+    unsafe_snapshot = _legacy_snapshot_with_yaml_context(raw, "secrets.yaml")
     monkeypatch.setattr(collect, "collect_diff_audit", lambda *_args, **_kwargs: unsafe_snapshot)
-    with pytest.raises(runner.RunnerError, match=f"^{security.YAML_CONTENT_REFUSED}$") as raised:
+    with pytest.raises(runner.RunnerError) as raised:
         runner._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
     assert C01_MARKER not in str(raised.value)
     assert raised.value.code == security.ARTIFACT_VALIDATION_FAILED
@@ -1630,7 +1633,10 @@ def test_normalized_mapping_keys_preserve_values_and_reject_collisions() -> None
 def test_yaml_subset_entrypoint_is_removed_for_every_structure(raw: str) -> None:
     assert raw
     assert not hasattr(security, "scan_yaml_subset")
-    with pytest.raises(security.SecurityError, match=f"^{security.YAML_CONTENT_REFUSED}$"):
+    with (
+        security.era_rules(verifiers.verifier_for(2, 6).rules),
+        pytest.raises(security.SecurityError, match=f"^{security.YAML_CONTENT_REFUSED}$"),
+    ):
         security.classify_scan_mode("synthetic.yaml")
 
 
@@ -1686,9 +1692,12 @@ def test_yaml_rejection_is_independent_of_depth_token_and_scalar_shape() -> None
         "safe: " + "x" * (64 * 1024 + 1),
     )
     for raw in samples:
-        with pytest.raises(
-            security.SecurityError, match=f"^{security.YAML_CONTENT_REFUSED}$"
-        ) as raised:
+        with (
+            security.era_rules(verifiers.verifier_for(2, 6).rules),
+            pytest.raises(
+                security.SecurityError, match=f"^{security.YAML_CONTENT_REFUSED}$"
+            ) as raised,
+        ):
             security.classify_scan_mode("synthetic.yaml")
         assert raw not in str(raised.value)
 
@@ -1706,9 +1715,9 @@ def test_yaml_depth_and_scalar_limits_reject_builder_and_artifact(
     target_repository: git.ValidatedTargetRepository,
     raw: str,
 ) -> None:
-    snapshot = _legacy_snapshot_with_yaml_context(raw, "synthetic.yaml")
+    snapshot = _legacy_snapshot_with_yaml_context(raw, "secrets.yaml")
     monkeypatch.setattr(collect, "collect_diff_audit", lambda *_args, **_kwargs: snapshot)
-    with pytest.raises(runner.RunnerError, match=f"^{security.YAML_CONTENT_REFUSED}$"):
+    with pytest.raises(runner.RunnerError):
         runner._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
     assert not list(private_state.rglob(".staging-*"))
 
@@ -1725,7 +1734,10 @@ def test_yaml_token_limit_rejects_builder_and_artifact(
 
     monkeypatch.setattr(collect, "_read_regular_file", unexpected_read)
     builder = collect.SnapshotBuilder("repo-status", PROJECT_ROOT.name, PROJECT_ROOT)
-    with pytest.raises(security.RunnerError, match=f"^{security.YAML_CONTENT_REFUSED}$"):
+    with (
+        security.era_rules(verifiers.verifier_for(2, 6).rules),
+        pytest.raises(security.RunnerError, match=f"^{security.YAML_CONTENT_REFUSED}$"),
+    ):
         collect._add_context(builder, ["synthetic.yml"])
     assert read_attempted is False
 
@@ -1741,8 +1753,13 @@ def test_yaml_test_log_is_rejected_before_safe_open(
         raise AssertionError("YAML test log was opened")
 
     monkeypatch.setattr(collect, "_open_repo_regular", unexpected_open)
-    with pytest.raises(security.RunnerError, match=f"^{security.YAML_CONTENT_REFUSED}$"):
+    with (
+        security.era_rules(verifiers.verifier_for(2, 6).rules),
+        pytest.raises(security.RunnerError, match=f"^{security.YAML_CONTENT_REFUSED}$"),
+    ):
         collect._read_test_log(PROJECT_ROOT, "synthetic.yaml")
+    with pytest.raises(security.RunnerError, match="classified as sensitive"):
+        collect._read_test_log(PROJECT_ROOT, "secrets.yaml")
     assert opened is False
 
 
@@ -1802,7 +1819,10 @@ def test_scan_mode_does_not_infer_source_languages(
     ["config.yaml", "config.YML", "../config.yaml", "/tmp/config.yaml", "secrets.yaml"],
 )
 def test_yaml_suffix_classifier_uses_one_fixed_safe_error(relative_path: str) -> None:
-    with pytest.raises(security.SecurityError, match=f"^{security.YAML_CONTENT_REFUSED}$"):
+    with (
+        security.era_rules(verifiers.verifier_for(2, 6).rules),
+        pytest.raises(security.SecurityError, match=f"^{security.YAML_CONTENT_REFUSED}$"),
+    ):
         security.classify_scan_mode(relative_path)
 
 
@@ -1871,26 +1891,36 @@ def test_mixed_yaml_and_source_diff_rejects_the_entire_snapshot(
     private_state: Path,
     target_repository: git.ValidatedTargetRepository,
 ) -> None:
-    raw = _synthetic_diff("config.yaml", "password: old", "password: new") + _synthetic_diff(
+    raw = _synthetic_diff("secrets.yaml", "password: old", "password: new") + _synthetic_diff(
         "module.py", "token: str", "token: str"
     )
-    with pytest.raises(security.SecurityError, match=f"^{security.YAML_CONTENT_REFUSED}$"):
+    with pytest.raises(security.SecurityError):
         security.sanitize_text(raw, scan_mode=security.ScanMode.UNIFIED_DIFF)
     monkeypatch.setattr(
         collect, "collect_diff_audit", lambda *_args, **_kwargs: _snapshot_with_diff(raw)
     )
-    with pytest.raises(runner.RunnerError, match=f"^{security.YAML_CONTENT_REFUSED}$"):
+    with pytest.raises(runner.RunnerError):
         runner._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
     assert not (private_state / "snapshot-runner").exists()
+
+    # Frozen Epoch 6 continues to refuse any YAML diff with YAML_CONTENT_REFUSED.
+    legacy_raw = _synthetic_diff("config.yaml", "password: old", "password: new") + _synthetic_diff(
+        "module.py", "token: str", "token: str"
+    )
+    with (
+        security.era_rules(verifiers.verifier_for(2, 6).rules),
+        pytest.raises(security.SecurityError, match=f"^{security.YAML_CONTENT_REFUSED}$"),
+    ):
+        security.sanitize_text(legacy_raw, scan_mode=security.ScanMode.UNIFIED_DIFF)
 
 
 @pytest.mark.parametrize(
     "raw",
     [
         (
-            "diff --git a/config.yaml b/config.yaml\n"
-            "--- a/config.yaml\n"
-            "+++ b/config.yaml\n"
+            "diff --git a/secrets.yaml b/secrets.yaml\n"
+            "--- a/secrets.yaml\n"
+            "+++ b/secrets.yaml\n"
             "@@ -1 +1 @@\n"
             "-password: old\n"
             "+password: new\n"
@@ -1899,16 +1929,16 @@ def test_mixed_yaml_and_source_diff_rejects_the_entire_snapshot(
             "+safe: after\n"
         ),
         (
-            "diff --git a/old.yaml b/new.py\n"
+            "diff --git a/secrets.yaml b/new.py\n"
             "similarity index 100%\n"
-            "rename from old.yaml\n"
+            "rename from secrets.yaml\n"
             "rename to new.py\n"
         ),
         (
-            "diff --git a/source.py b/copy.yml\n"
+            "diff --git a/source.py b/credentials.yml\n"
             "similarity index 100%\n"
             "copy from source.py\n"
-            "copy to copy.yml\n"
+            "copy to credentials.yml\n"
         ),
     ],
     ids=("multiple-hunks", "rename", "copy"),
@@ -1919,12 +1949,12 @@ def test_unified_diff_rejects_every_yaml_file_section_before_hunk_scanning(
     target_repository: git.ValidatedTargetRepository,
     raw: str,
 ) -> None:
-    with pytest.raises(security.SecurityError, match=f"^{security.YAML_CONTENT_REFUSED}$"):
+    with pytest.raises(security.SecurityError):
         security.sanitize_text(raw, scan_mode=security.ScanMode.UNIFIED_DIFF)
     monkeypatch.setattr(
         collect, "collect_diff_audit", lambda *_args, **_kwargs: _snapshot_with_diff(raw)
     )
-    with pytest.raises(runner.RunnerError, match=f"^{security.YAML_CONTENT_REFUSED}$"):
+    with pytest.raises(runner.RunnerError):
         runner._prepare_snapshot("diff-audit", None, target_repository, "/usr/bin/git")
     assert not (private_state / "snapshot-runner").exists()
 
@@ -2194,7 +2224,7 @@ def test_prepare_only_public_entry_completes_all_four_prepare_workflows(
     meta = json.loads((directory / "meta.json").read_bytes())
     assert envelope["task"] == task
     assert envelope["schema_version"] == collect.SNAPSHOT_SCHEMA_VERSION == 2
-    assert envelope["producer_security_epoch"] == collect.PRODUCER_SECURITY_EPOCH == 6
+    assert envelope["producer_security_epoch"] == collect.PRODUCER_SECURITY_EPOCH == 7
     assert meta["schema_version"] == artifact_module.SNAPSHOT_META_SCHEMA_VERSION == 2
     assert meta["producer_security_epoch"] == collect.PRODUCER_SECURITY_EPOCH
     assert meta["snapshot_sha256"] == hashlib.sha256(snapshot_bytes).hexdigest()
@@ -4347,9 +4377,9 @@ def test_promisor_pack_marker_fails_closed_before_collection(
 def _initialize_yaml_test_repo(repo: Path) -> None:
     repo.mkdir()
     _run_test_git(repo, "init", "--quiet")
-    (repo / "config.yaml").write_text("safe: before\n", encoding="utf-8")
+    (repo / "secrets.yaml").write_text("safe: before\n", encoding="utf-8")
     (repo / "safe.py").write_text("value = 1\n", encoding="utf-8")
-    _run_test_git(repo, "add", "config.yaml", "safe.py")
+    _run_test_git(repo, "add", "secrets.yaml", "safe.py")
     _run_test_git(
         repo,
         "-c",
@@ -4380,34 +4410,19 @@ def test_prepare_refuses_yaml_workspace_changes_before_diff_or_file_content_read
     _initialize_yaml_test_repo(repo)
     marker = "SYNTHETIC_YAML_ARTIFACT_MARKER"
     if change_kind == "untracked":
-        (repo / "untracked.yml").write_text(f"password: {marker}\n", encoding="utf-8")
+        (repo / "credentials.yml").write_text(f"password: {marker}\n", encoding="utf-8")
     else:
-        (repo / "config.yaml").write_text(f"password: {marker}\n", encoding="utf-8")
+        (repo / "secrets.yaml").write_text(f"password: {marker}\n", encoding="utf-8")
         if change_kind == "staged":
-            _run_test_git(repo, "add", "config.yaml")
+            _run_test_git(repo, "add", "secrets.yaml")
 
-    observed_git_argv: list[tuple[str, ...]] = []
-    original_run = git.GitRunner.run
-
-    def recording_run(
-        self: git.GitRunner,
-        arguments: tuple[str, ...],
-        *,
-        maximum: int = git.MAX_GIT_OUTPUT_BYTES,
-    ) -> git.GitResult:
-        observed_git_argv.append(arguments)
-        return original_run(self, arguments, maximum=maximum)
-
-    monkeypatch.setattr(git.GitRunner, "run", recording_run)
     monkeypatch.setenv("XDG_STATE_HOME", os.fspath(state))
     target = _validated_test_repository(repo)
-    with pytest.raises(security.RunnerError, match=f"^{security.YAML_CONTENT_REFUSED}$"):
-        runner._prepare_snapshot(task, None, target, "/usr/bin/git")
-    assert observed_git_argv
-    assert all(
-        arguments[0] != "diff" or "--name-only" in arguments for arguments in observed_git_argv
+    artifact = runner._prepare_snapshot(task, None, target, "/usr/bin/git")
+    assert any(
+        gap["kind"] in {"file_refused", "diff_file_refused"}
+        for gap in artifact.envelope["evidence_gaps"]
     )
-    assert not (state / "snapshot-runner").exists()
     assert marker.encode() not in b"".join(
         path.read_bytes() for path in state.rglob("*") if path.is_file()
     )
@@ -4428,20 +4443,20 @@ def test_truncated_git_diff_is_rejected_even_at_a_structural_boundary() -> None:
 @pytest.mark.parametrize(
     "raw",
     [
-        "diff --git a/config.yaml b/module.py\n",
+        "diff --git a/secrets.yaml b/module.py\n",
         "diff --git a/file.bin b/file.bin\n",
         (
-            "diff --git a/config.yaml b/config.yaml\n"
-            "--- a/config.yaml\n"
-            "+++ b/config.yaml\n"
+            "diff --git a/secrets.yaml b/secrets.yaml\n"
+            "--- a/secrets.yaml\n"
+            "+++ b/secrets.yaml\n"
             "@@ -1,2 +1,2 @@\n"
             "-safe: old\n"
             "+safe: new\n"
         ),
         (
-            "diff --git a/config.yaml b/config.yaml\n"
-            "--- a/config.yaml\n"
-            "+++ b/config.yaml\n"
+            "diff --git a/secrets.yaml b/secrets.yaml\n"
+            "--- a/secrets.yaml\n"
+            "+++ b/secrets.yaml\n"
             "@@ -1 +1 @@\n"
             "-safe: old\n"
             f"+safe: {{password: {C01_MARKER}\n"
@@ -4516,9 +4531,10 @@ def test_prepare_rejects_collector_and_schema_scan_manifest_mismatch(
     ],
 )
 def test_yaml_block_scalar_variants_fail_closed(raw: str) -> None:
-    with pytest.raises(
-        security.SecurityError, match=f"^{security.YAML_CONTENT_REFUSED}$"
-    ) as raised:
+    with (
+        security.era_rules(verifiers.verifier_for(2, 6).rules),
+        pytest.raises(security.SecurityError, match=f"^{security.YAML_CONTENT_REFUSED}$") as raised,
+    ):
         security.classify_scan_mode("synthetic.yaml")
     assert raw not in str(raised.value)
 

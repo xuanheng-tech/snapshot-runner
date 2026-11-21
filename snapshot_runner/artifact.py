@@ -10,6 +10,7 @@ import os
 import re
 import stat
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -72,6 +73,7 @@ SNAPSHOT_GIT_OID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 SNAPSHOT_META_SCHEMA_VERSION = 2
 SUMMARY_SCHEMA_VERSION = 2
 EVIDENCE_SCHEMA_VERSION = 1
+PRUNE_SCHEMA_VERSION = 1
 SUMMARY_TEXT_LIMIT = 256
 SUMMARY_WARNING_LIMIT = 5
 SNAPSHOT_FILE_NAMES = frozenset({"meta.json", "preview.txt", "snapshot.json"})
@@ -1283,3 +1285,234 @@ def _atomic_write(path: Path, content: bytes, maximum: int) -> None:
         with contextlib.suppress(OSError):
             temporary.unlink()
         raise
+
+
+@dataclass(frozen=True, slots=True)
+class _PruneCandidate:
+    snapshot_id: str
+    directory: Path
+    file_names: tuple[str, ...]
+    byte_size: int
+    mtime: float
+
+
+def _inspect_prune_snapshot_entry(entry: Path, uid: int) -> _PruneCandidate | None:
+    try:
+        entry_stat = entry.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    if stat.S_ISLNK(entry_stat.st_mode) or not stat.S_ISDIR(entry_stat.st_mode):
+        return None
+    if entry_stat.st_uid != uid:
+        return None
+    try:
+        children = list(entry.iterdir())
+    except OSError:
+        return None
+    if not children:
+        return None
+    file_names: list[str] = []
+    total_bytes = 0
+    latest_mtime = entry_stat.st_mtime
+    for child in children:
+        if child.name not in SNAPSHOT_FILE_NAMES:
+            return None
+        try:
+            child_stat = child.lstat()
+        except OSError:
+            return None
+        if (
+            stat.S_ISLNK(child_stat.st_mode)
+            or not stat.S_ISREG(child_stat.st_mode)
+            or child_stat.st_uid != uid
+        ):
+            return None
+        file_names.append(child.name)
+        total_bytes += child_stat.st_size
+        if child_stat.st_mtime > latest_mtime:
+            latest_mtime = child_stat.st_mtime
+    return _PruneCandidate(
+        snapshot_id=entry.name,
+        directory=entry,
+        file_names=tuple(sorted(file_names)),
+        byte_size=total_bytes,
+        mtime=latest_mtime,
+    )
+
+
+def _remove_prune_candidate(candidate: _PruneCandidate, uid: int) -> bool:
+    try:
+        current_stat = candidate.directory.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise RunnerError(
+            ARTIFACT_PUBLISH_FAILED, "unable to inspect snapshot during prune"
+        ) from exc
+    if (
+        stat.S_ISLNK(current_stat.st_mode)
+        or not stat.S_ISDIR(current_stat.st_mode)
+        or current_stat.st_uid != uid
+    ):
+        raise RunnerError(ARTIFACT_PUBLISH_FAILED, "snapshot directory changed during prune")
+    for name in candidate.file_names:
+        file_path = candidate.directory / name
+        try:
+            file_stat = file_path.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise RunnerError(ARTIFACT_PUBLISH_FAILED, "unable to inspect snapshot file") from exc
+        if (
+            stat.S_ISLNK(file_stat.st_mode)
+            or not stat.S_ISREG(file_stat.st_mode)
+            or file_stat.st_uid != uid
+        ):
+            raise RunnerError(ARTIFACT_PUBLISH_FAILED, "snapshot file changed during prune")
+        try:
+            file_path.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise RunnerError(ARTIFACT_PUBLISH_FAILED, "unable to remove snapshot file") from exc
+    try:
+        candidate.directory.rmdir()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise RunnerError(ARTIFACT_PUBLISH_FAILED, "unable to remove snapshot directory") from exc
+    return True
+
+
+def _prune_snapshots(
+    runner_version: str,
+    *,
+    older_than_days: int,
+    keep_ids: frozenset[str] = frozenset(),
+    keep_latest: int = 0,
+    dry_run: bool = False,
+    now: float | None = None,
+) -> dict[str, object]:
+    if older_than_days < 0 or keep_latest < 0:
+        raise RunnerError(
+            ARTIFACT_VALIDATION_FAILED, "prune retention parameters must be non-negative"
+        )
+    if any(SNAPSHOT_ID_RE.fullmatch(item) is None for item in keep_ids):
+        raise RunnerError(
+            ARTIFACT_VALIDATION_FAILED,
+            "keep snapshot id must be exactly 64 lowercase hexadecimal characters",
+        )
+    state_home = _state_home()
+    controlled_root = state_home / RUNNER_STATE_DIRECTORY
+    root = controlled_root / "snapshots"
+    _validate_no_symlink_ancestors(root, "snapshot store")
+    store_missing = False
+    if not controlled_root.exists() and not controlled_root.is_symlink():
+        store_missing = True
+    else:
+        _validate_owned_private_directory(controlled_root, "private Runner state")
+        if not root.exists() and not root.is_symlink():
+            store_missing = True
+        else:
+            _validate_owned_private_directory(root, "snapshot store")
+    if store_missing:
+        return {
+            "prune_schema_version": PRUNE_SCHEMA_VERSION,
+            "runner_version": runner_version,
+            "command": "prune",
+            "status": "complete",
+            "dry_run": dry_run,
+            "store": os.fspath(root),
+            "older_than_days": older_than_days,
+            "keep_latest": keep_latest,
+            "keep_ids_provided": len(keep_ids),
+            "scanned": 0,
+            "kept": 0,
+            "kept_by_id": 0,
+            "kept_by_latest": 0,
+            "kept_by_age": 0,
+            "pruned": 0,
+            "would_prune": 0,
+            "reclaimed_bytes": 0,
+            "skipped_unexpected": 0,
+        }
+    uid = os.getuid()
+    try:
+        entries = list(root.iterdir())
+    except OSError as exc:
+        raise RunnerError(ARTIFACT_PUBLISH_FAILED, "unable to list snapshot store") from exc
+    candidates: list[_PruneCandidate] = []
+    skipped_unexpected = 0
+    for entry in entries:
+        if entry.name.startswith(".staging-"):
+            continue
+        if SNAPSHOT_ID_RE.fullmatch(entry.name) is None:
+            skipped_unexpected += 1
+            continue
+        inspected = _inspect_prune_snapshot_entry(entry, uid)
+        if inspected is None:
+            skipped_unexpected += 1
+            continue
+        candidates.append(inspected)
+    candidates.sort(key=lambda item: (item.mtime, item.snapshot_id), reverse=True)
+    latest_keep = (
+        frozenset(item.snapshot_id for item in candidates[:keep_latest])
+        if keep_latest > 0
+        else frozenset()
+    )
+    cutoff = (time.time() if now is None else now) - (older_than_days * 86400.0)
+    to_prune: list[_PruneCandidate] = []
+    kept_by_id = 0
+    kept_by_latest = 0
+    kept_by_age = 0
+    for item in candidates:
+        protected_id = item.snapshot_id in keep_ids
+        protected_latest = item.snapshot_id in latest_keep
+        protected_age = item.mtime >= cutoff
+        if protected_id:
+            kept_by_id += 1
+        elif protected_latest:
+            kept_by_latest += 1
+        elif protected_age:
+            kept_by_age += 1
+        else:
+            to_prune.append(item)
+    pruned_count = 0
+    reclaimed_bytes = 0
+    if dry_run:
+        reclaimed_bytes = sum(item.byte_size for item in to_prune)
+    else:
+        for item in to_prune:
+            if _remove_prune_candidate(item, uid):
+                pruned_count += 1
+                reclaimed_bytes += item.byte_size
+        if pruned_count:
+            try:
+                _fsync_directory(root)
+            except OSError as exc:
+                raise RunnerError(
+                    ARTIFACT_PUBLISH_FAILED,
+                    "snapshots pruned but snapshot-store durability sync failed",
+                ) from exc
+    return {
+        "prune_schema_version": PRUNE_SCHEMA_VERSION,
+        "runner_version": runner_version,
+        "command": "prune",
+        "status": "complete",
+        "dry_run": dry_run,
+        "store": os.fspath(root),
+        "older_than_days": older_than_days,
+        "keep_latest": keep_latest,
+        "keep_ids_provided": len(keep_ids),
+        "scanned": len(candidates),
+        "kept": len(candidates) - len(to_prune),
+        "kept_by_id": kept_by_id,
+        "kept_by_latest": kept_by_latest,
+        "kept_by_age": kept_by_age,
+        "pruned": pruned_count,
+        "would_prune": len(to_prune),
+        "reclaimed_bytes": reclaimed_bytes,
+        "skipped_unexpected": skipped_unexpected,
+    }

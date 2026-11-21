@@ -112,16 +112,37 @@
         "partial",
         "workflow_failed"
       ]
+    },
+    {
+      "flags": [
+        "--older-than-days",
+        "--keep",
+        "--keep-file",
+        "--keep-latest",
+        "--dry-run",
+        "--version",
+        "--help"
+      ],
+      "name": "prune",
+      "operation_class": "local_mutation",
+      "preconditions": [
+        "private_owned_state_directory"
+      ],
+      "result_statuses": [
+        "complete",
+        "workflow_failed"
+      ]
     }
   ],
-  "contract_version": 4,
+  "contract_version": 5,
   "flags": {
     "canonical_artifact": "snapshot.json",
     "evidence_read": "bounded_targeted_json_derived_from_canonical_artifact",
     "summary": "bounded_json_derived_from_canonical_artifact"
   },
   "operation_classes": [
-    "read_only"
+    "read_only",
+    "local_mutation"
   ],
   "primary_command": {
     "flags": [
@@ -132,6 +153,7 @@
     "subcommands": [
       "branch-review",
       "diff-audit",
+      "prune",
       "read",
       "repo-status",
       "test-triage"
@@ -146,5 +168,5 @@
   ],
   "schema_version": 1,
   "tool_name": "snapshot-runner",
-  "tool_version": "2.6.0"
+  "tool_version": "2.7.0"
 }

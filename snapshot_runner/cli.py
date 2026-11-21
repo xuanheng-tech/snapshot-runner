@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import json
 import os
 import re
 import signal
+import stat
 import sys
 from importlib import metadata
 from pathlib import Path
@@ -32,6 +34,7 @@ READ_TARGET_REPOSITORY_REQUIRED_ERROR = "explicit --repo is required for read"
 SNAPSHOT_NOT_FOUND_ERROR = "snapshot not found in the private snapshot store"
 EVIDENCE_FIELD_MISSING_ERROR = "requested evidence field is not present in the snapshot task data"
 BRANCH_REVIEW_UNBORN_ERROR = "branch-review requires a target branch with at least one commit"
+MAX_KEEP_FILE_BYTES = 16 * 1024 * 1024
 
 
 class SafeArgumentParser(argparse.ArgumentParser):
@@ -485,6 +488,43 @@ def _add_read_arguments(read: argparse.ArgumentParser) -> None:
     read.add_argument("snapshot_id", help="64-character SHA-256 snapshot identifier")
 
 
+def _add_prune_arguments(prune: argparse.ArgumentParser) -> None:
+    prune.set_defaults(action="prune")
+    prune.add_argument("--version", action="version", version=f"snapshot-runner {__version__}")
+    prune.add_argument(
+        "--older-than-days",
+        type=int,
+        metavar="DAYS",
+        help="required non-negative retention window in days",
+    )
+    prune.add_argument(
+        "--keep",
+        action="append",
+        default=[],
+        metavar="SNAPSHOT_ID",
+        help="preserve a 64-character SHA-256 snapshot identifier (repeatable)",
+    )
+    prune.add_argument(
+        "--keep-file",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="preserve snapshot identifiers listed one per line in a UTF-8 file (repeatable)",
+    )
+    prune.add_argument(
+        "--keep-latest",
+        type=int,
+        default=0,
+        metavar="COUNT",
+        help="preserve at least the newest COUNT snapshots regardless of age (default: 0)",
+    )
+    prune.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report candidates and bytes without deleting any snapshots",
+    )
+
+
 def build_argument_parser(*, neutral: bool = False) -> argparse.ArgumentParser:
     if neutral:
         parser = SafeArgumentParser(
@@ -517,6 +557,16 @@ def build_argument_parser(*, neutral: bool = False) -> argparse.ArgumentParser:
             ),
         )
         _add_read_arguments(read)
+        prune = commands.add_parser(
+            "prune",
+            help="prune old unreferenced snapshots from the private snapshot store",
+            description=(
+                "Safely prune aged snapshot directories under the private snapshot store while "
+                "preserving snapshots within --older-than-days, newest --keep-latest entries, and "
+                "any identifiers named via --keep or --keep-file."
+            ),
+        )
+        _add_prune_arguments(prune)
         return parser
     parser = SafeArgumentParser(
         prog="python -m snapshot_runner.cli",
@@ -536,6 +586,11 @@ def build_argument_parser(*, neutral: bool = False) -> argparse.ArgumentParser:
         help="read targeted evidence from an existing snapshot",
     )
     _add_read_arguments(read)
+    prune = commands.add_parser(
+        "prune",
+        help="prune old unreferenced snapshots from the private snapshot store",
+    )
+    _add_prune_arguments(prune)
     return parser
 
 
@@ -762,6 +817,108 @@ def _run_read(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _read_keep_ids_file(raw_path: str) -> set[str]:
+    if not raw_path or len(raw_path.encode("utf-8")) > 4096:
+        raise RunnerError(ARGUMENT_ERROR, f"{CLI_ARGUMENT_ERROR}; invalid --keep-file path")
+    candidate = Path(raw_path)
+    try:
+        file_stat = candidate.lstat()
+    except OSError as exc:
+        raise RunnerError(
+            ARGUMENT_ERROR, f"{CLI_ARGUMENT_ERROR}; --keep-file cannot be opened"
+        ) from exc
+    if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
+        raise RunnerError(
+            ARGUMENT_ERROR,
+            f"{CLI_ARGUMENT_ERROR}; --keep-file must be a regular non-symlink file",
+        )
+    if file_stat.st_size > MAX_KEEP_FILE_BYTES:
+        raise RunnerError(
+            ARGUMENT_ERROR, f"{CLI_ARGUMENT_ERROR}; --keep-file exceeds the size limit"
+        )
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(candidate, flags)
+    except OSError as exc:
+        raise RunnerError(
+            ARGUMENT_ERROR, f"{CLI_ARGUMENT_ERROR}; --keep-file cannot be opened"
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_size > MAX_KEEP_FILE_BYTES:
+            raise RunnerError(ARGUMENT_ERROR, f"{CLI_ARGUMENT_ERROR}; --keep-file is invalid")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(64 * 1024, MAX_KEEP_FILE_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > MAX_KEEP_FILE_BYTES:
+                raise RunnerError(
+                    ARGUMENT_ERROR, f"{CLI_ARGUMENT_ERROR}; --keep-file exceeds the size limit"
+                )
+    finally:
+        os.close(descriptor)
+    try:
+        text = b"".join(chunks).decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise RunnerError(
+            ARGUMENT_ERROR, f"{CLI_ARGUMENT_ERROR}; --keep-file must be valid UTF-8"
+        ) from exc
+    keep_ids: set[str] = set()
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if artifact_module.SNAPSHOT_ID_RE.fullmatch(line) is None:
+            raise RunnerError(
+                ARGUMENT_ERROR,
+                f"{CLI_ARGUMENT_ERROR}; --keep-file contains an invalid snapshot identifier",
+            )
+        keep_ids.add(line)
+    return keep_ids
+
+
+def _run_prune(arguments: argparse.Namespace) -> int:
+    if arguments.older_than_days is None or arguments.older_than_days < 0:
+        raise RunnerError(
+            ARGUMENT_ERROR,
+            f"{CLI_ARGUMENT_ERROR}; --older-than-days must be a non-negative integer",
+        )
+    if arguments.keep_latest is None or arguments.keep_latest < 0:
+        raise RunnerError(
+            ARGUMENT_ERROR,
+            f"{CLI_ARGUMENT_ERROR}; --keep-latest must be a non-negative integer",
+        )
+    keep_ids: set[str] = set()
+    for raw_id in arguments.keep:
+        if not isinstance(raw_id, str) or artifact_module.SNAPSHOT_ID_RE.fullmatch(raw_id) is None:
+            raise RunnerError(
+                ARGUMENT_ERROR,
+                f"{CLI_ARGUMENT_ERROR}; --keep requires a 64-character lowercase hex snapshot id",
+            )
+        keep_ids.add(raw_id)
+    for raw_file in arguments.keep_file:
+        keep_ids.update(_read_keep_ids_file(raw_file))
+    try:
+        report = artifact_module._prune_snapshots(
+            __version__,
+            older_than_days=arguments.older_than_days,
+            keep_ids=frozenset(keep_ids),
+            keep_latest=arguments.keep_latest,
+            dry_run=bool(arguments.dry_run),
+        )
+    except RunnerError:
+        raise
+    except Exception as exc:
+        raise _unexpected_error(exc, "snapshot store prune") from None
+    encoded = json.dumps(report, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
+    sys.stdout.buffer.write(encoded)
+    return 0
+
+
 def main(argv: list[str] | None = None, *, neutral: bool = False) -> int:
     raw_arguments = list(sys.argv[1:] if argv is None else argv)
     if raw_arguments == ["--version"]:
@@ -776,6 +933,8 @@ def main(argv: list[str] | None = None, *, neutral: bool = False) -> int:
         arguments = parser.parse_args(raw_arguments)
         if arguments.action == "read":
             return _run_read(arguments)
+        if arguments.action == "prune":
+            return _run_prune(arguments)
         _validate_arguments(arguments)
         return _run_prepare(arguments)
     except KeyboardInterrupt:

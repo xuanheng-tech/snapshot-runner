@@ -5,6 +5,25 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.7.0 - 2026-11-21
+
+- Changed: bumped public CLI contract to `contract_version` **5** (adding `local_mutation` for
+  store pruning) and registered security **epoch 7** (`PRODUCER_SECURITY_EPOCH = 7`,
+  `SCAN_RULES_EPOCH_7`, `_VERIFIER_EPOCH_7`) while preserving frozen epoch-4, epoch-5, and
+  epoch-6 verifiers and snapshot schema **2** compatibility.
+- Fixed: benign repository YAML files (`.yaml`, `.yml`, such as `.github/workflows/*.yml` and
+  ordinary configuration) no longer hard-fail `diff-audit` or `branch-review` with
+  `yaml_content_refused` before persisting a snapshot; they are audited through the standard
+  secret-redaction scanner while `.env` and secret-named YAML files (`secrets.yml`,
+  `credentials.yml`, `vault.yml`, and dotted variants) remain blocked as sensitive paths.
+- Added: benign UTF-8 source/config extensions (`.astro`, `.vue`, `.svelte`, `.scss`, `.less`,
+  `.svg`, `.ps1`, `.psd1`, `.psm1`, `.zsh`, `.fish`, `.service`, `.timer`, `.policy`, `.nft`,
+  `.mod`, `.sum`, `.jsonc`, `.in`, `.lark`, `.patch`, `.proto`, `.cmake`, `.mk`) to
+  `ALLOWED_TEXT_SUFFIXES` in epoch 7 while keeping binary and secret exclusions strict.
+- Added: `snapshot-runner prune` (`--older-than-days`, `--keep`, `--keep-file`, `--keep-latest`,
+  `--dry-run`) and a `justfile` `prune` recipe for safe, bounded garbage collection of aged
+  unreferenced snapshots in the private snapshot store.
+
 ## 2.6.0 - 2026-11-20
 
 - Changed: bumped public CLI contract to `contract_version` **4** and registered security

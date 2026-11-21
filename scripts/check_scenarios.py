@@ -31,7 +31,8 @@ CASES = (
     ("extensionless", "diff-audit", "complete"),
     ("binary", "diff-audit", "partial"),
     ("large-context", "diff-audit", "partial"),
-    ("yaml-boundary", "diff-audit", "refused"),
+    ("yaml-benign", "diff-audit", "complete"),
+    ("yaml-secret-boundary", "diff-audit", "partial"),
     ("test-log", "test-triage", "complete"),
     ("large-test-log", "test-triage", "partial"),
 )
@@ -166,8 +167,10 @@ def setup(name: str, root: Path, env: dict[str, str]) -> tuple[Path, list[str]]:
         (repo / "unknown.bin").write_bytes(b"\x00\xff\x01")
     elif name == "large-context":
         (repo / "large.txt").write_text("line\n" * (60 * 1024), encoding="utf-8")
-    elif name == "yaml-boundary":
+    elif name == "yaml-benign":
         (repo / "config.yaml").write_text("enabled: true\n", encoding="utf-8")
+    elif name == "yaml-secret-boundary":
+        (repo / "secrets.yml").write_text("secret: value\n", encoding="utf-8")
     elif name in {"test-log", "large-test-log"}:
         count = 250_000 if name == "large-test-log" else 1
         (repo / "failed.log").write_text("fixture failed\n" * count, encoding="utf-8")
@@ -263,6 +266,8 @@ def check_case(
                 "extensionless": "project-entry",
                 "binary": "unknown.bin",
                 "large-context": "large.txt",
+                "yaml-benign": "config.yaml",
+                "yaml-secret-boundary": "secrets.yml",
             }.get(name, "safe.py")
             selector = ["--path", path]
         read = run(

@@ -404,6 +404,7 @@ RULE_CONSTANT_NAMES = frozenset(
         "ABSOLUTE_PATH_RE",
         "SENSITIVE_FILE_SUFFIXES",
         "SENSITIVE_EXACT_FILE_NAMES",
+        "SENSITIVE_YAML_NAME_RE",
         "ALLOWED_TEXT_SUFFIXES",
         "ALLOWED_EXTENSIONLESS_NAMES",
         "YAML_TEXT_SUFFIXES",
@@ -622,6 +623,7 @@ def test_historical_format_reads_survive_changed_live_budgets_and_name_patterns(
     ("field", "replacement", "probe"),
     [
         ("sensitive_file_prefixes", (), "env"),
+        ("sensitive_yaml_name_re", re.compile(r"(?!x)x"), "secret_yaml"),
         ("attributes_file_name", ".alternate", "attributes"),
         ("bounded_diff_text_suffixes", frozenset(), "csv"),
         ("basename_re", re.compile(r"."), "basename"),
@@ -646,6 +648,8 @@ def test_previously_inline_rule_values_follow_the_resolved_era(
         with security_module.era_rules(rules):
             if probe == "env":
                 return security_module.is_sensitive_repository_path(".env.preview")
+            if probe == "secret_yaml":
+                return security_module.is_sensitive_repository_path("secrets.yml")
             if probe == "attributes":
                 return security_module.is_relevant_text_path(".gitattributes")
             if probe == "csv":

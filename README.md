@@ -7,7 +7,7 @@ test log into local artifacts. It does not modify the inspected repository,
 automatically fix code, run tests, call a model, commit, or push. No model API is
 required. No API key is required.
 
-Current stable release: **2.6.0**.
+Current stable release: **2.7.0**.
 
 Use the same local CLI from a shell, from automation, or from any coding agent that
 permits the required local operations. Runner is vendor-neutral: it names, selects and
@@ -41,7 +41,7 @@ Install the published package from PyPI into a separate virtual environment:
 # Example using Python 3.12.13 or later in the supported 3.12 series.
 python3.12 --version
 python3.12 -m venv /absolute/path/to/runner-venv
-/absolute/path/to/runner-venv/bin/python -m pip install 'snapshot-runner==2.6.0'
+/absolute/path/to/runner-venv/bin/python -m pip install 'snapshot-runner==2.7.0'
 export PATH="/absolute/path/to/runner-venv/bin:$PATH"
 ```
 
@@ -52,8 +52,8 @@ For reviewed source installation, use `pip install .` in a separate virtual envi
 For local development (`uv sync --frozen`, `just check`) and building a wheel (`uv build`),
 see Development and releases below.
 
-`snapshot-runner --help` lists the four collection subcommands and the targeted evidence
-reader. The main command and each subcommand support `--help` and `--version`:
+`snapshot-runner --help` lists the four collection subcommands, the targeted evidence
+reader, and the snapshot store pruner. The main command and each subcommand support `--help` and `--version`:
 
 | Command | Evidence collected |
 | --- | --- |
@@ -62,6 +62,7 @@ reader. The main command and each subcommand support `--help` and `--version`:
 | `snapshot-runner branch-review` | Sealed base/HEAD identities, commits and changes relative to a local base |
 | `snapshot-runner test-triage` | An existing repository-relative UTF-8 test log, with explicit size limits |
 | `snapshot-runner read` | Targeted evidence from an existing snapshot, without re-running Git |
+| `snapshot-runner prune` | Safely prune old unreferenced snapshots from the private local snapshot store |
 
 Each subcommand's help lists its supported options. `branch-review` requires a `BASE`
 local branch or tag; `test-triage` requires a repository-relative `TEST_LOG`.
@@ -189,27 +190,27 @@ standard unified evidence. Ordinary staged and unstaged paths are still collecte
 
 ## Public interface and contract
 
-`snapshot-runner` is the only console script. Its five subcommands — four collection
-commands plus the targeted evidence reader — are the complete public command surface;
-there are no alias executables. The public CLI contract is recorded in
-`tool_cli_contract.json` at `contract_version` **4**: commands are named by subcommand,
+`snapshot-runner` is the only console script. Its six subcommands — four collection
+commands, the targeted evidence reader, and the snapshot-store pruner — are the complete public
+command surface; there are no alias executables. The public CLI contract is recorded in
+`tool_cli_contract.json` at `contract_version` **5**: commands are named by subcommand,
 `primary_command.subcommands` lists them, and `command_invocation` records the
 `snapshot-runner <command>` form.
 
 Snapshot schema **2**, summary schema **2**, evidence-read schema **1** and security
-epoch **6** define the current evidence contract. Release notes for interface changes are in
+epoch **7** define the current evidence contract. Release notes for interface changes are in
 [CHANGELOG.md](CHANGELOG.md).
 
 Compatibility policy for the 2.x series:
 
 - Keep the documented public command names, option meanings, exit codes and JSON field
-  meanings compatible. Exit **0** means collection or reading succeeded; exit **2** means
+  meanings compatible. Exit **0** means collection, reading, or pruning succeeded; exit **2** means
   an argument or workflow failure. A successful collection may still contain partial evidence.
   Consumers must inspect completeness fields and must not parse human-readable error messages.
 - Consumers of summary and evidence-read JSON should ignore unknown object fields and
   check the schema version. Removing fields or changing their meaning requires a new
   incompatible contract; exact snapshot-format validators remain pinned to their own era.
-- Keep registered schema-2 artifacts from security epochs 4, 5, and 6 readable throughout 2.x.
+- Keep registered schema-2 artifacts from security epochs 4, 5, 6, and 7 readable throughout 2.x.
   Removing a supported era requires advance deprecation notes and a major release. An urgent
   security refusal must identify the affected cases explicitly in release notes. Stored
   bytes are never silently migrated or rewritten.
@@ -233,7 +234,7 @@ installation. Without an explicit value, Runner uses the same requirements for t
 A successful collection atomically publishes a directory under
 `$XDG_STATE_HOME/snapshot-runner/snapshots/<snapshot-id>/`:
 
-- `snapshot.json`: canonical full evidence, schema **2**, security epoch **6**.
+- `snapshot.json`: canonical full evidence, schema **2**, security epoch **7**.
 - `preview.txt`: short human-readable summary.
 - `meta.json`: sizes and SHA-256 hashes used to verify the artifacts.
 
@@ -285,20 +286,38 @@ retains both native delete/add patch sections; link text is evidence and link ta
 never followed. The unavailable symlink file context remains an explicit gap. Bounded CSV
 and attribute-file restrictions still apply. Summary `diff_files` counts patch sections
 across the captured channels, so one path can contribute more than one section.
-`repo-status` accepts YAML path metadata without collecting YAML bodies;
-content collection in `diff-audit`, `branch-review` and `test-triage` still refuses YAML.
+Non-secret repository YAML files (`.yaml`, `.yml`, such as CI workflows and ordinary config)
+are audited through the same secret-redaction scanner starting in security epoch 7; `.env`
+files and secret-named YAML files (`secrets.yml`, `credentials.yml`, `vault.yml`, and variants)
+remain classified as sensitive and refused. Historical artifacts written under frozen epochs 4,
+5, and 6 continue to verify under their original YAML refusal rules.
 
 Changed JPEG, PNG, and WebP files yield type, size, and SHA-256 evidence, not image bytes
 or visual interpretation. Unknown extensionless files have a bounded UTF-8 fallback;
 arbitrary binary and unknown-extension contents are not collected as text.
-Ordinary source text includes Python, JavaScript/TypeScript, C/C++, Go, Rust, Java,
-Kotlin, Swift, Ruby and C#. CSV versions used in `diff-audit` and `branch-review`, and
+Ordinary source text includes Python, JavaScript/TypeScript, C/C++, Go (with `.mod`/`.sum`),
+Rust, Java, Kotlin, Swift, Ruby, C#, Astro/Vue/Svelte/SCSS/Less/SVG, PowerShell/Zsh/Fish,
+systemd/Polkit/nftables units, non-secret YAML, JSONC, Lark, patches, Protobuf and CMake/Make
+files. CSV versions used in `diff-audit` and `branch-review`, and
 `.gitattributes` versions, must be complete UTF-8 text of at most 64 KiB, validated from
 the actual HEAD/index/worktree or sealed branch blobs. Omitted ordinary CSV file
 context remains an explicit evidence gap; branch deletions retain metadata-only evidence.
 Deleted files do not need a live replacement. Common source suffixes are
 registered in producer epoch 5; expanded auth-header/HTML-tag/token redaction is registered in
-producer epoch 6; stored epoch-4 and epoch-5 artifacts retain their original frozen rules.
+producer epoch 6; non-secret YAML and expanded source/config suffixes are registered in
+producer epoch 7; stored epoch-4, epoch-5 and epoch-6 artifacts retain their original frozen rules.
+
+To keep `$XDG_STATE_HOME/snapshot-runner/snapshots/` bounded over time without removing
+referenced or recent artifacts, use `snapshot-runner prune`:
+
+```bash
+snapshot-runner prune --older-than-days 14 --keep-latest 50 --keep-file /path/to/keep-ids.txt --dry-run
+snapshot-runner prune --older-than-days 14 --keep-latest 50 --keep-file /path/to/keep-ids.txt
+```
+
+`prune` inspects only the validated private `snapshot-runner/snapshots/` store, skips `.staging-*`
+and any unexpected or symlinked entries, and removes only aged 64-hex snapshot directories not
+protected by `--older-than-days`, `--keep-latest`, `--keep`, or `--keep-file`.
 
 Workspace diffs share the snapshot's 8 MiB budget, including JSON escaping. Batching
 and recursive splits stop when the remaining quota cannot carry a complete diff;

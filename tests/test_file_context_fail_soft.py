@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from snapshot_runner import artifact, collect, git, security
+from snapshot_runner import artifact, collect, git, security, verifiers
 from snapshot_runner import cli as runner
 
 GIT = "/usr/bin/git"
@@ -241,21 +241,30 @@ def test_only_the_allowed_body_refusals_become_gaps(
 
 
 def test_yaml_and_sensitive_path_hard_refusals_are_unchanged(repository: Path) -> None:
-    """Requirement: the existing refusal semantics around file contexts stay as they were."""
+    """Requirement: sensitive paths remain refused while benign YAML is scanned in epoch 7."""
     repo = repository
     (repo / "secret.pem").write_text("material\n", encoding="utf-8")
     (repo / "baseline.py").write_text("BASELINE = 2\n", encoding="utf-8")
+    (repo / "secrets.yaml").write_text("token: secret\n", encoding="utf-8")
 
     envelope = _envelope(_prepare(repo))
-    assert _refused(envelope)["secret.pem"]["reason"] == (
-        "sensitive or unsupported file type refused"
-    )
+    refused = _refused(envelope)
+    assert refused["secret.pem"]["reason"] == "sensitive or unsupported file type refused"
+    assert refused["secrets.yaml"]["reason"] == "sensitive or unsupported file type refused"
 
     yaml_repo = repo / "sub"
     yaml_repo.mkdir()
     (yaml_repo / "rules.yaml").write_text("key: value\n", encoding="utf-8")
-    with pytest.raises(runner.RunnerError, match="yaml_content_refused"):
-        _prepare(repo)
+    benign_envelope = _envelope(_prepare(repo))
+    assert any(
+        entry["path"] == "sub/rules.yaml" and entry["content"] == "key: value\n"
+        for entry in benign_envelope["data"]["file_context"]
+    )
+    with (
+        security.era_rules(verifiers.verifier_for(2, 6).rules),
+        pytest.raises(security.SecurityError, match=f"^{security.YAML_CONTENT_REFUSED}$"),
+    ):
+        security.classify_scan_mode("sub/rules.yaml")
 
 
 def test_read_path_attributes_the_refused_file(repository: Path) -> None:
