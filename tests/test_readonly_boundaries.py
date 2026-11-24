@@ -2842,6 +2842,25 @@ def _commit_test_changes(repo: Path, message: str) -> str:
     return _test_git_output(repo, "rev-parse", "HEAD")
 
 
+def test_branch_review_collects_complete_large_single_markdown_edit(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _run_test_git(repo, "init", "--quiet")
+    doc = repo / "ledger.md"
+    body = "bounded evidence row\n" * 16000
+    doc.write_text(body, encoding="utf-8")
+    base = _commit_test_changes(repo, "original ledger")
+    _run_test_git(repo, "branch", "ledger-base", base)
+    updated = body + "corrected link\n"
+    doc.write_text(updated, encoding="utf-8")
+    _commit_test_changes(repo, "correct link")
+
+    snapshot = collect.collect_branch_review(repo, "ledger-base", *_collector_deps(repo))
+
+    assert snapshot.data["file_context"] == [{"path": "ledger.md", "content": updated}]
+    assert snapshot.as_envelope()["evidence_gaps"] == []
+
+
 def test_branch_review_dirty_worktree_never_changes_sealed_blob_context(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _base_commit, target_head = _initialize_branch_review_test_repo(repo)

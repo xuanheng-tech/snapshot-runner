@@ -5,6 +5,10 @@ public source baseline; it was not tagged or published to PyPI.
 
 ## Unreleased
 
+## 2.7.1 - 2026-11-25
+
+- Collect the complete sealed target Markdown blob up to 512 KiB in single-file branch reviews. Oversized blobs retain the ordinary bounded preview and evidence gap.
+
 ## 2.7.0 - 2026-11-21
 
 - Changed: bumped public CLI contract to `contract_version` **5** (adding `local_mutation` for

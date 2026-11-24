@@ -59,6 +59,7 @@ from .security import (
 
 MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024
 MAX_FILE_BYTES = 256 * 1024
+SINGLE_MARKDOWN_BLOB_BYTES = 512 * 1024
 UV_LOCK_MAX_FILE_BYTES = 4 * 1024 * 1024
 MAX_TEST_LOG_BYTES = 2 * 1024 * 1024
 MAX_TEST_LOG_SCAN_BYTES = 16 * 1024 * 1024
@@ -1793,11 +1794,15 @@ def _add_branch_blob_context(
         if entry.mode not in {"100644", "100755"}:
             builder.gap("file_refused", relative, "unsupported Git tree mode refused")
             continue
-        content, omitted, reason = _read_blob_prefix(
-            git,
-            entry,
-            _file_context_limit(relative),
-        )
+        maximum = _file_context_limit(relative)
+        if (
+            len(changes) == 1
+            and PurePosixPath(relative).suffix.lower() == ".md"
+            and entry.size is not None
+            and maximum < entry.size <= SINGLE_MARKDOWN_BLOB_BYTES
+        ):
+            maximum = entry.size
+        content, omitted, reason = _read_blob_prefix(git, entry, maximum)
         if reason is not None:
             builder.gap("file_refused", relative, reason, omitted or None)
             continue
